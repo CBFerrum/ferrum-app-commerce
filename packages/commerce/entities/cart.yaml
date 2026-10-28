@@ -1,0 +1,86 @@
+- name: ShoppingCartItem
+  label: Shopping Cart Item
+  kind: child
+  fields:
+    - {name: item, type: link, to: Item, required: true, read_only: true, in_list: true}
+    - {name: website_item, type: link, to: WebsiteItem, read_only: true, on_delete: set_null}
+    - {name: item_name, type: data, fetch_from: item.item_name, read_only: true, in_list: true}
+    - {name: uom, type: link, to: Uom, fetch_from: item.stock_uom, read_only: true}
+    - {name: qty, type: decimal, required: true, min: "0.000000001", in_list: true}
+    - {name: price_list_rate, type: currency, currency: parent.currency, read_only: true}
+    - {name: discount_percent, type: percent, read_only: true}
+    - {name: rate, type: currency, currency: parent.currency, read_only: true, in_list: true}
+    - {name: amount, type: currency, currency: parent.currency, read_only: true, in_list: true}
+    - {name: net_amount, type: currency, currency: parent.currency, read_only: true}
+    - {name: base_net_amount, type: currency, read_only: true}
+    - {name: item_tax_rates, type: json, read_only: true}
+    - {name: weight_kg, type: decimal, read_only: true}
+    - {name: is_shipping, type: check, read_only: true, description: The shipping charge line}
+
+- name: ShoppingCart
+  label: Shopping Cart
+  kind: document
+  module: commerce
+  company_scoped: true
+  title_field: email
+  search_fields: [contact_name]
+  fields:
+    - {name: status, type: select, options: [Open, Abandoned, Ordered, Expired], default: Open, read_only: true, in_list: true, in_filter: true}
+    - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
+    - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
+    - {name: user_email, type: email, read_only: true, label: Signed-in User}
+    - {name: email, type: email, in_list: true}
+    - {name: phone, type: phone}
+    - {name: contact_name, type: data, max_length: 140, in_list: true}
+    - {name: ship_address_line1, type: data, max_length: 200, label: Shipping Address Line 1}
+    - {name: ship_address_line2, type: data, max_length: 200, label: Shipping Address Line 2}
+    - {name: ship_city, type: data, max_length: 100, label: Shipping City}
+    - {name: ship_state, type: data, max_length: 100, label: Shipping State}
+    - {name: ship_postal_code, type: data, max_length: 20, label: Shipping Postal Code}
+    - {name: ship_country, type: data, max_length: 2, label: Shipping Country, in_filter: true}
+    - {name: billing_same_as_shipping, type: check, default: true}
+    - {name: bill_address_line1, type: data, max_length: 200, label: Billing Address Line 1}
+    - {name: bill_address_line2, type: data, max_length: 200, label: Billing Address Line 2}
+    - {name: bill_city, type: data, max_length: 100, label: Billing City}
+    - {name: bill_state, type: data, max_length: 100, label: Billing State}
+    - {name: bill_postal_code, type: data, max_length: 20, label: Billing Postal Code}
+    - {name: bill_country, type: data, max_length: 2, label: Billing Country}
+    - {name: notes, type: text, max_length: 2000, label: Order Notes}
+    - {name: posting_date, type: date, read_only: true, label: Priced On}
+    - {name: currency, type: link, to: Currency, read_only: true}
+    - {name: conversion_rate, type: decimal, read_only: true}
+    - {name: price_list, type: link, to: PriceList, read_only: true}
+    - {name: tax_template, type: link, to: TaxTemplate, read_only: true}
+    - {name: items, type: table, of: ShoppingCartItem}
+    - {name: taxes, type: table, of: TaxRow}
+    - {name: coupon_code, type: data, read_only: true, max_length: 64, in_filter: true}
+    - {name: coupon, type: link, to: CouponCode, read_only: true, on_delete: set_null}
+    - {name: coupon_rule, type: link, to: PricingRule, read_only: true, on_delete: set_null, description: Pricing rule unlocked by the coupon}
+    - {name: shipping_rule, type: link, to: ShippingRule, read_only: true, on_delete: set_null}
+    - {name: shipping_amount, type: currency, currency: currency, read_only: true}
+    - {name: total_weight_kg, type: decimal, read_only: true}
+    - {name: item_count, type: decimal, read_only: true, in_list: true}
+    - {name: total, type: currency, currency: currency, read_only: true}
+    - {name: total_discount, type: currency, currency: currency, read_only: true}
+    - {name: net_total, type: currency, currency: currency, read_only: true}
+    - {name: total_taxes, type: currency, currency: currency, read_only: true}
+    - {name: grand_total, type: currency, currency: currency, read_only: true, in_list: true}
+    - {name: rounding_adjustment, type: currency, currency: currency, read_only: true}
+    - {name: rounded_total, type: currency, currency: currency, read_only: true}
+    - {name: base_grand_total, type: currency, read_only: true}
+    - {name: last_activity, type: datetime, read_only: true, in_list: true}
+    - {name: sales_order, type: link, to: SalesOrder, read_only: true, in_filter: true}
+    - {name: payment_request, type: link, to: PaymentRequest, read_only: true}
+    - {name: ordered_at, type: datetime, read_only: true}
+    - {name: token_hash, type: data, read_only: true, hidden: true, unique: true, max_length: 64}
+    - {name: checkout_key, type: data, read_only: true, hidden: true, max_length: 200}
+  indexes: [[status, last_activity]]
+  form:
+    - {label: Cart, fields: [status, company, customer, user_email, email, phone, contact_name, last_activity]}
+    - {label: Items, fields: [items]}
+    - {label: Shipping Address, collapsible: true, fields: [ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, ship_country]}
+    - {label: Billing Address, collapsible: true, fields: [billing_same_as_shipping, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, bill_country]}
+    - {label: Pricing, fields: [posting_date, currency, conversion_rate, price_list, tax_template, taxes, coupon_code, coupon, coupon_rule, shipping_rule, shipping_amount, total_weight_kg]}
+    - {label: Totals, fields: [item_count, total, total_discount, net_total, total_taxes, grand_total, rounding_adjustment, rounded_total, base_grand_total]}
+    - {label: Order, fields: [sales_order, payment_request, ordered_at, notes]}
+  list: {columns: [email, status, item_count, grand_total, last_activity], sort: last_activity desc}

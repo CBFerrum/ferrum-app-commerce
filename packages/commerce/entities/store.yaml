@@ -1,0 +1,58 @@
+- name: StoreWarehouse
+  label: Store Warehouse
+  kind: child
+  fields:
+    - {name: warehouse, type: link, to: Warehouse, required: true, link_filters: {is_group: false}, in_list: true}
+
+- name: StoreCountry
+  label: Store Country
+  kind: child
+  fields:
+    - {name: country_code, type: data, required: true, max_length: 2, label: Country Code, in_list: true, description: "ISO 3166-1 alpha-2, e.g. IN or DE"}
+    - {name: country_name, type: data, in_list: true}
+
+- name: StorePaymentMethod
+  label: Store Payment Method
+  kind: child
+  fields:
+    - {name: gateway, type: data, required: true, max_length: 40, in_list: true, description: "A payment gateway plugin's name, or Manual or Cash on Delivery"}
+    - {name: label, type: data, required: true, max_length: 100, in_list: true, description: Shown to customers at checkout}
+    - {name: enabled, type: check, default: true, in_list: true}
+    - {name: payment_account, type: link, to: Account, link_filters: {is_group: false}, description: "Bank or cash account the payments are booked to (empty: the company's default bank account)"}
+    - {name: expiry_minutes, type: int, default: 60, min: 0, max: 525600, in_list: true, description: "Unpaid payment requests expire after this many minutes; 0 = never"}
+    - {name: instructions, type: text, max_length: 2000, description: "Shown to the customer after checkout, e.g. bank transfer details"}
+
+- name: StoreSettings
+  label: Store Settings
+  label_plural: Store Settings
+  kind: settings
+  module: commerce
+  title_field: store_name
+  fields:
+    - {name: store_name, type: data, required: true, max_length: 140}
+    - {name: company, type: link, to: Company, required: true}
+    - {name: currency, type: link, to: Currency, required: true, description: "Currency of the storefront; prices come from the price list (read as company-currency prices) and are converted at the exchange rate"}
+    - {name: price_list, type: link, to: PriceList, required: true, link_filters: {selling: true}}
+    - {name: tax_template, type: link, to: TaxTemplate, description: "Sales taxes of web carts and orders (empty: the company's default sales template)"}
+    - {name: display_prices_with_tax, type: check, description: Catalog prices include tax}
+    - {name: warehouses, type: table, of: StoreWarehouse, description: "Warehouses whose stock can be sold online (empty: every warehouse of the company)"}
+    - {name: fulfilment_warehouse, type: link, to: Warehouse, required: true, link_filters: {is_group: false}, description: Warehouse set on web order lines}
+    - {name: enforce_stock, type: check, default: true, description: Refuse quantities beyond the available stock of stock items}
+    - {name: show_stock_quantity, type: check, description: "Show available quantities to customers (otherwise only in stock / out of stock)"}
+    - {name: allow_guest_checkout, type: check, default: true}
+    - {name: default_customer_group, type: link, to: CustomerGroup, link_filters: {is_group: false}, description: Group of customers created by web checkouts}
+    - {name: shipping_item, type: link, to: Item, description: "Non-stock service item that carries shipping charges on carts, orders and invoices"}
+    - {name: allowed_countries, type: table, of: StoreCountry, description: "Countries the store ships to (empty: every country)"}
+    - {name: payment_methods, type: table, of: StorePaymentMethod}
+    - {name: terms_url, type: url, label: Terms Page, description: Customers must accept these terms at checkout}
+    - {name: store_url, type: url, label: Storefront URL, description: Payment return addresses must start with it}
+    - {name: max_qty_per_line, type: decimal, default: 100, min: "1", label: Maximum Quantity per Item}
+    - {name: max_cart_lines, type: int, default: 50, min: 1, max: 500, label: Maximum Items per Cart}
+    - {name: abandon_after_hours, type: int, default: 24, min: 1, max: 8760, label: Carts Count as Abandoned After (Hours)}
+    - {name: cart_expiry_days, type: int, default: 30, min: 1, max: 3650, label: Carts Expire After (Days)}
+    - {name: cancel_unpaid_orders, type: check, default: true, description: "Cancel a web order when its payment request expires unpaid, releasing its reserved stock"}
+  form:
+    - {label: Store, fields: [store_name, company, currency, price_list, tax_template, display_prices_with_tax, store_url, terms_url]}
+    - {label: Stock, fields: [warehouses, fulfilment_warehouse, enforce_stock, show_stock_quantity]}
+    - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders]}
+    - {label: Limits, collapsible: true, fields: [max_qty_per_line, max_cart_lines, abandon_after_hours, cart_expiry_days]}

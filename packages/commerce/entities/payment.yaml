@@ -1,0 +1,36 @@
+- name: PaymentRequest
+  label: Payment Request
+  kind: document
+  module: commerce
+  submittable: true
+  company_scoped: true
+  title_field: order_number
+  numbering: {template: "PAYREQ-{YYYY}-{seq:5}"}
+  description: "A request to pay a web order. Gateway plugins subscribe to PaymentRequest.submitted, write payment_url with set_gateway_details and confirm with mark_paid or mark_failed."
+  search_fields: [gateway_reference]
+  fields:
+    - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
+    - {name: sales_order, type: link, to: SalesOrder, required: true, read_only: true, in_filter: true}
+    - {name: order_number, type: data, read_only: true, in_list: true}
+    - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
+    - {name: payer_name, type: data, read_only: true}
+    - {name: payer_email, type: email, read_only: true}
+    - {name: gateway, type: data, required: true, read_only: true, max_length: 40, in_list: true, in_filter: true}
+    - {name: currency, type: link, to: Currency, required: true, read_only: true}
+    - {name: currency_code, type: data, read_only: true, max_length: 3}
+    - {name: amount, type: currency, currency: currency, required: true, read_only: true, in_list: true}
+    - {name: status, type: select, options: [Initiated, Paid, Failed, Cancelled, Expired], default: Initiated, read_only: true, in_list: true, in_filter: true}
+    - {name: expires_at, type: datetime, read_only: true}
+    - {name: payment_url, type: url, read_only: true, max_length: 2000}
+    - {name: gateway_reference, type: data, read_only: true, max_length: 200}
+    - {name: return_url, type: url, read_only: true, max_length: 2000}
+    - {name: description, type: data, read_only: true, max_length: 200}
+    - {name: paid_at, type: datetime, read_only: true}
+    - {name: payment_entry, type: link, to: PaymentEntry, read_only: true}
+    - {name: failure_reason, type: text, read_only: true, max_length: 2000}
+  indexes: [[status, expires_at]]
+  actions:
+    - {name: set_gateway_details, label: Set Gateway Details, docstatus: [1], permission: write}
+    - {name: mark_paid, label: Mark Paid, docstatus: [1], permission: write, confirm: "Record the payment of this request and book it?"}
+    - {name: mark_failed, label: Mark Failed, docstatus: [1], permission: write}
+  list: {columns: [number, order_number, gateway, amount, status], sort: created_at desc}
