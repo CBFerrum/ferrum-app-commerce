@@ -2,7 +2,7 @@ id: commerce
 name: Commerce
 version: 0.1.0
 publisher: cbferrum
-summary: Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins
+summary: "Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins"
 description: README.md
 categories: [commerce, sales]
 license: AGPL-3.0-only
