@@ -1,0 +1,45 @@
+[package]
+name = "ferrum-app-commerce"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Online store: catalog, website items and categories, carts, guest and customer checkout, web orders, payment requests for gateway plugins, shipping and coupons."
+repository = "https://github.com/CBFerrum/ferrum-app-commerce"
+build = "build.rs"
+
+[dependencies]
+ferrum-kernel = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
+ferrum-meta = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
+ferrum-domain = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
+ferrum-calc = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1.43", features = ["serde-with-str", "maths"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "rust_decimal", "json", "migrate", "macros"] }
+tracing = "0.1"
+uuid = { version = "1.10", features = ["v4", "v7", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+rand = "0.9"
+base64 = "0.22"
+
+[dev-dependencies]
+# Checkout creates contacts and addresses when the CRM app is installed: tested with the real app.
+ferrum-app-crm = { git = "https://github.com/CBFerrum/ferrum-app-crm", branch = "main" }
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+[lints.clippy]
+# Deliberate patterns shared with the platform: sqlx row tuples, index-based maths, engine entry points.
+type_complexity = "allow"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+large_enum_variant = "allow"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

@@ -1,0 +1,90 @@
+- name: ItemCategory
+  label: Item Category
+  label_plural: Item Categories
+  kind: master
+  module: commerce
+  title_field: category_name
+  search_fields: [slug]
+  fields:
+    - {name: category_name, type: data, required: true, max_length: 140, in_list: true}
+    - {name: slug, type: data, unique: true, max_length: 140, in_list: true, description: "Name in the storefront address; made from the name when empty"}
+    - {name: parent_category, type: link, to: ItemCategory, in_list: true, in_filter: true}
+    - {name: published, type: check, default: true, in_list: true, in_filter: true}
+    - {name: sort_order, type: int, default: 0}
+    - {name: image, type: attach}
+    - {name: description, type: markdown, max_length: 20000}
+    - {name: seo_title, type: data, max_length: 200, label: SEO Title}
+    - {name: seo_description, type: data, max_length: 500, label: SEO Description}
+  list: {columns: [category_name, slug, parent_category, published], sort: category_name asc}
+
+- name: WebsiteItemImage
+  label: Website Item Image
+  kind: child
+  fields:
+    - {name: image, type: attach, required: true, in_list: true}
+    - {name: alt_text, type: data, max_length: 200, in_list: true}
+
+- name: WebsiteItemCategory
+  label: Website Item Category
+  kind: child
+  fields:
+    - {name: category, type: link, to: ItemCategory, required: true, in_list: true, on_delete: cascade}
+
+- name: WebsiteItemRelated
+  label: Related Website Item
+  kind: child
+  fields:
+    - {name: website_item, type: link, to: WebsiteItem, required: true, in_list: true, on_delete: cascade}
+
+- name: WebsiteItem
+  label: Website Item
+  kind: master
+  module: commerce
+  title_field: title
+  search_fields: [slug, item_code]
+  fields:
+    - {name: item, type: link, to: Item, required: true, unique: true, in_list: true, in_filter: true}
+    - {name: item_code, type: data, fetch_from: item.item_code, read_only: true}
+    - {name: title, type: data, max_length: 200, in_list: true, description: "Name shown in the store (default: the item name)"}
+    - {name: slug, type: data, unique: true, max_length: 140, in_list: true, description: "Name in the storefront address; made from the title when empty"}
+    - {name: published, type: check, in_list: true, in_filter: true}
+    - {name: ranking, type: int, default: 0, in_list: true, description: Higher ranks list first}
+    - {name: short_description, type: text, max_length: 1000}
+    - {name: long_description, type: markdown, max_length: 100000}
+    - {name: images, type: table, of: WebsiteItemImage}
+    - {name: categories, type: table, of: WebsiteItemCategory}
+    - {name: related_items, type: table, of: WebsiteItemRelated}
+    - {name: weight_kg, type: decimal, min: "0", label: Shipping Weight per Unit (kg)}
+    - {name: max_qty, type: decimal, min: "0", label: Maximum Quantity per Order, description: "0 or empty: the store limit"}
+    - {name: seo_title, type: data, max_length: 200, label: SEO Title}
+    - {name: seo_description, type: data, max_length: 500, label: SEO Description}
+    - {name: rating_average, type: decimal, read_only: true, precision: 2, no_copy: true}
+    - {name: review_count, type: int, read_only: true, no_copy: true}
+  form:
+    - {label: Item, fields: [item, item_code, title, slug, published, ranking]}
+    - {label: Content, fields: [short_description, long_description, images]}
+    - {label: Placement, fields: [categories, related_items]}
+    - {label: Shipping and Limits, fields: [weight_kg, max_qty]}
+    - {label: SEO, collapsible: true, fields: [seo_title, seo_description]}
+    - {label: Reviews, collapsible: true, fields: [rating_average, review_count]}
+  list: {columns: [title, item, slug, published, ranking], sort: title asc}
+
+- name: ItemReview
+  label: Item Review
+  kind: master
+  module: commerce
+  title_field: title
+  fields:
+    - {name: website_item, type: link, to: WebsiteItem, required: true, in_list: true, in_filter: true, on_delete: cascade}
+    - {name: rating, type: int, required: true, min: 1, max: 5, in_list: true}
+    - {name: title, type: data, max_length: 200, in_list: true}
+    - {name: review, type: text, max_length: 5000}
+    - {name: reviewer_name, type: data, required: true, max_length: 100, in_list: true}
+    - {name: reviewer_email, type: email}
+    - {name: customer, type: link, to: Customer, in_filter: true}
+    - {name: status, type: select, options: [Pending, Approved, Rejected], default: Pending, in_list: true, in_filter: true}
+    - {name: verified_purchase, type: check, read_only: true, in_list: true, in_filter: true, description: The reviewer's email bought this item}
+    - {name: published_on, type: date, read_only: true}
+  rules:
+    - {name: reviewer_known, check: "doc.reviewer_email != null || doc.customer != null", message: "A review needs the reviewer's email or customer"}
+  list: {columns: [website_item, rating, title, reviewer_name, status, verified_purchase], sort: created_at desc}

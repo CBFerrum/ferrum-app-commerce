@@ -1,0 +1,30 @@
+- name: ShippingRuleBand
+  label: Shipping Rule Band
+  kind: child
+  fields:
+    - {name: from_value, type: decimal, default: 0, min: "0", in_list: true, description: Inclusive}
+    - {name: to_value, type: decimal, default: 0, min: "0", in_list: true, description: "Exclusive; 0 = no upper limit"}
+    - {name: amount, type: currency, required: true, min: "0", in_list: true, label: Shipping Charge}
+
+- name: ShippingRuleCountry
+  label: Shipping Rule Country
+  kind: child
+  fields:
+    - {name: country_code, type: data, required: true, max_length: 2, in_list: true, description: ISO 3166-1 alpha-2}
+
+- name: ShippingRule
+  label: Shipping Rule
+  kind: master
+  module: commerce
+  title_field: label
+  fields:
+    - {name: label, type: data, required: true, max_length: 140, in_list: true, description: "Shown to customers, e.g. Standard delivery (3-5 days)"}
+    - {name: enabled, type: check, default: true, in_list: true, in_filter: true}
+    - {name: basis, type: select, options: [Fixed, Order Amount, Total Weight], default: Fixed, required: true, in_list: true,
+       description: "Order Amount bands compare the cart subtotal (goods after discounts, before shipping) in the store currency; Total Weight bands compare kilograms"}
+    - {name: amount, type: currency, min: "0", label: Fixed Charge, visible_if: "doc.basis == 'Fixed'"}
+    - {name: bands, type: table, of: ShippingRuleBand, visible_if: "doc.basis != 'Fixed'", description: "Bands may not overlap; a cart outside every band cannot use this rule"}
+    - {name: countries, type: table, of: ShippingRuleCountry, description: "Empty: every country the store ships to"}
+    - {name: sort_order, type: int, default: 0}
+    - {name: description, type: text, max_length: 1000}
+  list: {columns: [label, basis, enabled, sort_order], sort: label asc}

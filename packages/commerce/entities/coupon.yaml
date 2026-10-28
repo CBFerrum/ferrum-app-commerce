@@ -1,0 +1,20 @@
+- name: CouponCode
+  label: Coupon Code
+  kind: master
+  module: commerce
+  title_field: code
+  description: "A code that unlocks a pricing rule in the web store. Saving a coupon gates its pricing rule on coupons (doc.coupon_rule), so the rule never applies to anything else."
+  fields:
+    - {name: code, type: data, required: true, unique: true, max_length: 64, in_list: true, description: "Letters, digits, '-' and '_'; matched without regard to case"}
+    - {name: pricing_rule, type: link, to: PricingRule, required: true, in_list: true}
+    - {name: description, type: data, max_length: 200}
+    - {name: valid_from, type: date, in_list: true}
+    - {name: valid_upto, type: date, in_list: true}
+    - {name: min_order_amount, type: currency, min: "0", description: "Goods total (list prices) the cart must reach; 0 = none"}
+    - {name: max_uses, type: int, default: 0, min: 0, description: "0 = unlimited"}
+    - {name: max_uses_per_customer, type: int, default: 0, min: 0, description: "Per customer or email address; 0 = unlimited"}
+    - {name: used_count, type: int, read_only: true, no_copy: true, in_list: true}
+    - {name: disabled, type: check, in_filter: true}
+  rules:
+    - {name: validity, check: "doc.valid_upto == null || doc.valid_from == null || doc.valid_upto >= doc.valid_from", message: "Valid up to is before valid from"}
+  list: {columns: [code, pricing_rule, valid_upto, used_count, disabled], sort: code asc}

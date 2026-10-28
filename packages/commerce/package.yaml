@@ -1,0 +1,87 @@
+package: commerce
+version: 0.1.0
+label: Commerce
+description: Online store on the same items, prices, stock and books - catalog with categories and reviews, carts, guest and customer checkout into sales orders, payment requests for gateway plugins, shipping rules and coupon codes.
+depends: [core, selling, inventory, accounting]
+field_prefix: commerce_
+
+overlays:
+  - entity: Customer
+    ops:
+      - {op: add_field, field: {name: commerce_guest, type: check, label: Web Guest, read_only: true, in_filter: true, description: "Created by a guest checkout with an unverified email address: never linked to a portal account"}}
+  - entity: SalesOrder
+    ops:
+      - {op: add_field, after: po_no, field: {name: commerce_web_order, type: check, label: Web Order, read_only: true, in_filter: true}}
+      - {op: add_field, after: commerce_web_order, field: {name: commerce_payment_status, type: select, label: Web Payment, read_only: true, in_filter: true,
+          options: [Pending, Paid, Failed, Expired, Cancelled, Not Required]}}
+      - {op: add_field, field: {name: commerce_contact_email, type: email, label: Contact Email, read_only: true}}
+      - {op: add_field, field: {name: commerce_contact_phone, type: phone, label: Contact Phone, read_only: true}}
+      - {op: add_field, field: {name: commerce_shipping_address, type: text, label: Ship To, read_only: true}}
+      - {op: add_field, field: {name: commerce_billing_address, type: text, label: Bill To, read_only: true}}
+      - {op: add_field, field: {name: commerce_shipping_rule, type: link, to: ShippingRule, label: Shipping Method, read_only: true}}
+      - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
+      - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
+  - entity: PaymentEntry
+    ops:
+      - {op: add_field, field: {name: commerce_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true}}
+      - {op: add_field, field: {name: commerce_payment_request, type: link, to: PaymentRequest, label: Payment Request, read_only: true}}
+
+modules:
+  - name: commerce
+    label: Commerce
+    icon: shopping-bag
+    order: 42
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, ShippingRule, CouponCode, SalesOrder,
+            report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
+
+roles:
+  - name: Website Manager
+    description: Runs the online store - settings, catalog, categories, review moderation, shipping, coupons and payment requests.
+    permissions:
+      - {entity: StoreSettings, read: true, write: true, create: true}
+      - {entity: WebsiteItem, read: true, write: true, create: true, delete: true, export: true, import: true}
+      - {entity: ItemCategory, read: true, write: true, create: true, delete: true, export: true, import: true}
+      - {entity: ItemReview, read: true, write: true, create: true, delete: true, export: true}
+      - {entity: ShippingRule, read: true, write: true, create: true, delete: true}
+      - {entity: CouponCode, read: true, write: true, create: true, delete: true, export: true, import: true}
+      - {entity: PricingRule, read: true, write: true, create: true}
+      - {entity: ShoppingCart, read: true, export: true}
+      - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: SalesOrder, read: true, export: true}
+      - {entity: Customer, read: true}
+      - {entity: CustomerGroup, read: true}
+      - {entity: Item, read: true}
+      - {entity: ItemGroup, read: true}
+      - {entity: ItemPrice, read: true}
+      - {entity: PriceList, read: true}
+      - {entity: Warehouse, read: true}
+      - {entity: Company, read: true}
+      - {entity: Currency, read: true}
+      - {entity: Uom, read: true}
+      - {entity: TaxTemplate, read: true}
+      - {entity: Account, read: true}
+  - name: Sales User
+    permissions:
+      - {entity: ShoppingCart, read: true}
+      - {entity: PaymentRequest, read: true}
+      - {entity: WebsiteItem, read: true}
+      - {entity: ItemCategory, read: true}
+      - {entity: ShippingRule, read: true}
+      - {entity: CouponCode, read: true}
+      - {entity: StoreSettings, read: true}
+  - name: Sales Manager
+    permissions:
+      - {entity: ShoppingCart, read: true, export: true}
+      - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: WebsiteItem, read: true}
+      - {entity: ItemCategory, read: true}
+      - {entity: ShippingRule, read: true}
+      - {entity: CouponCode, read: true}
+      - {entity: StoreSettings, read: true}
+  - name: Accounts Manager
+    permissions:
+      - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: StoreSettings, read: true}
+  - name: Accounts User
+    permissions:
+      - {entity: PaymentRequest, read: true, write: true}
