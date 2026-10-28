@@ -478,19 +478,10 @@ impl DocHook for AdvanceHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn ctx(email: &str) -> Ctx {
-        let schema = ferrum_meta::Schema {
-            version: 1,
-            entities: BTreeMap::new(),
-            packages: vec![],
-            modules: vec![],
-            roles: vec![],
-            warnings: vec![],
-            fy_start_month: 4,
-        };
+        let schema = ferrum_meta::Schema { version: 1, fy_start_month: 4, ..Default::default() };
         let mut c = Ctx::system(Uuid::nil(), Arc::new(schema));
         c.email = email.into();
         c
