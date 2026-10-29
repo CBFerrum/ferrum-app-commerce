@@ -380,4 +380,29 @@ mod tests {
         assert!(c.iter().any(|(op, a)| op == "http.fetch" && a["url"].as_str().unwrap().ends_with("cs_open/expire")));
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2);
     }
+
+    /// Against Stripe's test mode when STRIPE_TEST_SECRET_KEY (`sk_test_…`) is set: a real
+    /// Checkout Session for a payment request, expired again afterwards.
+    #[test]
+    fn stripe_test_mode() {
+        use gateway_kit::sandbox;
+        let Some(key) = sandbox::key("STRIPE_TEST_SECRET_KEY") else {
+            return eprintln!("skipped: set STRIPE_TEST_SECRET_KEY to test against Stripe's test mode");
+        };
+        assert!(key.starts_with("sk_test_") || key.starts_with("rk_test_"), "test-mode keys only");
+        let calls = sandbox::host();
+        let id = sandbox::fresh_id();
+        let mut req = submitted("https://example.com/orders/done");
+        req.0["config"]["secret_key"] = json!(key);
+        req.0["event"]["id"] = json!(id);
+        req.0["event"]["doc"]["id"] = json!(id);
+        assert_eq!(handle(req), json!({}));
+        let details = sandbox::gateway_details(&calls);
+        assert!(details["payment_url"].as_str().unwrap().starts_with("https://checkout.stripe.com/"), "{details}");
+        let session = details["gateway_reference"].as_str().unwrap();
+        let expired = sandbox::fetch(&json!({"method": "POST", "url": format!("{API}/checkout/sessions/{session}/expire"),
+            "headers": {"authorization": format!("Bearer {key}")}, "body": ""}))
+        .unwrap();
+        assert_eq!(expired["status"], json!(200), "{expired}");
+    }
 }

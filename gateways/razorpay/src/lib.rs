@@ -374,4 +374,33 @@ mod tests {
         assert!(c.iter().any(|(op, a)| op == "http.fetch" && a["url"].as_str().unwrap().ends_with("plink_2/cancel")), "a closed request's link is cancelled");
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2);
     }
+
+    /// Against Razorpay's test mode when RAZORPAY_TEST_KEY_ID (`rzp_test_…`) and
+    /// RAZORPAY_TEST_KEY_SECRET are set: a real Payment Link, cancelled again afterwards.
+    #[test]
+    fn razorpay_test_mode() {
+        use gateway_kit::sandbox;
+        let (Some(key_id), Some(secret)) = (sandbox::key("RAZORPAY_TEST_KEY_ID"), sandbox::key("RAZORPAY_TEST_KEY_SECRET")) else {
+            return eprintln!("skipped: set RAZORPAY_TEST_KEY_ID and RAZORPAY_TEST_KEY_SECRET to test against Razorpay's test mode");
+        };
+        assert!(key_id.starts_with("rzp_test_"), "test-mode keys only");
+        let calls = sandbox::host();
+        let id = sandbox::fresh_id();
+        let mut req = submitted("razorpay");
+        req.0["config"]["key_id"] = json!(key_id);
+        req.0["config"]["key_secret"] = json!(secret);
+        req.0["event"]["id"] = json!(id);
+        req.0["event"]["doc"]["id"] = json!(id);
+        req.0["event"]["doc"]["expires_at"] = json!(sandbox::utc_in(3600));
+        assert_eq!(handle(req), json!({}));
+        let created = calls.borrow().iter().find(|(op, a)| op == "http.fetch" && a["method"] == "POST").map(|(_, a)| a["body"].clone()).unwrap();
+        assert!(created["expire_by"].is_i64(), "the link expires with its request: {created}");
+        let details = sandbox::gateway_details(&calls);
+        assert!(details["payment_url"].as_str().unwrap().starts_with("https://rzp.io/"), "{details}");
+        let link = details["gateway_reference"].as_str().unwrap();
+        let cancelled = sandbox::fetch(&json!({"method": "POST", "url": format!("{API}/payment_links/{link}/cancel"),
+            "headers": {"authorization": basic(&key_id, &secret)}, "body": {}}))
+        .unwrap();
+        assert_eq!(cancelled["status"], json!(200), "{cancelled}");
+    }
 }

@@ -102,6 +102,90 @@ pub fn refused(e: &HostError) -> bool {
     matches!(e.code.as_str(), "validation_failed" | "invalid" | "conflict" | "forbidden" | "not_found")
 }
 
+/// For a gateway's tests against its provider's sandbox (native builds only): a host that makes
+/// `http.fetch` calls for real and reads the clock.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sandbox {
+    use serde_json::{Value, json};
+    use std::{cell::RefCell, rc::Rc};
+
+    /// The host calls made, in order: `(op, args)`.
+    pub type Calls = Rc<RefCell<Vec<(String, Value)>>>;
+
+    /// A test key from the environment (empty counts as unset).
+    pub fn key(name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+    }
+
+    /// Answers this thread's host calls: `http.fetch` for real, `time.now` from the clock, the
+    /// rest (records, the key-value store) with null. Returns the log of calls.
+    pub fn host() -> Calls {
+        let calls: Calls = Rc::default();
+        let seen = calls.clone();
+        ferrum_plugin_sdk::testing::host(move |op, args| {
+            seen.borrow_mut().push((op.to_string(), args.clone()));
+            match op {
+                "http.fetch" => fetch(args),
+                "time.now" => Ok(json!(utc_in(0))),
+                _ => Ok(Value::Null),
+            }
+        });
+        calls
+    }
+
+    /// `http.fetch` done for real, the plugin host's way (text bodies as they are, others as JSON).
+    pub fn fetch(args: &Value) -> Result<Value, (String, String)> {
+        let failed = |e: String| ("unavailable".to_string(), e);
+        let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30)).build().map_err(|e| failed(e.to_string()))?;
+        let method = reqwest::Method::from_bytes(args["method"].as_str().unwrap_or("GET").as_bytes()).map_err(|e| failed(e.to_string()))?;
+        let mut req = client.request(method, args["url"].as_str().unwrap_or_default());
+        for (k, v) in args["headers"].as_object().into_iter().flatten() {
+            if let Some(v) = v.as_str() {
+                req = req.header(k.as_str(), v);
+            }
+        }
+        req = match &args["body"] {
+            Value::String(t) => req.body(t.clone()),
+            Value::Null => req,
+            other => req.header("content-type", "application/json").body(other.to_string()),
+        };
+        let resp = req.send().map_err(|e| failed(e.to_string()))?;
+        let status = resp.status().as_u16();
+        Ok(json!({"status": status, "headers": {}, "body": resp.text().unwrap_or_default()}))
+    }
+
+    /// `secs` from now as Ferrum writes times, by the machine's clock.
+    pub fn utc_in(secs: i64) -> String {
+        let secs = secs + std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default();
+        let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+        // Civil date from days (H. Hinnant's algorithm).
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rest / 3600, rest % 3600 / 60, rest % 60)
+    }
+
+    /// A payment request id no earlier run used (providers remember idempotency keys and references).
+    pub fn fresh_id() -> String {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        format!("01a18a00-0000-7000-8000-{:012x}", n & 0xffff_ffff_ffff)
+    }
+
+    /// What the gateway handed to the payment request (`set_gateway_details`), or a panic listing
+    /// the calls it made instead.
+    pub fn gateway_details(calls: &Calls) -> Value {
+        let calls = calls.borrow();
+        calls.iter().find(|(op, a)| op == "data.action" && a["action"] == "set_gateway_details").map(|(_, a)| a["params"].clone()).unwrap_or_else(|| {
+            panic!("no checkout was handed over; host calls: {:?}", calls.iter().map(|(op, a)| format!("{op} {}", a["url"])).collect::<Vec<_>>())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +218,9 @@ mod tests {
         assert_eq!(unix("2000-02-29T23:59:59+00:00"), Some(951_868_799));
         assert_eq!(unix("2026-10-30T10:15:00+05:30"), None, "only UTC");
         assert_eq!(unix("yesterday"), None);
+        let now = sandbox::utc_in(0);
+        let back = unix(&now).unwrap();
+        let clock = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert!((clock - back).abs() <= 2, "{now}");
     }
 }
