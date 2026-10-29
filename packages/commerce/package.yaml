@@ -34,6 +34,11 @@ modules:
     items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
+# What a personal-data request exports and erases for a shopper (their email): their carts'
+# contact and address details, and their name on reviews (the review itself stays, unsigned).
+personal_data:
+  - {entity: ShoppingCart, match: email, erase: [email, user_email, phone, contact_name, ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, notes]}
+  - {entity: ItemReview, match: reviewer_email, erase: [reviewer_name, reviewer_email]}
 roles:
   - name: Website Manager
     description: Runs the online store - settings, catalog, categories, review moderation, shipping, coupons and payment requests.
