@@ -1,0 +1,11 @@
+{
+  "name": "paypal",
+  "version": "0.1.0",
+  "description": "PayPal for Ferrum Commerce: a PayPal order for each payment request, captured when the buyer approves it and confirmed by PayPal's verified webhook",
+  "config": {"client_id": "", "client_secret": "", "webhook_id": "", "environment": "live"},
+  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}],
+  "subscriptions": ["PaymentRequest.submitted"],
+  "routes": [{"path": "/webhook", "public": true}],
+  "schedules": [{"name": "reconcile", "every_seconds": 300}],
+  "http_hosts": ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+}

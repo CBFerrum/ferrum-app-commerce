@@ -190,11 +190,12 @@ email nobody verified.
 
 ## Payment gateways
 
-Two gateways come with this repository (`gateways/`), built as plugins on the contract below:
+Three gateways come with this repository (`gateways/`), built as plugins on the contract below:
 
 | Gateway | Shoppers pay on | Settings | Webhook events to send |
 |---|---|---|---|
 | `razorpay` | a Razorpay Payment Link (UPI, cards, netbanking, wallets) | `key_id`, `key_secret`, `webhook_secret` | `payment_link.paid`, `payment_link.expired`, `payment_link.cancelled` |
+| `paypal` | PayPal (PayPal balance, cards, Pay Later); captured when the buyer approves | `client_id`, `client_secret`, `webhook_id` (the webhook's ID at PayPal), `environment` (`live` or `sandbox`) | `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED` |
 | `stripe` | a Stripe Checkout page (cards, wallets, bank debits) | `secret_key`, `webhook_secret`, `success_url` (used when an order has no https return URL) | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired` |
 
 1. Build them: `cd gateways && cargo build --release --target wasm32-unknown-unknown`.
@@ -203,12 +204,13 @@ Two gateways come with this repository (`gateways/`), built as plugins on the co
    the settings later with `PUT /api/admin/plugins/{id}/config`.
 3. Point the provider's webhook at `https://<your host>/api/public/<workspace>/<gateway>/webhook`
    with the events above, and put its signing secret in `webhook_secret`.
-4. Add a payment method with that gateway (`razorpay` or `stripe`) to Store Settings.
+4. Add a payment method with that gateway (`razorpay`, `stripe` or `paypal`) to Store Settings.
 
-Each payment request becomes one link or checkout session, made once however often the event is
-delivered (Razorpay finds its link by the request's id; Stripe gets the request's id as the
-idempotency key). Webhooks are accepted only with a valid signature (Stripe's also no older than
-five minutes); a refusal to book (the request expired, the amount changed) answers the provider
+Each payment request becomes one link, checkout session or order, made once however often the
+event is delivered (Razorpay finds its link by the request's id; Stripe and PayPal get the
+request's id as the idempotency key, and PayPal captures an order once). Webhooks are accepted only
+with a valid signature (Stripe's also no older than five minutes; PayPal's checked through PayPal's
+own verification call); a refusal to book (the request expired, the amount changed) answers the provider
 and logs a warning to refund the payment, while a passing failure makes the provider retry.
 Every five minutes a schedule asks the provider about the requests still open, so a lost webhook
 delays a confirmation instead of losing it, and closes links and sessions whose request closed.
