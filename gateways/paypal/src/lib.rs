@@ -389,4 +389,23 @@ mod tests {
         assert!(c.iter().any(|(op, a)| op == "data.action" && a["action"] == "mark_paid" && a["params"]["gateway_reference"] == "CAP-1"));
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2, "booked, and forgotten for the request that is gone");
     }
+
+    /// Against PayPal's sandbox when PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET are
+    /// set: a real access token and order with its approval link (unapproved orders lapse).
+    #[test]
+    fn paypal_sandbox() {
+        use gateway_kit::sandbox;
+        let (Some(client), Some(secret)) = (sandbox::key("PAYPAL_SANDBOX_CLIENT_ID"), sandbox::key("PAYPAL_SANDBOX_CLIENT_SECRET")) else {
+            return eprintln!("skipped: set PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET to test against PayPal's sandbox");
+        };
+        let calls = sandbox::host();
+        let id = sandbox::fresh_id();
+        let req = Request(json!({"kind": "event", "topic": "PaymentRequest.submitted",
+            "config": {"client_id": client, "client_secret": secret, "webhook_id": "", "environment": "sandbox"},
+            "event": {"id": id, "doc": {"id": id, "gateway": "paypal", "status": "Initiated", "amount": "49.90", "currency_code": "USD",
+                                        "order_number": "SO-SANDBOX", "return_url": "https://example.com/orders/done"}}}));
+        assert_eq!(handle(req), json!({}));
+        let details = sandbox::gateway_details(&calls);
+        assert!(details["payment_url"].as_str().unwrap().starts_with("https://www.sandbox.paypal.com/"), "{details}");
+    }
 }

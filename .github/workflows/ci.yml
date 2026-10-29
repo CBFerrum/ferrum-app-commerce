@@ -63,5 +63,12 @@ jobs:
           workspaces: gateways
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The sandbox tests call the providers' test modes when these secrets are set and skip otherwise.
       - run: cargo test
+        env:
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+          RAZORPAY_TEST_KEY_ID: ${{ secrets.RAZORPAY_TEST_KEY_ID }}
+          RAZORPAY_TEST_KEY_SECRET: ${{ secrets.RAZORPAY_TEST_KEY_SECRET }}
+          PAYPAL_SANDBOX_CLIENT_ID: ${{ secrets.PAYPAL_SANDBOX_CLIENT_ID }}
+          PAYPAL_SANDBOX_CLIENT_SECRET: ${{ secrets.PAYPAL_SANDBOX_CLIENT_SECRET }}
       - run: cargo build --release --target wasm32-unknown-unknown
