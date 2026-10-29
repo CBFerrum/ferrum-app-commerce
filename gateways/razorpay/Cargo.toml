@@ -1,0 +1,13 @@
+[package]
+name = "razorpay"
+description = "Razorpay for Ferrum Commerce: Payment Links confirmed by Razorpay's signed webhooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ferrum-plugin-sdk = { workspace = true }
+gateway-kit = { workspace = true }

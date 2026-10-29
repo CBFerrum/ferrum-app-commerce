@@ -188,6 +188,31 @@ A signed-in user's customers are those whose email is the user's (on the custome
 contact of the customer when the CRM package is installed) — never guest customers, whose
 email nobody verified.
 
+## Payment gateways
+
+Two gateways come with this repository (`gateways/`), built as plugins on the contract below:
+
+| Gateway | Shoppers pay on | Settings | Webhook events to send |
+|---|---|---|---|
+| `razorpay` | a Razorpay Payment Link (UPI, cards, netbanking, wallets) | `key_id`, `key_secret`, `webhook_secret` | `payment_link.paid`, `payment_link.expired`, `payment_link.cancelled` |
+| `stripe` | a Stripe Checkout page (cards, wallets, bank debits) | `secret_key`, `webhook_secret`, `success_url` (used when an order has no https return URL) | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired` |
+
+1. Build them: `cd gateways && cargo build --release --target wasm32-unknown-unknown`.
+2. Install one as an administrator: `POST /api/admin/plugins` with its `manifest.json` (fill in
+   `config`) plus `wasm_base64` of `target/wasm32-unknown-unknown/release/<gateway>.wasm`; or set
+   the settings later with `PUT /api/admin/plugins/{id}/config`.
+3. Point the provider's webhook at `https://<your host>/api/public/<workspace>/<gateway>/webhook`
+   with the events above, and put its signing secret in `webhook_secret`.
+4. Add a payment method with that gateway (`razorpay` or `stripe`) to Store Settings.
+
+Each payment request becomes one link or checkout session, made once however often the event is
+delivered (Razorpay finds its link by the request's id; Stripe gets the request's id as the
+idempotency key). Webhooks are accepted only with a valid signature (Stripe's also no older than
+five minutes); a refusal to book (the request expired, the amount changed) answers the provider
+and logs a warning to refund the payment, while a passing failure makes the provider retry.
+Every five minutes a schedule asks the provider about the requests still open, so a lost webhook
+delays a confirmation instead of losing it, and closes links and sessions whose request closed.
+
 ## Gateway plugin contract
 
 A payment gateway is a Ferrum plugin (see `docs/plugins.md`). Its **name** is what store

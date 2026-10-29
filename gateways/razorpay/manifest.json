@@ -1,0 +1,11 @@
+{
+  "name": "razorpay",
+  "version": "0.1.0",
+  "description": "Razorpay for Ferrum Commerce: a Payment Link for each payment request, confirmed by Razorpay's signed webhook",
+  "config": {"key_id": "", "key_secret": "", "webhook_secret": ""},
+  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}],
+  "subscriptions": ["PaymentRequest.submitted"],
+  "routes": [{"path": "/webhook", "public": true}],
+  "schedules": [{"name": "reconcile", "every_seconds": 300}],
+  "http_hosts": ["api.razorpay.com"]
+}

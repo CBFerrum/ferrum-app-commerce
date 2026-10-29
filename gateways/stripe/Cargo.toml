@@ -1,0 +1,13 @@
+[package]
+name = "stripe"
+description = "Stripe for Ferrum Commerce: Checkout Sessions confirmed by Stripe's signed webhooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ferrum-plugin-sdk = { workspace = true }
+gateway-kit = { workspace = true }

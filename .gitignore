@@ -1,4 +1,5 @@
 /target
+/gateways/target
 .cargo/config.toml
 .DS_Store
 *.log
