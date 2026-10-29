@@ -3,7 +3,7 @@
 #   cargo build --release --target wasm32-unknown-unknown
 # Each target/wasm32-unknown-unknown/release/<gateway>.wasm installs with its manifest.json (see README.md).
 [workspace]
-members = ["kit", "razorpay", "stripe"]
+members = ["kit", "paypal", "razorpay", "stripe"]
 resolver = "3"
 
 [workspace.package]
