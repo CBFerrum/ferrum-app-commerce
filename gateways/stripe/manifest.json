@@ -1,0 +1,11 @@
+{
+  "name": "stripe",
+  "version": "0.1.0",
+  "description": "Stripe for Ferrum Commerce: a Checkout Session for each payment request, confirmed by Stripe's signed webhook",
+  "config": {"secret_key": "", "webhook_secret": "", "success_url": ""},
+  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}],
+  "subscriptions": ["PaymentRequest.submitted"],
+  "routes": [{"path": "/webhook", "public": true}],
+  "schedules": [{"name": "reconcile", "every_seconds": 300}],
+  "http_hosts": ["api.stripe.com"]
+}

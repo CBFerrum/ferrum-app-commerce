@@ -1,0 +1,22 @@
+# Payment gateway plugins for Ferrum Commerce (WebAssembly). Build:
+#   rustup target add wasm32-unknown-unknown
+#   cargo build --release --target wasm32-unknown-unknown
+# Each target/wasm32-unknown-unknown/release/<gateway>.wasm installs with its manifest.json (see README.md).
+[workspace]
+members = ["kit", "razorpay", "stripe"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+ferrum-plugin-sdk = { git = "https://github.com/CBFerrum/Ferrum" }
+gateway-kit = { path = "kit" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
