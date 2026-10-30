@@ -195,7 +195,7 @@ Three gateways come with this repository (`gateways/`), built as plugins on the 
 | Gateway | Shoppers pay on | Settings | Webhook events to send |
 |---|---|---|---|
 | `razorpay` | a Razorpay Payment Link (UPI, cards, netbanking, wallets) | `key_id`, `key_secret`, `webhook_secret` | `payment_link.paid`, `payment_link.expired`, `payment_link.cancelled` |
-| `paypal` | PayPal (PayPal balance, cards, Pay Later); captured when the buyer approves | `client_id`, `client_secret`, `webhook_id` (the webhook's ID at PayPal), `environment` (`live` or `sandbox`) | `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED` |
+| `paypal` | PayPal (PayPal balance, cards, Pay Later); captured when the buyer approves | `client_id`, `client_secret`, `webhook_id` (the webhook's ID at PayPal: letters and digits), `environment` (`live` or `sandbox`) | `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED` |
 | `stripe` | a Stripe Checkout page (cards, wallets, bank debits) | `secret_key`, `webhook_secret`, `success_url` (used when an order has no https return URL) | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired` |
 
 1. Build them: `cd gateways && cargo build --release --target wasm32-unknown-unknown`.
@@ -215,9 +215,13 @@ and logs a warning to refund the payment, while a passing failure makes the prov
 Every five minutes a schedule asks the provider about the requests still open, so a lost webhook
 delays a confirmation instead of losing it, and closes links and sessions whose request closed.
 
-`cargo test` in `gateways/` runs each gateway against a scripted provider, and the Stripe gateway
-also against stripe-mock (`STRIPE_MOCK_URL`; CI starts it), Stripe's own mock built from its API
-definition, which refuses unknown or malformed parameters as Stripe does. With test-mode keys in
+`cargo test` in `gateways/` runs each gateway against a scripted provider. Two of them are also
+checked against their providers' own API definitions, which CI serves: Stripe's through stripe-mock
+(`STRIPE_MOCK_URL`), which refuses unknown or malformed parameters as Stripe does, and PayPal's
+orders and webhook definitions through a validating mock (`PAYPAL_ORDERS_MOCK`,
+`PAYPAL_WEBHOOKS_MOCK`), which refuses a request with a field of the wrong shape (that is how it
+caught webhook IDs pasted with spaces, now trimmed; an ID of another shape is reported instead of
+sent). With test-mode keys in
 the environment it also talks to the provider itself: `STRIPE_TEST_SECRET_KEY` (`sk_test_…`)
 creates and expires a real Checkout Session, `RAZORPAY_TEST_KEY_ID` (`rzp_test_…`) with
 `RAZORPAY_TEST_KEY_SECRET` creates and cancels a real Payment Link, and

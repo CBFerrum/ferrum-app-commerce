@@ -189,9 +189,14 @@ fn webhook(req: &Request) -> Value {
     if req.str("method") != "POST" {
         return respond(405, "POST only");
     }
-    let webhook_id = req.config("webhook_id").as_str().unwrap_or_default();
+    let webhook_id = req.config("webhook_id").as_str().unwrap_or_default().trim();
     if webhook_id.is_empty() {
         return respond(503, "set webhook_id in the paypal plugin's settings");
+    }
+    // PayPal refuses every verification for an ID of another shape: say so instead.
+    if !webhook_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        warn("paypal webhook: webhook_id in the plugin's settings is not a PayPal webhook ID (letters and digits only)");
+        return respond(503, "webhook_id in the paypal plugin's settings is not a PayPal webhook ID");
     }
     let Ok(event) = serde_json::from_str::<Value>(req.str("body")) else { return respond(400, "not JSON") };
     let h = req.get("headers");
@@ -297,7 +302,7 @@ mod tests {
     }
 
     fn config() -> Value {
-        json!({"client_id": "client-1", "client_secret": "secret", "webhook_id": "WH-1", "environment": "sandbox"})
+        json!({"client_id": "client-1", "client_secret": "secret", "webhook_id": "8PT597110X687430LKGECATA", "environment": "sandbox"})
     }
 
     fn url(a: &Value) -> &str {
@@ -337,6 +342,25 @@ mod tests {
     }
 
     #[test]
+    fn a_webhook_id_of_another_shape_is_reported_not_sent() {
+        let calls = host(|op, a| match op {
+            "http.fetch" if url(a).ends_with("verify-webhook-signature") => http(200, json!({"verification_status": "SUCCESS"})),
+            _ => Ok(Value::Null),
+        });
+        let denied = json!({"event_type": "PAYMENT.CAPTURE.DENIED", "resource": {"id": "C1", "custom_id": ID}});
+        let mut wrong = webhook_request(denied.clone());
+        wrong.0["config"]["webhook_id"] = json!("WH-1");
+        assert_eq!(handle(wrong)["status"], json!(503));
+        assert!(!calls.borrow().iter().any(|(op, _)| op == "http.fetch"), "nothing sent to PayPal");
+        let mut pasted = webhook_request(denied);
+        pasted.0["config"]["webhook_id"] = json!(" 8PT597110X687430LKGECATA\n");
+        assert_eq!(handle(pasted)["status"], json!(200));
+        let c = calls.borrow();
+        let verify = c.iter().find(|(op, a)| op == "http.fetch" && url(a).ends_with("verify-webhook-signature")).unwrap();
+        assert_eq!(verify.1["body"]["webhook_id"], json!("8PT597110X687430LKGECATA"), "pasted with spaces: trimmed");
+    }
+
+    #[test]
     fn an_approved_order_is_captured_and_booked_once_verified() {
         let approved = json!({"event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": "5O1", "status": "APPROVED", "purchase_units": [{"custom_id": ID, "reference_id": ID}]}});
         // Not verified: nothing happens.
@@ -359,7 +383,7 @@ mod tests {
         assert_eq!(handle(webhook_request(approved))["status"], json!(200));
         let c = calls.borrow();
         let verify = c.iter().find(|(op, a)| op == "http.fetch" && url(a).ends_with("verify-webhook-signature")).unwrap();
-        assert_eq!((&verify.1["body"]["webhook_id"], &verify.1["body"]["transmission_id"]), (&json!("WH-1"), &json!("t1")));
+        assert_eq!((&verify.1["body"]["webhook_id"], &verify.1["body"]["transmission_id"]), (&json!("8PT597110X687430LKGECATA"), &json!("t1")));
         let capture = c.iter().find(|(op, a)| op == "http.fetch" && url(a).ends_with("/capture")).unwrap();
         assert_eq!(capture.1["headers"]["paypal-request-id"], json!("ferrum-capture-5O1"), "one capture, however often PayPal tells");
         let paid = c.iter().find(|(op, _)| op == "data.action").unwrap();
@@ -407,5 +431,69 @@ mod tests {
         assert_eq!(handle(req), json!({}));
         let details = sandbox::gateway_details(&calls);
         assert!(details["payment_url"].as_str().unwrap().starts_with("https://www.sandbox.paypal.com/"), "{details}");
+    }
+
+    /// Against PayPal's own API definitions (paypal/paypal-rest-api-specifications) served by a
+    /// validating mock when PAYPAL_ORDERS_MOCK and PAYPAL_WEBHOOKS_MOCK are set (CI starts Prism with
+    /// them): the order, its capture, a look at it and a webhook's verification must each be a
+    /// request the definitions accept. The access token comes from the cache: the definitions
+    /// leave OAuth out.
+    #[test]
+    fn paypal_definitions_accept_every_call() {
+        use gateway_kit::sandbox;
+        let (Some(orders), Some(webhooks)) = (sandbox::key("PAYPAL_ORDERS_MOCK"), sandbox::key("PAYPAL_WEBHOOKS_MOCK")) else {
+            return eprintln!("skipped: set PAYPAL_ORDERS_MOCK and PAYPAL_WEBHOOKS_MOCK to check the calls against PayPal's API definitions");
+        };
+        const BASE: &str = "https://api-m.sandbox.paypal.com";
+        let calls: Calls = Rc::default();
+        let seen = calls.clone();
+        testing::host(move |op, args| {
+            seen.borrow_mut().push((op.to_string(), args.clone()));
+            match op {
+                "http.fetch" => {
+                    let path = url(args).strip_prefix(BASE).unwrap_or_default();
+                    let mock = match path {
+                        p if p.starts_with("/v2/checkout/") => &orders,
+                        p if p.starts_with("/v1/notifications/") => &webhooks,
+                        _ => return Err(("unexpected".into(), format!("no PayPal definition covers {}", url(args)))),
+                    };
+                    let mut sent = args.clone();
+                    sent["url"] = json!(format!("{}{path}", mock.trim_end_matches('/')));
+                    sandbox::fetch(&sent)
+                }
+                "kv.get" if args["key"] == "token" => Ok(json!({"value": "A21-mock", "until": 4_102_444_800_i64, "client": "client-1"})),
+                "data.get" => Ok(json!({"status": "Initiated"})),
+                "time.now" => Ok(json!(sandbox::utc_in(0))),
+                _ => Ok(Value::Null),
+            }
+        });
+        let submitted = || {
+            Request(json!({"kind": "event", "topic": "PaymentRequest.submitted", "config": config(), "event": {"id": ID, "doc": {
+                "id": ID, "gateway": "paypal", "status": "Initiated", "amount": "49.90", "currency_code": "USD", "order_number": "SO-9",
+                "return_url": "https://shop.example.test/done"}}}))
+        };
+        assert_eq!(handle(submitted()), json!({}));
+        let details = sandbox::gateway_details(&calls);
+        let order = details["gateway_reference"].as_str().unwrap().to_string();
+        assert!(!order.is_empty() && details["payment_url"].as_str().unwrap().starts_with("https://"), "{details}");
+        capture(&submitted(), ID, &order).unwrap();
+        check(&submitted(), ID, &order).unwrap();
+        let approved = json!({"id": "WH-1", "event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": order, "status": "APPROVED",
+            "purchase_units": [{"custom_id": ID, "reference_id": ID}]}});
+        assert_ne!(handle(webhook_request(approved))["status"], json!(500), "a webhook call was refused");
+        let sent: Vec<String> = calls
+            .borrow()
+            .iter()
+            .filter(|(op, _)| op == "http.fetch")
+            .map(|(_, a)| format!("{} {}", a["method"].as_str().unwrap_or_default(), url(a).trim_start_matches(BASE)))
+            .collect();
+        for call in [
+            "POST /v2/checkout/orders".to_string(),
+            format!("POST /v2/checkout/orders/{order}/capture"),
+            format!("GET /v2/checkout/orders/{order}"),
+            "POST /v1/notifications/verify-webhook-signature".to_string(),
+        ] {
+            assert!(sent.contains(&call), "{call} was not checked: {sent:?}");
+        }
     }
 }
