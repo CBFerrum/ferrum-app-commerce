@@ -215,7 +215,9 @@ and logs a warning to refund the payment, while a passing failure makes the prov
 Every five minutes a schedule asks the provider about the requests still open, so a lost webhook
 delays a confirmation instead of losing it, and closes links and sessions whose request closed.
 
-`cargo test` in `gateways/` runs each gateway against a scripted provider. With test-mode keys in
+`cargo test` in `gateways/` runs each gateway against a scripted provider, and the Stripe gateway
+also against stripe-mock (`STRIPE_MOCK_URL`; CI starts it), Stripe's own mock built from its API
+definition, which refuses unknown or malformed parameters as Stripe does. With test-mode keys in
 the environment it also talks to the provider itself: `STRIPE_TEST_SECRET_KEY` (`sk_test_…`)
 creates and expires a real Checkout Session, `RAZORPAY_TEST_KEY_ID` (`rzp_test_…`) with
 `RAZORPAY_TEST_KEY_SECRET` creates and cancels a real Payment Link, and

@@ -405,4 +405,33 @@ mod tests {
         .unwrap();
         assert_eq!(expired["status"], json!(200), "{expired}");
     }
+
+    /// Against stripe-mock when STRIPE_MOCK_URL is set (CI starts it): Stripe's own mock, built from
+    /// its API definition, refuses unknown or malformed parameters as Stripe does. The session is
+    /// made, then looked up and expired as the schedule does for a request that is done with.
+    #[test]
+    fn stripe_mock_accepts_every_call() {
+        use gateway_kit::sandbox;
+        let Some(mock) = sandbox::key("STRIPE_MOCK_URL") else { return eprintln!("skipped: set STRIPE_MOCK_URL to check the calls against stripe-mock") };
+        let calls = sandbox::host_via("https://api.stripe.com", mock.trim_end_matches('/'));
+        assert_eq!(handle(submitted("https://example.com/orders/done")), json!({}));
+        let details = sandbox::gateway_details(&calls);
+        let session = details["gateway_reference"].as_str().unwrap().to_string();
+        assert!(session.starts_with("cs_") && details["payment_url"].as_str().unwrap().starts_with("https://checkout.stripe.com/"), "{details}");
+        check("sk_test_123", ID, &session).unwrap();
+        let sent: Vec<String> = calls
+            .borrow()
+            .iter()
+            .filter(|(op, _)| op == "http.fetch")
+            .map(|(_, a)| format!("{} {}", a["method"].as_str().unwrap(), a["url"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                format!("POST {API}/checkout/sessions"),
+                format!("GET {API}/checkout/sessions/{session}"),
+                format!("POST {API}/checkout/sessions/{session}/expire")
+            ]
+        );
+    }
 }
