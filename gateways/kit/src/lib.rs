@@ -120,12 +120,26 @@ pub mod sandbox {
     /// Answers this thread's host calls: `http.fetch` for real, `time.now` from the clock, the
     /// rest (records, the key-value store) with null. Returns the log of calls.
     pub fn host() -> Calls {
+        host_via("", "")
+    }
+
+    /// As `host`, with requests whose URL starts with `from` sent to `to` instead: a provider's
+    /// official mock standing in for its API. The log keeps the URLs as the gateway wrote them.
+    pub fn host_via(from: &str, to: &str) -> Calls {
+        let (from, to) = (from.to_string(), to.to_string());
         let calls: Calls = Rc::default();
         let seen = calls.clone();
         ferrum_plugin_sdk::testing::host(move |op, args| {
             seen.borrow_mut().push((op.to_string(), args.clone()));
             match op {
-                "http.fetch" => fetch(args),
+                "http.fetch" => match args["url"].as_str().and_then(|u| u.strip_prefix(from.as_str())).filter(|_| !from.is_empty()) {
+                    Some(rest) => {
+                        let mut rerouted = args.clone();
+                        rerouted["url"] = json!(format!("{to}{rest}"));
+                        fetch(&rerouted)
+                    }
+                    None => fetch(args),
+                },
                 "time.now" => Ok(json!(utc_in(0))),
                 _ => Ok(Value::Null),
             }

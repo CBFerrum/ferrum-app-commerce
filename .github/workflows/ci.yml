@@ -47,6 +47,11 @@ jobs:
 
   gateways:
     runs-on: ubuntu-latest
+    # Stripe's own mock, built from its API definition: it refuses what Stripe would refuse.
+    services:
+      stripe-mock:
+        image: stripe/stripe-mock:v0.206.0
+        ports: ["12111:12111"]
     defaults:
       run:
         working-directory: gateways
@@ -66,6 +71,7 @@ jobs:
       # The sandbox tests call the providers' test modes when these secrets are set and skip otherwise.
       - run: cargo test
         env:
+          STRIPE_MOCK_URL: http://localhost:12111
           STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
           RAZORPAY_TEST_KEY_ID: ${{ secrets.RAZORPAY_TEST_KEY_ID }}
           RAZORPAY_TEST_KEY_SECRET: ${{ secrets.RAZORPAY_TEST_KEY_SECRET }}
