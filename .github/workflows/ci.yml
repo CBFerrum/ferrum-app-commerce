@@ -68,10 +68,25 @@ jobs:
           workspaces: gateways
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      # PayPal's own API definitions (paypal/paypal-rest-api-specifications), served by a mock that
+      # refuses every request they do not allow.
+      - name: Serve PayPal's API definitions
+        run: |
+          mkdir -p "$RUNNER_TEMP/paypal"
+          for spec in checkout_orders_v2 notifications_webhooks_v1; do
+            curl -fsSL "https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02/openapi/$spec.json" -o "$RUNNER_TEMP/paypal/$spec.json"
+          done
+          docker run -d --name prism-orders -p 4010:4010 -v "$RUNNER_TEMP/paypal:/specs:ro" stoplight/prism:5.15.10 \
+            mock -h 0.0.0.0 -p 4010 --multiprocess false --errors /specs/checkout_orders_v2.json
+          docker run -d --name prism-webhooks -p 4011:4011 -v "$RUNNER_TEMP/paypal:/specs:ro" stoplight/prism:5.15.10 \
+            mock -h 0.0.0.0 -p 4011 --multiprocess false --errors /specs/notifications_webhooks_v1.json
+          for i in $(seq 1 60); do curl -s -o /dev/null http://localhost:4010/ && curl -s -o /dev/null http://localhost:4011/ && break; sleep 1; done
       # The sandbox tests call the providers' test modes when these secrets are set and skip otherwise.
       - run: cargo test
         env:
           STRIPE_MOCK_URL: http://localhost:12111
+          PAYPAL_ORDERS_MOCK: http://localhost:4010
+          PAYPAL_WEBHOOKS_MOCK: http://localhost:4011
           STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
           RAZORPAY_TEST_KEY_ID: ${{ secrets.RAZORPAY_TEST_KEY_ID }}
           RAZORPAY_TEST_KEY_SECRET: ${{ secrets.RAZORPAY_TEST_KEY_SECRET }}
