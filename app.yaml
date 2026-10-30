@@ -1,6 +1,6 @@
 id: commerce
 name: Commerce
-version: 0.1.0
+version: 0.1.1
 publisher: cbferrum
 summary: "Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins"
 description: README.md
@@ -9,6 +9,8 @@ license: AGPL-3.0-only
 homepage: https://github.com/CBFerrum/ferrum-app-commerce
 support: https://github.com/CBFerrum/ferrum-app-commerce/issues
 runtime: native
-platform: ">=0.3, <0.4"
+platform: ">=0.3.1, <0.4"
+# Records of ERP (items, customers, accounts, stock): installing it installs ERP.
+requires: {erp: ">=0.1"}
 packages: [commerce]
 uninstall: ask
