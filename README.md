@@ -289,9 +289,9 @@ It builds on [ferrum-app-crm](https://github.com/CBFerrum/ferrum-app-crm).
 | Version | Highlights |
 |---|---|
 | **0.3.2** | The interface starts faster: its first download holds the frame and the app's own pages, and lists, forms, reports and other apps' screens load … |
-| **0.3.1** | Record cards (the bar's previews on hover, Ferrum apps-ui.md U5) stay off the web orders to deliver and the payments that did not go through, … |
-| **0.3.0** | The storefront on a host of its own : on a workspace host whose target is `site:commerce`, the shop's pages are at its root, rendered on the … |
-| **0.2.0** | The store's admin, an interface of its own at /commerce/ , in `ui/` (built with Ferrum-Frontend's packages, `dist` committed and embedded as … |
+| **0.3.1** | Record cards (the bar's previews on hover, Ferrum apps-ui.md U5) stay off the web orders to deliver and the payments that did not go through … |
+| **0.3.0** | The storefront on a host of its own: on a workspace host whose target is `site:commerce`, the shop's pages are at its root, rendered on the server … |
+| **0.2.0** | The store's admin, an interface of its own at /commerce/, in `ui/` (built with Ferrum-Frontend's packages, `dist` committed and embedded as `UI`) … |
 
 Every version is in [CHANGELOG.md](CHANGELOG.md).
 
