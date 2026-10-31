@@ -9,7 +9,7 @@ use crate::shipping::{Rule, enabled_rules};
 use crate::store::{Store, valid_country};
 use crate::token;
 use async_trait::async_trait;
-use ferrum_domain::pricing::{Side, calculate};
+use ferrum_app_erp::pricing::{Side, calculate};
 use ferrum_domain::util::{b, d, get, id, money, round, rows, s, set};
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, FieldError, HookCtx, Kernel, Result, Tx};
 use ferrum_meta::EffEntity;

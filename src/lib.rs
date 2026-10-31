@@ -2,7 +2,7 @@
 //!
 //! * Catalog: `ItemCategory` (a tree), `WebsiteItem` (the published face of an `Item`) and
 //!   moderated `ItemReview`s.
-//! * Carts (`ShoppingCart`) are sales-shaped documents priced by `ferrum_domain::pricing` on every
+//! * Carts (`ShoppingCart`) are sales-shaped documents priced by `ferrum_app_erp::pricing` on every
 //!   change, so a cart, the sales order made from it and that order's invoice agree to the cent.
 //!   Shipping is a service line priced by a `ShippingRule`; a `CouponCode` unlocks a pricing rule.
 //! * Checkout turns a cart into a submitted `SalesOrder` and a `PaymentRequest`. Gateway plugins

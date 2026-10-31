@@ -8,7 +8,7 @@
 
 use crate::store::{PaymentMethod, Store, is_offline, notify_managers, valid_gateway};
 use async_trait::async_trait;
-use ferrum_domain::ledger;
+use ferrum_app_erp::ledger;
 use ferrum_domain::util::{b, company, currency, d, elevated, get, id, money, round, rows, s, set, sys};
 use ferrum_kernel::value::parse_datetime;
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, HookCtx, Kernel, Result, Tx, outbox};
@@ -469,7 +469,7 @@ impl DocHook for AdvanceHook {
             applied = true;
         }
         if applied {
-            ferrum_domain::flow::sync_invoice_outstanding(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
+            ferrum_app_erp::flow::sync_invoice_outstanding(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
         }
         Ok(())
     }

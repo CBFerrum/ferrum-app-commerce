@@ -11,6 +11,7 @@ build = "build.rs"
 ferrum-kernel = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
 ferrum-meta = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
 ferrum-domain = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
+ferrum-app-erp = { git = "https://github.com/CBFerrum/ferrum-app-erp", branch = "main" }
 ferrum-calc = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
