@@ -258,6 +258,17 @@ cargo test
 `FERRUM_COMMERCE_TEST_DATABASE_URL` overrides the database URL.
 
 
+It also builds on [ferrum-app-erp](https://github.com/CBFerrum/ferrum-app-erp), and its tests on [ferrum-app-crm](https://github.com/CBFerrum/ferrum-app-crm), which Cargo takes from GitHub.
+To work on them alongside this app, clone them into the same folder and add to the same file:
+
+```toml
+[patch."https://github.com/CBFerrum/ferrum-app-crm"]
+ferrum-app-crm = { path = "../ferrum-app-crm" }
+[patch."https://github.com/CBFerrum/ferrum-app-erp"]
+ferrum-app-erp = { path = "../ferrum-app-erp" }
+```
+
+
 The interface lives in `ui/` and builds with Ferrum-Frontend's packages:
 
 ```bash
@@ -280,9 +291,6 @@ ui/           its own interface (React + Vite), built into ui/dist
 tests/        integration tests against a real PostgreSQL
 CHANGELOG.md  what changed in each version
 ```
-
-
-It builds on [ferrum-app-crm](https://github.com/CBFerrum/ferrum-app-crm).
 
 ## Changelog
 
