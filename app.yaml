@@ -1,6 +1,6 @@
 id: commerce
 name: Commerce
-version: 0.1.1
+version: 0.2.0
 publisher: cbferrum
 summary: "Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins"
 description: README.md
@@ -14,3 +14,20 @@ platform: ">=0.3.1, <0.4"
 requires: {erp: ">=0.1"}
 packages: [commerce]
 uninstall: ask
+ui:
+  dist: ui/dist
+contributes:
+  shell.app:
+    - id: commerce
+      route: commerce
+      title: Store
+      description: Your online store's sales, orders to deliver, payments, reviews and catalog
+      icon: shopping-cart
+      color: "#be185d"
+      roles: [Website Manager, Sales Manager]
+  shell.open:
+    # The store's own records (orders are ERP's and open there).
+    - {id: commerce, package: commerce, path: "commerce/e/{entity}/{id}", list: "commerce/e/{entity}"}
+  shell.create:
+    - {id: website_item, label: Store item, path: commerce/e/WebsiteItem/new, entity: WebsiteItem}
+    - {id: coupon, label: Coupon, path: commerce/e/CouponCode/new, entity: CouponCode}

@@ -27,6 +27,7 @@ rand = "0.9"
 base64 = "0.22"
 
 [dev-dependencies]
+ferrum-apps = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
 # Checkout creates contacts and addresses when the CRM app is installed: tested with the real app.
 ferrum-app-crm = { git = "https://github.com/CBFerrum/ferrum-app-crm", branch = "main" }
 tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
