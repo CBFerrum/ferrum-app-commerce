@@ -6,14 +6,14 @@ use crate::store::Store;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ferrum_app_erp::pricing::{Side, calculate};
+use ferrum_app_erp::pricing::{self, Side, calculate};
 use ferrum_calc::{CalcInput, ChargeType, LineIn, Rounding, TaxIn};
 use ferrum_domain::util::{b, d, find, get, id, rows, s, set, sys};
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, FieldError, Filter, HookCtx, Kernel, Result, Tx};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, QueryBuilder};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -215,55 +215,26 @@ impl Prices {
     }
 }
 
-fn charge_type(s: Option<&str>) -> ChargeType {
-    match s {
-        Some("On Previous Row Amount") => ChargeType::OnPreviousRowAmount,
-        Some("On Previous Row Total") => ChargeType::OnPreviousRowTotal,
-        Some("Actual") => ChargeType::Actual,
-        _ => ChargeType::OnNetTotal,
-    }
-}
-
-/// One unit's price including tax, by the same engine and tax rows as the cart. Fixed
-/// (`Actual`) charges are left out: they belong to an order, not to a unit.
+/// One unit's price including tax, by the same engine and tax rows as the cart (ERP's mapping of
+/// them). Fixed (`Actual`) charges are left out: they belong to an order, not to a unit.
+// The engine's inputs gain fields over time; those not named here take their defaults.
+#[allow(clippy::needless_update)]
 fn unit_with_tax(line: &Doc, taxes: &[Doc], precision: u32, rounding: Rounding) -> Option<Decimal> {
-    let overrides = line.get("item_tax_rates").and_then(Value::as_object);
-    let tax_in: Vec<TaxIn> = taxes
-        .iter()
-        .enumerate()
-        .map(|(i, t)| TaxIn {
-            key: format!("t{i}"),
-            charge_type: charge_type(s(t, "charge_type")),
-            rate: d(t, "rate"),
-            amount: Decimal::ZERO,
-            row_ref: t.get("row_ref").and_then(Value::as_i64).filter(|r| *r >= 1).map(|r| (r - 1) as usize),
-            included_in_price: b(t, "included_in_price"),
-            deduct: b(t, "deduct"),
-        })
-        .collect();
-    let rates: BTreeMap<String, Decimal> = taxes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| {
-            let rate = overrides?.get(s(t, "account")?)?.as_str()?;
-            Some((format!("t{i}"), Decimal::from_str(rate).ok()?))
-        })
-        .collect();
+    let taxes_in: Vec<TaxIn> =
+        pricing::tax_in(taxes).into_iter().map(|t| if t.charge_type == ChargeType::Actual { TaxIn { amount: Decimal::ZERO, ..t } } else { t }).collect();
     let input = CalcInput {
         precision,
-        base_precision: None,
-        conversion_rate: Decimal::ONE,
         rounding,
         lines: vec![LineIn {
             key: "u".into(),
             qty: Decimal::ONE,
             price: d(line, "price_list_rate"),
             discount_percent: d(line, "discount_percent"),
-            tax_rates: rates,
+            tax_rates: pricing::line_tax_rates(line, taxes),
+            ..Default::default()
         }],
-        taxes: tax_in,
-        discount: None,
-        round_total_to: None,
+        taxes: taxes_in,
+        ..Default::default()
     };
     ferrum_calc::compute(&input).ok().map(|o| o.grand_total)
 }
