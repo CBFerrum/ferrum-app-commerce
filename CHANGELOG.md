@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Record cards (the bar's previews on hover, Ferrum apps-ui.md U5) stay off the web orders to deliver and the payments that did not go through, whose rows
+  already show what a card would.
+
 ## 0.3.0
 
 - The storefront on a host of its own (Ferrum docs/plan/apps-ui.md §7.3, U7): on a workspace host

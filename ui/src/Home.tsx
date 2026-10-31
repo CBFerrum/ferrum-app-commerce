@@ -69,7 +69,7 @@ function ToDeliver() {
   if (!q.data.rows.length) return <p className="muted">Every web order is delivered.</p>;
   return (
     <>
-      <ul className="cm-rows">
+      <ul className="cm-rows" data-ferrum-nocard>
         {q.data.rows.map((o) => (
           <li key={o.id}>
             {/* Orders are ERP's: delivered and billed there. */}
@@ -105,7 +105,7 @@ function Payments() {
   if (!q.data) return <Spinner small label="Loading payments" />;
   if (!q.data.length) return <p className="muted">No failed or expired payments.</p>;
   return (
-    <ul className="cm-rows">
+    <ul className="cm-rows" data-ferrum-nocard>
       {q.data.map((p) => (
         <li key={p.id}>
           <Link to={`e/PaymentRequest/${p.id}`}>{p.order_number ?? "Payment"}</Link> <span className="faint">{[p.payer_name, p.gateway].filter(Boolean).join(" · ")}</span>
