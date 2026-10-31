@@ -340,6 +340,10 @@ impl Site for Storefront {
         };
         let mut ctx = Ctx::system(req.tenant, schema);
         ctx.request_id = format!("commerce-{}", Uuid::now_v7());
+        // The storefront's own pages, on a host of its own.
+        if crate::pages::is_page(&req) {
+            return crate::pages::handle(k, &ctx, &req).await;
+        }
         let r = Req { raw: &req, ctx, user: req.user.as_ref() };
         let (status, body) = route(k, &r).await?;
         let mut resp = SiteResponse::json(status, &body);

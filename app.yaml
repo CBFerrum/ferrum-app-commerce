@@ -1,6 +1,6 @@
 id: commerce
 name: Commerce
-version: 0.2.0
+version: 0.3.0
 publisher: cbferrum
 summary: "Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins"
 description: README.md

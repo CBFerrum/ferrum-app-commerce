@@ -16,6 +16,7 @@ mod catalog;
 mod checkout;
 mod coupon;
 mod orders;
+mod pages;
 mod payment;
 mod reports;
 mod shipping;
