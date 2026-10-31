@@ -288,6 +288,55 @@ async fn scenario() {
     let twin = t.k.insert(&t.ctx, "WebsiteItem", obj(json!({"item": mug.to_string(), "slug": "mug-again"}))).await;
     assert!(matches!(twin, Err(Error::Validation(ref f)) if f.iter().any(|x| x.field == "item")), "{twin:?}");
 
+    // ───────────── the storefront's pages on a host of its own (Ferrum apps-ui.md §7.3) ─────────────
+    let page = |path: &str, query: &[(&str, &str)], from_server: bool| {
+        let mut headers = Map::new();
+        if from_server {
+            headers.insert("x-ferrum-site-api".into(), json!("/api/site/shop/commerce"));
+            headers.insert("x-ferrum-site-origin".into(), json!("https://shop.example.com"));
+        }
+        let req = SiteRequest {
+            tenant,
+            user: None,
+            method: "GET".into(),
+            path: format!("/_site{path}"),
+            query: query.iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+            headers,
+            body: vec![],
+            client_ip: "203.0.113.7".into(),
+        };
+        let (site, k) = (t.site.clone(), t.k.clone());
+        async move {
+            let r = site.handle(&k, req).await?;
+            Ok::<_, Error>((r.status, r.content_type, r.headers, String::from_utf8(r.body).unwrap()))
+        }
+    };
+    let (status, ctype, _, home) = page("/", &[], true).await.unwrap();
+    assert_eq!((status, ctype.as_str()), (200, "text/html; charset=utf-8"));
+    assert!(home.contains(r#"href="/p/blue-mug""#) && home.contains("Logo Tee") && !home.contains("Secret Prototype"), "{home}");
+    assert!(home.contains(r#"data-api="/api/site/shop/commerce""#) && home.contains(r#"<link rel="canonical" href="https://shop.example.com/">"#));
+    assert!(home.contains(r#"<a href="/c/kitchen-dining">Kitchen &amp; Dining</a>"#), "categories, escaped");
+    let (_, _, _, mug_page) = page("/p/blue-mug", &[], true).await.unwrap();
+    assert!(mug_page.contains(r#""@type":"Product""#) && mug_page.contains(r#"<img src="https://cdn.example.com/mug.jpg" alt="Blue mug""#), "{mug_page}");
+    assert!(mug_page.contains("<p>## Blue Mug<br>Dishwasher safe.</p>"), "the description as plain text: {mug_page}");
+    assert!(mug_page.contains(r#"data-item="blue-mug""#), "it can be added to the cart");
+    assert_eq!(page("/p/secret-prototype", &[], true).await.unwrap().0, 404, "not published, not there");
+    let (_, _, _, cat) = page("/c/kitchen-dining", &[], true).await.unwrap();
+    assert!(cat.contains("Blue Mug") && !cat.contains("Logo Tee") && cat.contains(r#"href="/c/mugs""#), "a category with its subcategory's items: {cat}");
+    assert_eq!(page("/c/nothing", &[], true).await.unwrap().0, 404);
+    let (_, _, _, found) = page("/search", &[("q", "tee")], true).await.unwrap();
+    assert!(found.contains("Logo Tee") && !found.contains("Blue Mug") && found.contains(r#"<meta name="robots" content="noindex">"#));
+    let (_, _, _, robots) = page("/robots.txt", &[], true).await.unwrap();
+    assert!(robots.contains("Sitemap: https://shop.example.com/sitemap.xml") && robots.contains("Disallow: /checkout"));
+    let (_, ctype, _, sitemap) = page("/sitemap.xml", &[], true).await.unwrap();
+    assert!(ctype.starts_with("application/xml") && sitemap.contains("<loc>https://shop.example.com/p/blue-mug</loc>") && !sitemap.contains("secret"));
+    assert!(sitemap.contains("<loc>https://shop.example.com/c/mugs</loc>"));
+    let (_, ctype, headers, _) = page("/assets/store.js", &[], true).await.unwrap();
+    assert!(ctype.starts_with("text/javascript") && headers.iter().any(|(k, v)| k == "cache-control" && v.contains("immutable")));
+    assert_eq!(page("/cart", &[], true).await.unwrap().0, 200);
+    assert_eq!(page("/nowhere", &[], true).await.unwrap().0, 404);
+    assert!(matches!(page("/", &[], false).await, Err(Error::NotFound(_))), "pages come only through a site host");
+
     // ───────────── shipping rules ─────────────
     let standard = t
         .insert(
