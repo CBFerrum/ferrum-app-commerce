@@ -386,6 +386,15 @@ pub async fn check_stock(tx: &mut Tx, tenant: Uuid, store: &Store, item: Uuid, q
 pub async fn add_item(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, reference: &str, qty: Decimal) -> Result<Doc> {
     let wi = website_item(k, ctx, tx, reference).await?;
     let item = id(&wi, "item").ok_or_else(|| Error::internal("website item without item"))?;
+    // An item with variants is sold through them (a size, a colour), not by itself.
+    let sold_by_variants: bool = sqlx::query_scalar("select exists(select 1 from e_website_item where tenant_id = $1 and variant_of = $2 and published)")
+        .bind(ctx.tenant)
+        .bind(id(&wi, "id"))
+        .fetch_one(&mut **tx)
+        .await?;
+    if sold_by_variants {
+        return Err(Error::field("item", "choose one of its variants, such as a size or a colour"));
+    }
     if !has_price(tx, ctx.tenant, store, item).await? {
         return Err(Error::field("item", "this item is not for sale"));
     }

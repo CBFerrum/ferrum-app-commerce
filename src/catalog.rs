@@ -49,6 +49,11 @@ fn escape_like(q: &str) -> String {
     q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// The words of a search, at most six, each of which must be found: "mug blue" finds "Blue Mug".
+pub(crate) fn search_terms(q: &str) -> Vec<String> {
+    q.split_whitespace().take(6).map(str::to_string).collect()
+}
+
 async fn slug_taken(k: &Kernel, ctx: &Ctx, tx: &mut Tx, entity: &str, slug: &str, me: Option<Uuid>) -> Result<bool> {
     let found = find(k, ctx, tx, entity, vec![Filter::eq("slug", slug)], None, 2).await?;
     Ok(found.iter().any(|r| id(r, "id") != me))
@@ -80,14 +85,114 @@ impl DocHook for CategoryHook {
 
 pub struct WebsiteItemHook;
 
+/// What makes one variant different from the others, as (option, value) pairs in the order given.
+pub(crate) type Options = Vec<(String, String)>;
+
+/// A variant's default name: its group's name and what sets it apart. "Logo Tee — Red / M".
+pub(crate) fn variant_title(parent: &str, options: &Options) -> String {
+    let what: Vec<&str> = options.iter().map(|(_, v)| v.as_str()).collect();
+    format!("{parent} — {}", what.join(" / "))
+}
+
+/// What is wrong with a variant's options next to its siblings', in words: each names an option
+/// once, every sibling names the same options, and no two siblings are the same choice.
+pub(crate) fn option_problems(options: &Options, siblings: &[Options]) -> Vec<String> {
+    let lower = |s: &str| s.trim().to_lowercase();
+    let mut out = Vec::new();
+    if options.is_empty() {
+        return vec!["say what makes this variant different, such as Size M".into()];
+    }
+    let mut names: Vec<String> = options.iter().map(|(n, _)| lower(n)).collect();
+    names.sort();
+    if names.windows(2).any(|w| w[0] == w[1]) {
+        out.push("an option is named twice".into());
+    }
+    for sib in siblings {
+        let mut theirs: Vec<String> = sib.iter().map(|(n, _)| lower(n)).collect();
+        theirs.sort();
+        if theirs != names {
+            out.push(format!("the other variants differ by {}: name the same options", sib.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(" and ")));
+            break;
+        }
+    }
+    let mut mine: Vec<(String, String)> = options.iter().map(|(n, v)| (lower(n), lower(v))).collect();
+    mine.sort();
+    if siblings.iter().any(|sib| {
+        let mut theirs: Vec<(String, String)> = sib.iter().map(|(n, v)| (lower(n), lower(v))).collect();
+        theirs.sort();
+        theirs == mine
+    }) {
+        out.push("another variant already has these choices".into());
+    }
+    out
+}
+
+/// The options a document names, tidied: blanks dropped, spaces trimmed.
+fn options_of(doc: &Doc) -> Options {
+    rows(doc, "options")
+        .iter()
+        .filter_map(|r| {
+            let (o, v) = (s(r, "option")?.trim().to_string(), s(r, "value")?.trim().to_string());
+            (!o.is_empty() && !v.is_empty()).then_some((o, v))
+        })
+        .collect()
+}
+
+/// Every other variant of a group, with what sets each apart.
+async fn sibling_options(tx: &mut Tx, tenant: Uuid, parent: Uuid, except: Option<Uuid>) -> Result<Vec<Options>> {
+    let found: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "select w.id, o.\"option\", o.\"value\" from e_website_item w join e_website_item__options o on o.tenant_id = w.tenant_id and o.parent_id = w.id \
+         where w.tenant_id = $1 and w.variant_of = $2 and ($3::uuid is null or w.id <> $3) order by w.id, o.idx",
+    )
+    .bind(tenant)
+    .bind(parent)
+    .bind(except)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut by: Vec<(Uuid, Options)> = Vec::new();
+    for (w, o, v) in found {
+        match by.iter_mut().find(|(id, _)| *id == w) {
+            Some((_, opts)) => opts.push((o, v)),
+            None => by.push((w, vec![(o, v)])),
+        }
+    }
+    Ok(by.into_iter().map(|(_, o)| o).collect())
+}
+
 #[async_trait]
 impl DocHook for WebsiteItemHook {
     async fn before_validate(&self, hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
-        if s(doc, "title").is_none()
-            && let Some(item) = id(doc, "item")
-        {
-            let it = get(hc.kernel, hc.ctx, hc.tx, "Item", item).await?;
-            set(doc, "title", s(&it, "item_name").unwrap_or_default().to_string());
+        // Options belong to variants only, and are tidied: blanks dropped, spaces trimmed (the rows keep their ids).
+        let parent = id(doc, "variant_of");
+        let tidy: Vec<Value> = if parent.is_none() {
+            Vec::new()
+        } else {
+            rows(doc, "options")
+                .into_iter()
+                .filter_map(|mut r| {
+                    let (o, v) = (s(&r, "option")?.trim().to_string(), s(&r, "value")?.trim().to_string());
+                    if o.is_empty() || v.is_empty() {
+                        return None;
+                    }
+                    set(&mut r, "option", o);
+                    set(&mut r, "value", v);
+                    if id(&r, "id").is_none() {
+                        set(&mut r, "id", Uuid::now_v7().to_string());
+                    }
+                    Some(Value::Object(r))
+                })
+                .collect()
+        };
+        set(doc, "options", Value::Array(tidy));
+        let options = options_of(doc);
+        if s(doc, "title").is_none() {
+            if let Some(p) = parent.filter(|_| !options.is_empty()) {
+                let parent = get(hc.kernel, hc.ctx, hc.tx, "WebsiteItem", p).await?;
+                set(doc, "title", variant_title(s(&parent, "title").unwrap_or_default(), &options));
+            } else if let Some(item) = id(doc, "item") {
+                let it = get(hc.kernel, hc.ctx, hc.tx, "Item", item).await?;
+                set(doc, "title", s(&it, "item_name").unwrap_or_default().to_string());
+            }
         }
         let base = s(doc, "slug").or_else(|| s(doc, "title")).unwrap_or_default().to_string();
         set(doc, "slug", slugify(&base));
@@ -102,6 +207,26 @@ impl DocHook for WebsiteItemHook {
     }
 
     async fn validate(&self, hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
+        if let Some(parent) = id(doc, "variant_of") {
+            let me = id(doc, "id");
+            if Some(parent) == me {
+                return Err(Error::field("variant_of", "an item cannot be a variant of itself"));
+            }
+            let p = get(hc.kernel, hc.ctx, hc.tx, "WebsiteItem", parent).await?;
+            if id(&p, "variant_of").is_some() {
+                return Err(Error::field("variant_of", "that item is a variant itself: variants go one level deep"));
+            }
+            if let Some(me) = me {
+                let mine = find(hc.kernel, hc.ctx, hc.tx, "WebsiteItem", vec![Filter::eq("variant_of", me.to_string())], None, 1).await?;
+                if !mine.is_empty() {
+                    return Err(Error::field("variant_of", "this item has variants of its own"));
+                }
+            }
+            let siblings = sibling_options(hc.tx, hc.ctx.tenant, parent, me).await?;
+            if let Some(first) = option_problems(&options_of(doc), &siblings).into_iter().next() {
+                return Err(Error::field("options", first));
+            }
+        }
         let slug = s(doc, "slug").unwrap_or_default();
         if slug.is_empty() {
             return Err(Error::field("slug", "use some letters or digits"));
@@ -127,16 +252,16 @@ impl DocHook for WebsiteItemHook {
 
 pub struct ReviewHook;
 
-/// Whether `email` (or `customer`) bought `item` on an order that was not cancelled.
-pub async fn bought(tx: &mut Tx, tenant: Uuid, item: Uuid, email: Option<&str>, customer: Option<Uuid>) -> Result<bool> {
+/// Whether `email` (or `customer`) bought one of `items` on an order that was not cancelled.
+pub async fn bought(tx: &mut Tx, tenant: Uuid, items: &[Uuid], email: Option<&str>, customer: Option<Uuid>) -> Result<bool> {
     Ok(sqlx::query_scalar(
         "select exists(select 1 from e_sales_order o join e_sales_order__items i on i.tenant_id = o.tenant_id and i.parent_id = o.id \
          left join e_customer c on c.tenant_id = o.tenant_id and c.id = o.customer \
-         where o.tenant_id = $1 and o.docstatus = 1 and i.item = $2 \
+         where o.tenant_id = $1 and o.docstatus = 1 and i.item = any($2) \
          and (o.customer = $3 or ($4::text is not null and (lower(c.email) = $4 or lower(o.ext->>'commerce_contact_email') = $4))))",
     )
     .bind(tenant)
-    .bind(item)
+    .bind(items)
     .bind(customer)
     .bind(email.map(str::to_lowercase))
     .fetch_one(&mut **tx)
@@ -169,7 +294,18 @@ impl DocHook for ReviewHook {
             Some(wi) => {
                 let item = id(&get(hc.kernel, hc.ctx, hc.tx, "WebsiteItem", wi).await?, "item");
                 match item {
-                    Some(item) => bought(hc.tx, hc.ctx.tenant, item, s(doc, "reviewer_email"), id(doc, "customer")).await?,
+                    Some(item) => {
+                        // A variant bought is the item bought.
+                        let mut items = vec![item];
+                        items.extend(
+                            sqlx::query_scalar::<_, Uuid>("select item from e_website_item where tenant_id = $1 and variant_of = $2")
+                                .bind(hc.ctx.tenant)
+                                .bind(wi)
+                                .fetch_all(&mut **hc.tx)
+                                .await?,
+                        );
+                        bought(hc.tx, hc.ctx.tenant, &items, s(doc, "reviewer_email"), id(doc, "customer")).await?
+                    }
                     None => false,
                 }
             }
@@ -378,11 +514,16 @@ struct CardRow {
     slug: Option<String>,
     title: Option<String>,
     short_description: Option<String>,
-    item: Uuid,
     is_stock: bool,
     available: Decimal,
     rating: Decimal,
     reviews: i64,
+    /// The item whose price the card shows: its own, or a variant group's cheapest.
+    price_item: Uuid,
+    /// Something in the group can be bought now.
+    in_stock: bool,
+    /// Published variants the item has (it is then sold through them).
+    variants: i64,
     sort_key: Option<String>,
 }
 
@@ -438,14 +579,26 @@ pub async fn cards(
     qb.push("reserved as (select si.item, sum(greatest(si.qty - coalesce(si.delivered_qty, 0), 0)) as qty from e_sales_order so ");
     qb.push("join e_sales_order__items si on si.tenant_id = so.tenant_id and si.parent_id = so.id where so.tenant_id = ").push_bind(tenant);
     qb.push(" and so.docstatus = 1 and so.status in ('To Deliver and Bill', 'To Deliver') and si.warehouse = any(").push_bind(store.warehouses.clone());
-    qb.push(") group by si.item), base as (select w.id, w.slug, w.title, w.short_description, coalesce(w.ranking, 0) as ranking, w.created_at, ");
-    qb.push("lower(coalesce(w.title, '')) as ltitle, coalesce(w.rating_average, 0) as rating, coalesce(w.review_count, 0) as reviews, w.item, ");
-    qb.push("coalesce(i.is_stock_item, false) as is_stock, coalesce(o.qty, 0) - coalesce(r.qty, 0) as available, coalesce((select p.rate from e_item_price p ");
-    qb.push("where p.tenant_id = w.tenant_id and p.item = w.item and p.price_list = ").push_bind(store.price_list);
+    // Every published, enabled store item with its own price and stock...
+    qb.push(") group by si.item), member as (select w.id, w.variant_of, w.item, coalesce(i.is_stock_item, false) as is_stock, ");
+    qb.push("coalesce(o.qty, 0) - coalesce(r.qty, 0) as available, ");
+    qb.push("exists (select 1 from e_website_item v where v.tenant_id = w.tenant_id and v.variant_of = w.id and v.published) as has_variants, ");
+    qb.push("coalesce((select p.rate from e_item_price p where p.tenant_id = w.tenant_id and p.item = w.item and p.price_list = ").push_bind(store.price_list);
     qb.push(" and p.valid_from <= ").push_bind(today).push(" and (p.valid_upto is null or p.valid_upto >= ").push_bind(today);
     qb.push(") order by p.valid_from desc limit 1), nullif(i.standard_rate, 0)) as price from e_website_item w ");
     qb.push("join e_item i on i.tenant_id = w.tenant_id and i.id = w.item left join onhand o on o.item = w.item left join reserved r on r.item = w.item ");
-    qb.push("where w.tenant_id = ").push_bind(tenant).push(" and w.published and not coalesce(i.disabled, false)");
+    qb.push("where w.tenant_id = ").push_bind(tenant).push(" and w.published and not coalesce(i.disabled, false)), ");
+    // ...and, per listed item, what it is sold for and whether anything can be bought: its own, or
+    // its variants' (an item with variants is sold through them, so its own price does not count).
+    qb.push("grp as (select coalesce(m.variant_of, m.id) as gid, min(m.price) filter (where m.price > 0 and not m.has_variants) as price, ");
+    qb.push("(array_agg(m.item order by m.price asc) filter (where m.price > 0 and not m.has_variants))[1] as price_item, ");
+    qb.push("coalesce(bool_or(not m.is_stock or m.available > 0) filter (where not m.has_variants), false) as in_stock, ");
+    qb.push("count(*) filter (where m.variant_of is not null) as variants from member m group by 1), ");
+    qb.push("base as (select w.id, w.slug, w.title, w.short_description, coalesce(w.ranking, 0) as ranking, w.created_at, ");
+    qb.push("lower(coalesce(w.title, '')) as ltitle, coalesce(w.rating_average, 0) as rating, coalesce(w.review_count, 0) as reviews, w.item, ");
+    qb.push("m.is_stock, m.available, g.price, coalesce(g.price_item, w.item) as price_item, g.in_stock, g.variants from e_website_item w ");
+    qb.push("join member m on m.id = w.id join grp g on g.gid = w.id join e_item i on i.tenant_id = w.tenant_id and i.id = w.item ");
+    qb.push("where w.tenant_id = ").push_bind(tenant).push(" and w.variant_of is null");
     if let Some(ids) = &f.ids {
         qb.push(" and w.id = any(").push_bind(ids.clone()).push(")");
     }
@@ -453,13 +606,20 @@ pub async fn cards(
         qb.push(" and exists (select 1 from e_website_item__categories c where c.tenant_id = w.tenant_id and c.parent_id = w.id and c.category = any(");
         qb.push_bind(cats).push("))");
     }
-    if let Some(q) = f.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        let pat = format!("%{}%", escape_like(q));
+    // Each word must be found somewhere: in the name, the short text or the code of the item or of
+    // one of its variants, or in the choice that sets a variant apart ("red").
+    for term in f.q.as_deref().map(search_terms).unwrap_or_default() {
+        let pat = format!("%{}%", escape_like(&term));
         qb.push(" and (w.title ilike ").push_bind(pat.clone()).push(" or w.short_description ilike ").push_bind(pat.clone());
-        qb.push(" or i.item_code ilike ").push_bind(pat).push(")");
+        qb.push(" or i.item_code ilike ").push_bind(pat.clone());
+        qb.push(" or exists (select 1 from e_website_item v join e_item vi on vi.tenant_id = v.tenant_id and vi.id = v.item where v.tenant_id = w.tenant_id and v.variant_of = w.id and v.published and (v.title ilike ");
+        qb.push_bind(pat.clone()).push(" or vi.item_code ilike ").push_bind(pat.clone());
+        qb.push(" or exists (select 1 from e_website_item__options vo where vo.tenant_id = v.tenant_id and vo.parent_id = v.id and vo.\"value\" ilike ")
+            .push_bind(pat)
+            .push("))))");
     }
     qb.push(format!(
-        ") select id, slug, title, short_description, item, is_stock, available, rating, reviews, ({key})::text as sort_key from base where price > 0"
+        ") select id, slug, title, short_description, is_stock, available, rating, reviews, price_item, in_stock, variants, ({key})::text as sort_key from base where price > 0"
     ));
     if let Some(min) = f.min_price {
         qb.push(" and price >= ").push_bind(min * rate);
@@ -468,7 +628,7 @@ pub async fn cards(
         qb.push(" and price <= ").push_bind(max * rate);
     }
     if f.in_stock {
-        qb.push(" and (not is_stock or available > 0)");
+        qb.push(" and in_stock");
     }
     if let Some((v, after_id)) = &after {
         qb.push(format!(" and ({key}, id) {} (", if desc { "<" } else { ">" }))
@@ -502,18 +662,20 @@ async fn first_images(tx: &mut Tx, tenant: Uuid, ids: &[Uuid]) -> Result<HashMap
 async fn render(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, found: &[CardRow], customer: Option<Uuid>) -> Result<Vec<Value>> {
     let ids: Vec<Uuid> = found.iter().map(|r| r.id).collect();
     let images = first_images(tx, ctx.tenant, &ids).await?;
-    let items: Vec<Uuid> = found.iter().map(|r| r.item).collect();
+    let items: Vec<Uuid> = found.iter().map(|r| r.price_item).collect();
     let prices = price_items(k, ctx, tx, store, &items, customer).await?;
     Ok(found
         .iter()
         .map(|r| {
-            let (in_stock, qty) = stock_view(store, r.is_stock, r.available);
+            // An item with variants is in stock when one of them is; it shows no quantity of its own.
+            let (in_stock, qty) = if r.variants > 0 { (r.in_stock, None) } else { stock_view(store, r.is_stock, r.available) };
             json!({
                 "slug": r.slug,
                 "title": r.title,
                 "short_description": r.short_description,
                 "image": images.get(&r.id),
-                "price": prices.get(&r.item).map(|p| p.view(&store.currency_code)),
+                "price": prices.get(&r.price_item).map(|p| p.view(&store.currency_code)),
+                "from": r.variants > 0,
                 "in_stock": in_stock,
                 "available_qty": qty,
                 "rating": {"average": r.rating.normalize().to_string(), "count": r.reviews},
@@ -615,6 +777,128 @@ pub async fn reviews(tx: &mut Tx, tenant: Uuid, website_item: Uuid, limit: i64, 
     Ok((out, next))
 }
 
+/// A variant as the product page needs it for choosing: its address, what sets it apart, whether
+/// it can be bought now.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Variant {
+    pub slug: String,
+    pub options: Options,
+    pub in_stock: bool,
+}
+
+impl Variant {
+    pub(crate) fn from_json(v: &Value) -> Option<Variant> {
+        Some(Variant {
+            slug: v["slug"].as_str()?.to_string(),
+            options: v["options"].as_array()?.iter().filter_map(|o| Some((o["option"].as_str()?.to_string(), o["value"].as_str()?.to_string()))).collect(),
+            in_stock: v["in_stock"].as_bool().unwrap_or(false) && v["purchasable"].as_bool().unwrap_or(false),
+        })
+    }
+}
+
+/// One choice among an option's values: the variant it leads to, whether it is the one shown, and
+/// whether that variant can be bought now.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Choice {
+    pub value: String,
+    pub slug: String,
+    pub selected: bool,
+    pub in_stock: bool,
+}
+
+/// The variant shown first: the first one that can be bought, else the first.
+pub(crate) fn default_variant(variants: &[Variant]) -> Option<&Variant> {
+    variants.iter().find(|v| v.in_stock).or(variants.first())
+}
+
+/// For each option (Size, Colour) its values as links to a variant. A choice leads to the variant
+/// that has it and agrees with the shown one on every other option, else to any variant that has it
+/// (one that can be bought first), so a shopper never lands on a page without their choice.
+pub(crate) fn option_groups(variants: &[Variant], selected: &str) -> Vec<(String, Vec<Choice>)> {
+    let current: Options = variants.iter().find(|v| v.slug == selected).map(|v| v.options.clone()).unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
+    for (n, _) in variants.iter().flat_map(|v| v.options.iter()) {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
+    let has = |v: &Variant, n: &str, val: &str| v.options.iter().any(|(vn, vv)| vn == n && vv == val);
+    names
+        .into_iter()
+        .map(|name| {
+            let mut values: Vec<String> = Vec::new();
+            for (n, v) in variants.iter().flat_map(|v| v.options.iter()) {
+                if *n == name && !values.contains(v) {
+                    values.push(v.clone());
+                }
+            }
+            let choices = values
+                .into_iter()
+                .map(|value| {
+                    let leads: Vec<&Variant> = variants.iter().filter(|v| has(v, &name, &value)).collect();
+                    let agrees: Vec<&Variant> =
+                        leads.iter().copied().filter(|v| current.iter().filter(|(n, _)| *n != name).all(|(n, val)| has(v, n, val))).collect();
+                    let pool = if agrees.is_empty() { &leads } else { &agrees };
+                    let to = pool.iter().find(|v| v.in_stock).or(pool.first()).copied();
+                    Choice {
+                        selected: current.iter().any(|(n, v)| *n == name && *v == value),
+                        in_stock: to.is_some_and(|v| v.in_stock),
+                        slug: to.map(|v| v.slug.clone()).unwrap_or_default(),
+                        value,
+                    }
+                })
+                .collect();
+            (name, choices)
+        })
+        .collect()
+}
+
+/// The published variants of a store item, as the storefront offers them: what sets each apart, its
+/// own price and stock, and its picture; the ones people like best (ranking) first.
+pub async fn variants_of(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, parent: Uuid, customer: Option<Uuid>) -> Result<Vec<Value>> {
+    let found: Vec<(Uuid, Option<String>, Option<String>, Uuid)> = sqlx::query_as(
+        "select w.id, w.slug, w.title, w.item from e_website_item w join e_item i on i.tenant_id = w.tenant_id and i.id = w.item \
+         where w.tenant_id = $1 and w.variant_of = $2 and w.published and not coalesce(i.disabled, false) order by coalesce(w.ranking, 0) desc, w.created_at, w.id",
+    )
+    .bind(ctx.tenant)
+    .bind(parent)
+    .fetch_all(&mut **tx)
+    .await?;
+    if found.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<Uuid> = found.iter().map(|v| v.0).collect();
+    let items: Vec<Uuid> = found.iter().map(|v| v.3).collect();
+    let opts: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "select parent_id, \"option\", \"value\" from e_website_item__options where tenant_id = $1 and parent_id = any($2) order by parent_id, idx",
+    )
+    .bind(ctx.tenant)
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let prices = price_items(k, ctx, tx, store, &items, customer).await?;
+    let stocked = stock_items(tx, ctx.tenant, &items).await?;
+    let avail = available(tx, ctx.tenant, store, &items).await?;
+    let images = first_images(tx, ctx.tenant, &ids).await?;
+    Ok(found
+        .into_iter()
+        .map(|(id, slug, title, item)| {
+            let price = prices.get(&item).filter(|p| p.list > Decimal::ZERO);
+            let (in_stock, qty) = stock_view(store, stocked.contains(&item), avail.get(&item).copied().unwrap_or_default());
+            json!({
+                "slug": slug,
+                "title": title,
+                "options": opts.iter().filter(|(p, _, _)| *p == id).map(|(_, o, v)| json!({"option": o, "value": v})).collect::<Vec<_>>(),
+                "price": price.map(|p| p.view(&store.currency_code)),
+                "purchasable": price.is_some(),
+                "in_stock": in_stock,
+                "available_qty": qty,
+                "image": images.get(&id),
+            })
+        })
+        .collect())
+}
+
 /// Everything a product page needs: content, price, stock, categories, related items, reviews.
 pub async fn item_page(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: &str, customer: Option<Uuid>) -> Result<Value> {
     let wi = published_by_slug(k, ctx, tx, slug).await?;
@@ -648,6 +932,16 @@ pub async fn item_page(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: 
         cards(k, ctx, tx, store, &f, Sort::Ranking, 12, None, customer).await?.0
     };
     let (recent, more) = reviews(tx, ctx.tenant, wid, 10, None).await?;
+    // A store item with variants is sold through them; a variant says which item it is one of.
+    let variants = variants_of(k, ctx, tx, store, wid, customer).await?;
+    let group = match id(&wi, "variant_of") {
+        Some(parent) => {
+            let p = get(k, ctx, tx, "WebsiteItem", parent).await?;
+            Some(json!({"slug": s(&p, "slug"), "title": s(&p, "title"), "published": b(&p, "published")}))
+        }
+        None => None,
+    };
+    let options: Vec<Value> = rows(&wi, "options").iter().map(|o| json!({"option": s(o, "option"), "value": s(o, "value")})).collect();
     let site_max = d(&wi, "max_qty");
     let max_qty = if site_max > Decimal::ZERO { site_max.min(store.max_qty_per_line) } else { store.max_qty_per_line };
     Ok(json!({
@@ -659,7 +953,10 @@ pub async fn item_page(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: 
         "images": rows(&wi, "images").iter().map(|r| json!({"url": s(r, "image"), "alt": s(r, "alt_text")})).collect::<Vec<_>>(),
         "categories": categories.into_iter().map(|(slug, name)| json!({"slug": slug, "name": name})).collect::<Vec<_>>(),
         "price": price.map(|p| p.view(&store.currency_code)),
-        "purchasable": price.is_some(),
+        "purchasable": price.is_some() && variants.is_empty(),
+        "variant_of": group,
+        "options": options,
+        "variants": variants,
         "in_stock": in_stock,
         "available_qty": qty,
         "unit": uom,
@@ -765,6 +1062,56 @@ mod tests {
         assert_eq!(decode_cursor(&c).unwrap(), vec!["price_asc".to_string(), "12.5".into(), Uuid::nil().to_string()]);
         assert!(decode_cursor("not-a-cursor").is_err());
         assert!(decode_cursor(&URL_SAFE_NO_PAD.encode("{\"a\":1}")).is_err());
+    }
+
+    fn opts(pairs: &[(&str, &str)]) -> Options {
+        pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_variant_says_what_sets_it_apart_and_is_not_a_twin() {
+        assert_eq!(variant_title("Logo Tee", &opts(&[("Colour", "Red"), ("Size", "M")])), "Logo Tee — Red / M");
+        let sibs = vec![opts(&[("Colour", "Red"), ("Size", "M")]), opts(&[("Colour", "Red"), ("Size", "L")])];
+        assert!(option_problems(&opts(&[("colour", "blue"), ("Size", " M ")]), &sibs).is_empty(), "a new choice of the same options");
+        assert!(option_problems(&opts(&[("Colour", "RED"), ("size", "m")]), &sibs)[0].contains("already"), "the same choices, however written");
+        assert!(option_problems(&opts(&[("Colour", "Blue")]), &sibs)[0].contains("same options"), "a sibling names Size too");
+        assert!(option_problems(&opts(&[("Size", "S"), ("size", "M")]), &[])[0].contains("twice"));
+        assert!(option_problems(&opts(&[]), &[])[0].contains("what makes"));
+        assert!(option_problems(&opts(&[("Size", "S")]), &[]).is_empty(), "the first variant of a group has no one to differ from");
+    }
+
+    fn variant(slug: &str, pairs: &[(&str, &str)], in_stock: bool) -> Variant {
+        Variant { slug: slug.into(), options: opts(pairs), in_stock }
+    }
+
+    #[test]
+    fn the_choices_of_an_item_with_variants() {
+        let vs = vec![
+            variant("tee-red-m", &[("Colour", "Red"), ("Size", "M")], true),
+            variant("tee-red-l", &[("Colour", "Red"), ("Size", "L")], false),
+            variant("tee-blue-m", &[("Colour", "Blue"), ("Size", "M")], true),
+        ];
+        assert_eq!(default_variant(&vs).unwrap().slug, "tee-red-m");
+        assert_eq!(default_variant(&[variant("a", &[("Size", "S")], false)]).unwrap().slug, "a", "all out: still shown");
+        assert!(default_variant(&[]).is_none());
+        let groups = option_groups(&vs, "tee-red-m");
+        assert_eq!(groups.iter().map(|(n, c)| (n.as_str(), c.len())).collect::<Vec<_>>(), vec![("Colour", 2), ("Size", 2)]);
+        let size: Vec<(&str, &str, bool, bool)> = groups[1].1.iter().map(|c| (c.value.as_str(), c.slug.as_str(), c.selected, c.in_stock)).collect();
+        assert_eq!(size, vec![("M", "tee-red-m", true, true), ("L", "tee-red-l", false, false)], "L keeps the colour, and is sold out");
+        let colour: Vec<(&str, &str, bool)> = groups[0].1.iter().map(|c| (c.value.as_str(), c.slug.as_str(), c.selected)).collect();
+        assert_eq!(colour, vec![("Red", "tee-red-m", true), ("Blue", "tee-blue-m", false)]);
+        // From the sold-out red L, blue leads to the nearest blue that exists: M.
+        let from_l = option_groups(&vs, "tee-red-l");
+        assert_eq!(from_l[0].1[1].slug, "tee-blue-m");
+        assert!(from_l[1].1[1].selected && !from_l[1].1[0].selected);
+        assert!(option_groups(&[], "x").is_empty());
+    }
+
+    #[test]
+    fn a_search_is_its_words_not_its_whole() {
+        assert_eq!(search_terms("  mug   blue "), vec!["mug", "blue"]);
+        assert_eq!(search_terms("a b c d e f g h").len(), 6);
+        assert!(search_terms("   ").is_empty());
     }
 
     #[test]

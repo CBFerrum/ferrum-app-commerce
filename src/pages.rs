@@ -4,7 +4,7 @@
 //! storefront API, whose address the platform gives in `x-ferrum-site-api` along with the site's
 //! own origin (`x-ferrum-site-origin`); neither ever comes from the caller.
 
-use crate::catalog::{self, Listing, Sort};
+use crate::catalog::{self, Listing, Sort, Variant, default_variant, option_groups};
 use crate::store::Store;
 use ferrum_kernel::{Ctx, Error, Kernel, Result, SiteRequest, SiteResponse, Tx};
 use rust_decimal::Decimal;
@@ -58,7 +58,7 @@ pub async fn handle(k: &Kernel, ctx: &Ctx, req: &SiteRequest) -> Result<SiteResp
             Some(_) => site.page(400, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Search for at most 100 characters.</p>"),
             None => site.page(200, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Type what you are looking for above.</p>"),
         },
-        ["p", slug] => product(k, ctx, &mut tx, &site, slug).await?,
+        ["p", slug] => product(k, ctx, &mut tx, &site, slug, query("v")).await?,
         ["cart"] => site.script_page("Your cart", "cart", "Loading your cart…"),
         ["checkout"] => site.script_page("Checkout", "checkout", "Loading checkout…"),
         ["order"] => site.script_page("Your order", "order", "Loading your order…"),
@@ -181,6 +181,7 @@ impl Shop<'_> {
                 let img = image(&c["image"], 400);
                 let stock = if c["in_stock"].as_bool() == Some(false) { r#"<span class="out">Out of stock</span>"# } else { "" };
                 let price = c.get("price").filter(|p| !p.is_null()).map(|p| self.price(p)).unwrap_or_default();
+                let price = if c["from"].as_bool() == Some(true) && !price.is_empty() { format!(r#"<span class="from">From</span> {price}"#) } else { price };
                 Some(format!(
                     r#"<li><a class="card" href="/p/{}">{img}<span class="name">{}</span><span class="cost">{price}</span>{stock}</a></li>"#,
                     esc(slug),
@@ -257,14 +258,35 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, category: 
     })
 }
 
-async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str) -> Result<SiteResponse> {
+async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str, chosen: Option<&str>) -> Result<SiteResponse> {
     let p = match catalog::item_page(k, ctx, tx, site.store, slug, None).await {
         Ok(p) => p,
         Err(Error::NotFound(_)) => return Ok(site.missing()),
         Err(e) => return Err(e),
     };
+    // A variant is shown on its item's page, with its choice selected.
+    if let Some(parent) = p["variant_of"].as_object() {
+        return Ok(match (parent.get("slug").and_then(Value::as_str), parent.get("published").and_then(Value::as_bool)) {
+            (Some(parent), Some(true)) => moved(&format!("/p/{}?v={}", enc(parent), enc(slug))),
+            _ => site.missing(),
+        });
+    }
     let title = p["title"].as_str().unwrap_or(slug);
-    let images: Vec<&Value> = p["images"].as_array().into_iter().flatten().filter(|i| safe_image(i["url"].as_str()).is_some()).collect();
+    // An item with variants is sold through them: the page shows the one chosen (or the first that can be bought).
+    let variants: Vec<Variant> = p["variants"].as_array().into_iter().flatten().filter_map(Variant::from_json).collect();
+    let selected: Option<&Value> = if variants.is_empty() {
+        None
+    } else {
+        let want = chosen.filter(|c| variants.iter().any(|v| v.slug == *c)).map(str::to_string).or_else(|| default_variant(&variants).map(|v| v.slug.clone()));
+        want.and_then(|w| p["variants"].as_array().and_then(|a| a.iter().find(|v| v["slug"].as_str() == Some(w.as_str()))))
+    };
+    let shown = selected.unwrap_or(&p);
+    let buy_slug = shown["slug"].as_str().filter(|_| selected.is_some()).unwrap_or(slug);
+    let mut images: Vec<&Value> = p["images"].as_array().into_iter().flatten().filter(|i| safe_image(i["url"].as_str()).is_some()).collect();
+    if let Some(own) = selected.map(|v| &v["image"]).filter(|i| safe_image(i["url"].as_str()).is_some()) {
+        images.retain(|i| i["url"] != own["url"]);
+        images.insert(0, own);
+    }
     let gallery = match images.split_first() {
         Some((first, rest)) => {
             let thumbs: String = rest.iter().map(|i| image(i, 160)).collect();
@@ -287,24 +309,59 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
             ))
         })
         .unwrap_or_default();
-    let price = p.get("price").filter(|v| !v.is_null()).map(|v| site.price(v)).unwrap_or_default();
-    let in_stock = p["in_stock"].as_bool().unwrap_or(true);
-    let stock = match (in_stock, p["available_qty"].as_str().or(p["available_qty"].as_i64().map(|_| "")).filter(|q| !q.is_empty())) {
+    let price = shown.get("price").filter(|v| !v.is_null()).map(|v| site.price(v)).unwrap_or_default();
+    let in_stock = shown["in_stock"].as_bool().unwrap_or(true);
+    let stock = match (in_stock, shown["available_qty"].as_str().or(shown["available_qty"].as_i64().map(|_| "")).filter(|q| !q.is_empty())) {
         (false, _) => r#"<p class="out">Out of stock</p>"#.to_string(),
         (true, Some(q)) if site.store.show_stock_quantity => format!(r#"<p class="in">{} in stock</p>"#, esc(q)),
         (true, _) => r#"<p class="in">In stock</p>"#.to_string(),
     };
+    // What sets the shown variant apart, and the choices that lead to the others (plain links: they work without scripts).
+    let picks: String = match selected.and_then(|s| s["slug"].as_str()) {
+        Some(on) => option_groups(&variants, on)
+            .into_iter()
+            .map(|(name, choices)| {
+                let now = choices.iter().find(|c| c.selected).map(|c| c.value.as_str()).unwrap_or_default();
+                let links: String = choices
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            r#"<a class="pick{}{}" href="{}?v={}"{} aria-label="{}{}">{}</a>"#,
+                            if c.selected { " on" } else { "" },
+                            if c.in_stock { "" } else { " off" },
+                            esc(site.path),
+                            esc(&enc(&c.slug)),
+                            if c.selected { r#" aria-current="true""# } else { "" },
+                            esc(&c.value),
+                            if c.in_stock { "" } else { ", sold out" },
+                            esc(&c.value),
+                        )
+                    })
+                    .collect();
+                format!(r#"<fieldset class="option"><legend>{}: <strong>{}</strong></legend><div class="picks">{links}</div></fieldset>"#, esc(&name), esc(now))
+            })
+            .collect(),
+        None => String::new(),
+    };
+    let label = selected
+        .map(|s| s["options"].as_array().into_iter().flatten().filter_map(|o| o["value"].as_str()).collect::<Vec<_>>().join(" / "))
+        .filter(|l| !l.is_empty())
+        .map(|l| format!(r#"<p class="variant-name">{}</p>"#, esc(&l)))
+        .unwrap_or_default();
     let whole = p["unit"]["whole_number"].as_bool().unwrap_or(true);
     let max = p["max_qty"].as_str().unwrap_or("1000");
-    let buy = if p["purchasable"].as_bool() == Some(true) && (in_stock || !site.store.enforce_stock) {
+    let for_sale = if selected.is_some() { shown["purchasable"].as_bool() == Some(true) } else { p["purchasable"].as_bool() == Some(true) };
+    let buy = if for_sale && (in_stock || !site.store.enforce_stock) {
         format!(
             r#"<form class="add" action="/cart" method="get" data-item="{s}"><input type="hidden" name="add" value="{s}"><label>Quantity <input name="qty" type="number" min="{min}" max="{max}" step="{step}" value="1" inputmode="{mode}"></label><button class="button" type="submit">Add to cart</button><p class="added" role="status"></p></form>"#,
-            s = esc(slug),
+            s = esc(buy_slug),
             min = if whole { "1" } else { "0.001" },
             max = esc(max),
             step = if whole { "1" } else { "any" },
             mode = if whole { "numeric" } else { "decimal" },
         )
+    } else if selected.is_some() && !for_sale {
+        r#"<p class="muted">This choice is not for sale.</p>"#.to_string()
     } else {
         String::new()
     };
@@ -350,7 +407,7 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
         .map(|r| format!(r#"<section class="related"><h2>You may also like</h2>{}</section>"#, site.cards(r)))
         .unwrap_or_default();
     let first_image = images.first().and_then(|i| i["url"].as_str()).map(str::to_string);
-    let shown = p["price"]["price_with_tax"].as_str().filter(|_| site.store.display_prices_with_tax).or(p["price"]["price"].as_str());
+    let offered = shown["price"]["price_with_tax"].as_str().filter(|_| site.store.display_prices_with_tax).or(shown["price"]["price"].as_str());
     let mut data = json!({
         "@context": "https://schema.org",
         "@type": "Product",
@@ -359,7 +416,7 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
         "description": p["seo"]["description"],
         "image": first_image.as_deref().map(|i| absolute(site.origin, i)),
     });
-    if let Some(price) = shown {
+    if let Some(price) = offered {
         data["offers"] = json!({"@type": "Offer", "price": price, "priceCurrency": site.store.currency_code,
             "availability": if in_stock { "https://schema.org/InStock" } else { "https://schema.org/OutOfStock" }, "url": format!("{}/p/{slug}", site.origin)});
     }
@@ -369,7 +426,7 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
     let meta = Meta { kind: "product", description: p["seo"]["description"].as_str().map(str::to_string), image: first_image, data: Some(data) };
     let seo_title = p["seo"]["title"].as_str().unwrap_or(title);
     let main = format!(
-        r#"{crumbs}<article class="product">{gallery}<div class="buy"><h1>{}</h1><p class="cost">{price}</p>{stock}{short}{buy}</div></article>{description}{reviews}{related}"#,
+        r#"{crumbs}<article class="product">{gallery}<div class="buy"><h1>{}</h1>{label}<p class="cost">{price}</p>{stock}{picks}{short}{buy}</div></article>{description}{reviews}{related}"#,
         esc(title)
     );
     Ok(site.page(200, seo_title, Some(&meta), false, &main))
@@ -385,7 +442,7 @@ fn robots(origin: &str) -> SiteResponse {
 async fn sitemap(tx: &mut Tx, ctx: &Ctx, site: &Shop<'_>) -> Result<SiteResponse> {
     let items: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "select w.slug, w.updated_at from e_website_item w join e_item i on i.tenant_id = w.tenant_id and i.id = w.item \
-         where w.tenant_id = $1 and w.published and not coalesce(i.disabled, false) and coalesce(w.slug, '') <> '' order by w.slug limit $2",
+         where w.tenant_id = $1 and w.published and w.variant_of is null and not coalesce(i.disabled, false) and coalesce(w.slug, '') <> '' order by w.slug limit $2",
     )
     .bind(ctx.tenant)
     .bind(SITEMAP_ITEMS)
@@ -424,6 +481,13 @@ fn page_response(status: u16, html: String) -> SiteResponse {
     let mut r = SiteResponse::text(status, "text/html; charset=utf-8", html);
     // Prices and stock change; a page is good for a minute in shared caches, no longer.
     r.headers.push(("cache-control".into(), "public, max-age=60".into()));
+    r
+}
+
+/// A page that lives elsewhere for good (a variant's address becomes its item's).
+fn moved(to: &str) -> SiteResponse {
+    let mut r = SiteResponse::text(301, "text/plain; charset=utf-8", "");
+    r.headers.push(("location".into(), to.to_string()));
     r
 }
 

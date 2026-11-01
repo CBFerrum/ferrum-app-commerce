@@ -1031,11 +1031,25 @@ async fn place(t: &T, items: Value, email: &str, method: &str, key: &str) -> Pla
     }
 }
 
-async fn refunds() {
+/// A small shop on a fresh database: mugs and tees at 18% VAT, a flat delivery charge of 50, a
+/// card gateway ("fakepay") and cash on delivery.
+struct Shop {
+    t: T,
+    tenant: Uuid,
+    cid: Uuid,
+    stores: Doc,
+    products: Doc,
+    nos: Doc,
+    selling: Doc,
+    mug: Uuid,
+    tee: Uuid,
+}
+
+async fn small_shop(slug: &str) -> Shop {
     let k = fresh_kernel().await;
     let tenant = k
         .create_tenant(NewTenant {
-            slug: "refunds".into(),
+            slug: slug.into(),
             name: "Refund Shop".into(),
             admin_email: "admin@shop.test".into(),
             admin_password: "Correct-Horse-9".into(),
@@ -1045,12 +1059,11 @@ async fn refunds() {
         })
         .await
         .expect("tenant");
-    let session = k.login("refunds", "admin@shop.test", "Correct-Horse-9").await.expect("login");
+    let session = k.login(slug, "admin@shop.test", "Correct-Horse-9").await.expect("login");
     let ctx = k.load_ctx(tenant, session.user, Some(session.token_version), "it".into()).await.expect("ctx");
     let site = k.hooks.site("commerce").cloned().expect("storefront registered");
     let t = T { k: k.clone(), ctx, site };
 
-    // ───────────── a small shop: mugs and tees at 18% VAT, a flat delivery charge of 50 ─────────────
     let inr = t.find_one("Currency", json!({"code": "INR"})).await;
     let company = t.insert("Company", json!({"company_name": "Refund Shop Pvt Ltd", "abbr": "RS", "default_currency": inr["id"]})).await;
     let cid = uid(&company);
@@ -1101,6 +1114,11 @@ async fn refunds() {
     t.insert("WebsiteItem", json!({"item": mug.to_string(), "published": true})).await;
     t.insert("WebsiteItem", json!({"item": tee.to_string(), "published": true})).await;
 
+    Shop { t, tenant, cid, stores, products, nos, selling, mug, tee }
+}
+
+async fn refunds() {
+    let Shop { t, tenant, mug, tee, .. } = small_shop("refunds").await;
     // ───────────── who is who ─────────────
     let person = |email: &'static str, roles: Vec<String>| {
         let (k, admin) = (t.k.clone(), t.ctx.clone());
@@ -1197,12 +1215,19 @@ async fn refunds() {
     // The desk asks what may come back before it asks for anything, and nothing is left behind.
     let plan = |body: Value| t.call(Some(&manager), "POST", "/desk/refund-plan", &[], Some(body));
     let plan0 = plan(json!({"sales_order": b.so.to_string()})).await.unwrap();
-    assert_eq!((plan0["payable"].clone(), plan0["payment"]["gateway"].clone(), plan0["payment"]["label"].clone()), (json!(true), json!("fakepay"), json!("Card")));
+    assert_eq!(
+        (plan0["payable"].clone(), plan0["payment"]["gateway"].clone(), plan0["payment"]["label"].clone()),
+        (json!(true), json!("fakepay"), json!("Card"))
+    );
     assert_eq!((dec(&plan0["payment"]["paid"]), dec(&plan0["payment"]["refundable"])), (n("1121"), n("1121")));
     assert_eq!(plan0["lines"].as_array().unwrap().len(), 2, "the delivery charge is not a line to send back");
     assert!(plan0["lines"].as_array().unwrap().iter().all(|l| l["invoiced"] == json!(true)));
     assert_eq!(dec(&plan0["lines"].as_array().unwrap().iter().find(|l| l["id"] == json!(mug_line)).unwrap()["returnable"]), n("2"));
-    assert_eq!((plan0["shipping"]["available"].clone(), plan0["cancel"]["allowed"].clone(), plan0["estimate"].clone()), (json!(true), json!(false), Value::Null), "it has shipped");
+    assert_eq!(
+        (plan0["shipping"]["available"].clone(), plan0["cancel"]["allowed"].clone(), plan0["estimate"].clone()),
+        (json!(true), json!(false), Value::Null),
+        "it has shipped"
+    );
     let plan1 = plan(json!({"sales_order": b.so.to_string(), "lines": [{"sales_order_line": mug_line, "qty": "1"}], "include_shipping": true})).await.unwrap();
     assert_eq!((dec(&plan1["estimate"]["amount"]), plan1["estimate"]["errors"].clone()), (n("354"), json!([])));
     let plan2 = plan(json!({"sales_order": b.so.to_string(), "lines": [{"sales_order_line": mug_line, "qty": "3"}]})).await.unwrap();
@@ -1422,4 +1447,178 @@ async fn refunds() {
     );
     assert_eq!(t.available("logo-tee").await, n("4"), "the tee is back (it went out with the order, and came back)");
     assert_eq!(events(&t, "commerce.order_refunded").await.last().unwrap()["notify"], json!(false), "the shopper was not to be told");
+}
+
+// ───────────────────────────── variants: sizes and colours ─────────────────────────────
+
+#[test]
+fn variants_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(variants()).await.unwrap() });
+}
+
+/// A storefront page as the platform hands the request to the package: (status, headers, body).
+async fn html(t: &T, path: &str, query: &[(&str, &str)]) -> (u16, Vec<(String, String)>, String) {
+    let mut headers = Map::new();
+    headers.insert("x-ferrum-site-api".into(), json!("/api/site/variants/commerce"));
+    headers.insert("x-ferrum-site-origin".into(), json!("https://shop.example.com"));
+    let req = SiteRequest {
+        tenant: t.ctx.tenant,
+        user: None,
+        method: "GET".into(),
+        path: format!("/_site{path}"),
+        query: query.iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+        headers,
+        body: vec![],
+        client_ip: "203.0.113.7".into(),
+    };
+    let r = t.site.handle(&t.k, req).await.unwrap_or_else(|e| panic!("GET {path}: {e:?}"));
+    (r.status, r.headers, String::from_utf8(r.body).unwrap())
+}
+
+async fn variants() {
+    let Shop { t, tenant: _, cid, stores, products, nos, selling, mug, tee } = small_shop("variants").await;
+    // Three variants of the tee, each an item of its own with its own price and stock.
+    let make = |code: &'static str, name: &'static str, rate: &'static str| {
+        let (t, products, nos, selling) = (&t, &products, &nos, &selling);
+        async move {
+            let it = uid(&t.insert("Item", json!({"item_code": code, "item_name": name, "item_group": products["id"], "stock_uom": nos["id"]})).await);
+            t.insert("ItemPrice", json!({"item": it.to_string(), "price_list": selling["id"], "rate": rate})).await;
+            it
+        }
+    };
+    let red_m = make("TEE-RED-M", "Logo Tee Red M", "400").await;
+    let red_l = make("TEE-RED-L", "Logo Tee Red L", "420").await;
+    let blue_m = make("TEE-BLUE-M", "Logo Tee Blue M", "390").await;
+    let spare = make("SPARE", "Spare", "100").await;
+    let stock = t
+        .insert(
+            "StockEntry",
+            json!({"company": cid.to_string(), "purpose": "Opening Stock", "items": [
+                {"item": red_m.to_string(), "qty": "5", "basic_rate": "150", "target_warehouse": stores["id"]},
+                {"item": blue_m.to_string(), "qty": "3", "basic_rate": "150", "target_warehouse": stores["id"]}]}),
+        )
+        .await;
+    t.submit("StockEntry", uid(&stock)).await;
+    let parent = uid(&t.find_one("WebsiteItem", json!({"item": tee.to_string()})).await);
+    let opts = |pairs: &[(&str, &str)]| Value::Array(pairs.iter().map(|(o, v)| json!({"option": o, "value": v})).collect());
+    let variant =
+        |item: Uuid, pairs: &[(&str, &str)]| json!({"item": item.to_string(), "published": true, "variant_of": parent.to_string(), "options": opts(pairs)});
+
+    // ───────────── the rules ─────────────
+    let first = t.insert("WebsiteItem", variant(red_m, &[("Colour", "Red"), ("Size", "M")])).await;
+    assert_eq!((first["title"].clone(), first["slug"].clone()), (json!("Logo Tee — Red / M"), json!("logo-tee-red-m")), "named from the item and its choices");
+    t.insert("WebsiteItem", variant(red_l, &[("Colour", "Red"), ("Size", "L")])).await;
+    let bad = |label: &'static str, r: ferrum_kernel::Result<Doc>, field: &'static str, says: &'static str| match r {
+        Err(Error::Validation(f)) if f.iter().any(|x| x.field == field && x.message.contains(says)) => {}
+        other => panic!("{label}: expected {field} to say '{says}', got {other:?}"),
+    };
+    bad("twin", t.k.insert(&t.ctx, "WebsiteItem", obj(variant(spare, &[("colour", "RED"), ("size", "m")]))).await, "options", "already");
+    bad("different options", t.k.insert(&t.ctx, "WebsiteItem", obj(variant(spare, &[("Colour", "Blue")]))).await, "options", "same options");
+    bad(
+        "no options",
+        t.k.insert(&t.ctx, "WebsiteItem", obj(json!({"item": spare.to_string(), "variant_of": parent.to_string()}))).await,
+        "options",
+        "what makes",
+    );
+    bad("twice", t.k.insert(&t.ctx, "WebsiteItem", obj(variant(spare, &[("Size", "S"), ("size", "M")]))).await, "options", "twice");
+    let of_a_variant = json!({"item": spare.to_string(), "variant_of": sid(&first), "options": [{"option": "Colour", "value": "Red"}]});
+    bad("variant of a variant", t.k.insert(&t.ctx, "WebsiteItem", obj(of_a_variant)).await, "variant_of", "one level deep");
+    bad("self", t.k.update(&t.ctx, "WebsiteItem", parent, obj(json!({"variant_of": parent.to_string()})), None).await, "variant_of", "own parent");
+    let mug_wi = uid(&t.find_one("WebsiteItem", json!({"item": mug.to_string()})).await);
+    bad(
+        "a group that has variants joins another",
+        t.k.update(&t.ctx, "WebsiteItem", parent, obj(json!({"variant_of": mug_wi.to_string(), "options": [{"option": "X", "value": "Y"}]})), None).await,
+        "variant_of",
+        "variants of its own",
+    );
+    t.insert("WebsiteItem", variant(blue_m, &[("Colour", "Blue"), ("Size", "M")])).await;
+
+    // ───────────── browsing and search ─────────────
+    let cat = t.get_pub("/catalog").await;
+    let mut slugs: Vec<&str> = cat["items"].as_array().unwrap().iter().map(|c| c["slug"].as_str().unwrap()).collect();
+    slugs.sort();
+    assert_eq!(slugs, vec!["blue-mug", "logo-tee"], "a tee once, its variants under it: {cat}");
+    let card = cat["items"].as_array().unwrap().iter().find(|c| c["slug"] == json!("logo-tee")).unwrap();
+    assert_eq!(
+        (card["from"].clone(), dec(&card["price"]["price"]), card["in_stock"].clone()),
+        (json!(true), n("390"), json!(true)),
+        "from the cheapest variant, its own price ignored"
+    );
+    assert!(card["available_qty"].is_null(), "no quantity of its own");
+    for (query, found) in [
+        ("q=red", 1),
+        ("q=blue tee", 1),
+        ("q=tee blue", 1),
+        ("q=TEE-BLUE", 1),
+        ("q=zzz", 0),
+        ("q=mug", 1),
+        ("min_price=380&max_price=395", 1),
+        ("in_stock=1", 2),
+    ] {
+        assert_eq!(t.get_pub(&format!("/catalog?{query}")).await["items"].as_array().unwrap().len(), found, "{query}");
+    }
+    assert_eq!(t.get_pub("/catalog?sort=price_desc").await["items"][0]["slug"], json!("logo-tee"), "sorted by the group's price");
+    assert_eq!(t.get_pub("/catalog?sort=price_asc").await["items"][0]["slug"], json!("blue-mug"));
+
+    // ───────────── the item and its variants ─────────────
+    let page = t.get_pub("/items/logo-tee").await;
+    assert_eq!((page["variants"].as_array().unwrap().len(), page["purchasable"].clone()), (3, json!(false)), "sold through its variants");
+    assert_eq!(page["variants"][0]["slug"], json!("logo-tee-red-m"));
+    assert_eq!(page["variants"][0]["options"], json!([{"option": "Colour", "value": "Red"}, {"option": "Size", "value": "M"}]));
+    assert_eq!((page["variants"][1]["in_stock"].clone(), page["variants"][2]["in_stock"].clone()), (json!(false), json!(true)), "red L has none");
+    let one = t.get_pub("/items/logo-tee-red-m").await;
+    assert_eq!((one["variant_of"]["slug"].clone(), one["purchasable"].clone()), (json!("logo-tee"), json!(true)));
+    assert_eq!(t.available("logo-tee-red-m").await, n("5"));
+
+    // ───────────── the page, and its choices as plain links ─────────────
+    let (status, _, body) = html(&t, "/p/logo-tee", &[]).await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#"<legend>Colour: <strong>Red</strong></legend>"#) && body.contains(r#"<legend>Size: <strong>M</strong></legend>"#), "{body}");
+    assert!(body.contains(r#"class="pick on" href="/p/logo-tee?v=logo-tee-red-m" aria-current="true" aria-label="Red">Red</a>"#), "{body}");
+    assert!(body.contains(r#"class="pick off" href="/p/logo-tee?v=logo-tee-red-l" aria-label="L, sold out">L</a>"#), "sold out is said, not hidden: {body}");
+    assert!(body.contains(r#"href="/p/logo-tee?v=logo-tee-blue-m""#), "blue keeps the size that exists");
+    assert!(body.contains(r#"data-item="logo-tee-red-m""#) && body.contains(r#"<p class="variant-name">Red / M</p>"#) && body.contains("<h1>Logo Tee</h1>"));
+    assert!(body.contains("INR 400.00"), "the chosen variant's price: {body}");
+    let (_, _, blue) = html(&t, "/p/logo-tee", &[("v", "logo-tee-blue-m")]).await;
+    assert!(blue.contains(r#"data-item="logo-tee-blue-m""#) && blue.contains("INR 390.00") && blue.contains("Blue / M"), "{blue}");
+    let (_, _, sold_out) = html(&t, "/p/logo-tee", &[("v", "logo-tee-red-l")]).await;
+    assert!(sold_out.contains(r#"<p class="out">Out of stock</p>"#) && !sold_out.contains(r#"class="add""#), "nothing to buy: {sold_out}");
+    let (_, _, nonsense) = html(&t, "/p/logo-tee", &[("v", "<script>")]).await;
+    assert!(
+        nonsense.contains(r#"data-item="logo-tee-red-m""#) && !nonsense.contains("<script>"),
+        "an unknown choice falls back to the first that can be bought"
+    );
+    let (status, headers, _) = html(&t, "/p/logo-tee-red-l", &[]).await;
+    assert_eq!(
+        (status, headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.as_str())),
+        (301, Some("/p/logo-tee?v=logo-tee-red-l")),
+        "a variant's address is its item's"
+    );
+    let (_, _, home) = html(&t, "/", &[]).await;
+    assert!(home.contains(r#"<span class="from">From</span>"#) && !home.contains("logo-tee-red"), "{home}");
+    let (_, _, map) = html(&t, "/sitemap.xml", &[]).await;
+    assert!(map.contains("/p/logo-tee<") && !map.contains("logo-tee-red"), "variants are not pages of their own: {map}");
+
+    // ───────────── buying one ─────────────
+    let (cart, _) = t.new_cart(None, json!([{"item": "logo-tee-red-m", "qty": 2}])).await;
+    assert_eq!(
+        field_error(&t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "logo-tee"}))).await, "item"),
+        "choose one of its variants, such as a size or a colour"
+    );
+    assert_eq!(field_error(&t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "logo-tee-red-l"}))).await, "qty"), "this item is out of stock");
+    let view = t.cart_ok(&cart, "GET", "/cart", None).await;
+    assert_eq!(view["items"][0]["title"], json!("Logo Tee — Red / M"));
+    t.cart_ok(&cart, "PUT", "/cart/details", Some(details(GUEST, "Asha Rao", "IN"))).await;
+    let placed = t.checkout(None, &cart, "variant-order-1", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("checkout");
+    assert_eq!(placed["order"]["items"][0]["title"], json!("Logo Tee — Red / M"));
+    assert_eq!(t.available("logo-tee-red-m").await, n("3"), "the order holds its two");
+    assert_eq!(t.available("logo-tee-blue-m").await, n("3"), "the others are untouched");
+    // Whoever bought a variant bought the item: the review of the item is a verified purchase.
+    let review = t.insert("ItemReview", json!({"website_item": parent.to_string(), "rating": 5, "reviewer_name": "Asha", "reviewer_email": GUEST})).await;
+    assert_eq!(review["verified_purchase"], json!(true));
+    let stranger =
+        t.insert("ItemReview", json!({"website_item": parent.to_string(), "rating": 4, "reviewer_name": "Zed", "reviewer_email": "zed@example.com"})).await;
+    assert_eq!(stranger["verified_purchase"], json!(false));
 }
