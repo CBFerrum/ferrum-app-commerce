@@ -556,7 +556,7 @@ function shipments(o) {
       { class: "shipment" },
       h("p", {}, h("strong", { text: "Shipped" }), s.date ? ` on ${new Date(`${s.date}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "long" })}` : ""),
       s.carrier || s.tracking_number ? h("p", { class: "muted", text: [s.carrier, s.tracking_number].filter(Boolean).join(" · ") }) : null,
-      s.tracking_url ? h("p", {}, h("a", { class: "button quiet", href: s.tracking_url, target: "_blank", rel: "noopener noreferrer", text: "Track your parcel" })) : null,
+      typeof s.tracking_url === "string" && s.tracking_url.startsWith("https://") ? h("p", {}, h("a", { class: "button quiet", href: s.tracking_url, target: "_blank", rel: "noopener noreferrer", text: "Track your parcel" })) : null,
     ),
   );
 }

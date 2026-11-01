@@ -121,6 +121,7 @@ function Payments() {
 
 interface Review {
   id: string;
+  version?: number;
   rating?: number | null;
   title?: string | null;
   review?: string | null;
@@ -133,12 +134,12 @@ function Reviews() {
   const [busy, setBusy] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["commerce", "reviews"],
-    queryFn: ({ signal }) => list<Review>("ItemReview", { filters: f([["status", "=", "Pending"]]), sort: "created_at asc", limit: 20, count: "true", titles: "true", fields: "website_item,rating,title,review,reviewer_name" }, signal),
+    queryFn: ({ signal }) => list<Review>("ItemReview", { filters: f([["status", "=", "Pending"]]), sort: "created_at asc", limit: 20, count: "true", titles: "true", fields: "website_item,rating,title,review,reviewer_name,version" }, signal),
   });
   const decide = async (r: Review, status: "Approved" | "Rejected") => {
     setBusy(r.id);
     try {
-      await api.patch(`/api/v1/ItemReview/${r.id}`, { status });
+      await api.patch(`/api/v1/ItemReview/${r.id}`, { status }, { ifMatch: r.version });
       toast(`${status === "Approved" ? "Published" : "Rejected"}: ${r.reviewer_name}'s review`);
       await qc.invalidateQueries({ queryKey: ["commerce", "reviews"] });
     } catch (err) {
