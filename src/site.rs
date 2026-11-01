@@ -302,6 +302,12 @@ async fn read_route(k: &Kernel, r: &Req<'_>, segs: &[&str]) -> Result<Value> {
             let so = orders::guest_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "email")?, text(&body, "token")?).await?;
             json!({"order": orders::order_view(k, &r.ctx, &mut tx, &store, &so).await?})
         }
+        // The link a shopper was sent: the number and the token alone, no email, and a thinner view.
+        ("POST", ["orders", "track"]) => {
+            let body = r.body()?;
+            let so = orders::tracked_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "token")?).await?;
+            json!({"order": orders::track_view(orders::order_view(k, &r.ctx, &mut tx, &store, &so).await?)})
+        }
         ("GET", ["orders", number]) => {
             let user = r.signed_in()?;
             let so = orders::own_order(k, &r.ctx, &mut tx, user, number).await?;

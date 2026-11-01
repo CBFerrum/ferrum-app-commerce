@@ -1,0 +1,75 @@
+- name: ReturnReason
+  label: Return Reason
+  kind: master
+  module: commerce
+  title_field: reason
+  description: "Why goods come back or a payment is sent back. The person asking for a refund picks one."
+  fields:
+    - {name: reason, type: data, required: true, unique: true, max_length: 140, in_list: true}
+    - {name: restock, type: check, default: true, in_list: true, description: "Goods returned for this reason can usually be sold again (the person can still say they cannot)"}
+    - {name: disabled, type: check, in_filter: true}
+  list: {columns: [reason, restock, disabled], sort: reason asc}
+
+- name: OrderRefundLine
+  label: Refund Line
+  kind: child
+  fields:
+    - {name: sales_order_line, type: data, required: true, max_length: 64, label: Order Line, description: "The line of the order that comes back"}
+    - {name: item, type: link, to: Item, read_only: true, in_list: true}
+    - {name: item_name, type: data, read_only: true, in_list: true}
+    - {name: qty, type: decimal, required: true, min: "0.000000001", in_list: true}
+    - {name: restock, type: check, default: true, in_list: true, description: "The goods go back into stock"}
+
+- name: OrderRefund
+  label: Refund
+  kind: document
+  module: commerce
+  company_scoped: true
+  title_field: order_number
+  numbering: {template: "REFUND-{YYYY}-{seq:5}"}
+  search_fields: [order_number, refund_reference]
+  description: "Money sent back for a web order: goods that came back (a return: the goods go back into stock and the invoice is credited) or an order cancelled before it shipped. A person approves it, the gateway the order was paid with carries it out, and the books follow."
+  fields:
+    - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
+    - {name: sales_order, type: link, to: SalesOrder, required: true, in_list: true, in_filter: true}
+    - {name: order_number, type: data, read_only: true, in_list: true}
+    - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
+    - {name: kind, type: select, options: [Return, Cancellation], default: Return, required: true, in_list: true, in_filter: true}
+    - {name: reason, type: link, to: ReturnReason, required: true, in_filter: true}
+    - {name: note, type: text, max_length: 2000}
+    - {name: lines, type: table, of: OrderRefundLine, visible_if: "doc.kind == 'Return'"}
+    - {name: include_shipping, type: check, label: Refund the Delivery Charge Too, visible_if: "doc.kind == 'Return'"}
+    - {name: notify_customer, type: check, default: true}
+    - {name: payment_request, type: link, to: PaymentRequest, read_only: true}
+    - {name: gateway, type: data, read_only: true, max_length: 40, in_list: true, in_filter: true}
+    - {name: payment_reference, type: data, read_only: true, max_length: 200, description: "The gateway's own reference for the payment being refunded"}
+    - {name: currency, type: link, to: Currency, read_only: true}
+    - {name: currency_code, type: data, read_only: true, max_length: 3}
+    - {name: amount, type: currency, currency: currency, read_only: true, in_list: true, description: "What goes back to the shopper: worked out by the server"}
+    - {name: status, type: select, options: [Requested, Approved, Refunded, Refund Failed, Declined], default: Requested, read_only: true, in_list: true, in_filter: true}
+    - {name: requested_by, type: email, read_only: true, no_copy: true}
+    - {name: approved_by, type: email, read_only: true, no_copy: true}
+    - {name: approved_at, type: datetime, read_only: true, no_copy: true}
+    - {name: refund_reference, type: data, read_only: true, max_length: 200, no_copy: true}
+    - {name: refund_error, type: text, read_only: true, max_length: 2000, no_copy: true}
+    - {name: refunded_at, type: datetime, read_only: true, no_copy: true}
+    - {name: decision_note, type: text, read_only: true, max_length: 2000, no_copy: true, description: "Why it was declined, or how it was refunded another way"}
+    - {name: booked, type: check, read_only: true, no_copy: true, in_filter: true, description: "The books follow the refund: stock returned, invoice credited, money out"}
+    - {name: booking_error, type: text, read_only: true, max_length: 2000, no_copy: true}
+    - {name: delivery_note, type: link, to: DeliveryNote, read_only: true, no_copy: true}
+    - {name: credit_note, type: link, to: SalesInvoice, read_only: true, no_copy: true}
+    - {name: journal_entry, type: link, to: JournalEntry, read_only: true, no_copy: true}
+  indexes: [[sales_order, status]]
+  form:
+    - {label: Refund, fields: [sales_order, order_number, customer, kind, reason, note, status, amount, currency_code]}
+    - {label: Goods, fields: [lines, include_shipping, notify_customer]}
+    - {label: Payment, fields: [payment_request, gateway, payment_reference, requested_by, approved_by, approved_at, refund_reference, refunded_at, refund_error, decision_note]}
+    - {label: Books, collapsible: true, fields: [booked, booking_error, delivery_note, credit_note, journal_entry]}
+  actions:
+    - {name: approve_refund, label: Approve Refund, permission: write, condition: "doc.status == 'Requested' || doc.status == 'Refund Failed'", confirm: "Send this money back? The gateway the order was paid with carries it out."}
+    - {name: decline, label: Decline, permission: write, condition: "doc.status == 'Requested' || doc.status == 'Refund Failed'", params: [{name: note, label: Why, type: text}]}
+    - {name: mark_refunded, label: Refunded Another Way, permission: write, condition: "doc.status == 'Requested' || doc.status == 'Approved' || doc.status == 'Refund Failed'", params: [{name: refund_reference, label: Reference, type: data}, {name: note, label: How it was refunded, type: text, required: true}]}
+    - {name: refund_done, label: Refund Done, permission: write, hidden: true}
+    - {name: refund_failed, label: Refund Failed, permission: write, hidden: true}
+    - {name: post_books, label: Post to the Books, permission: write, condition: "doc.status == 'Refunded' && !doc.booked"}
+  list: {columns: [number, order_number, kind, amount, gateway, status], sort: created_at desc}

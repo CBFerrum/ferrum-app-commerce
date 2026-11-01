@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::str::FromStr;
 use uuid::Uuid;
 
-const PLUGIN_DOMAIN: &str = "@plugins.ferrum.invalid";
+pub(crate) const PLUGIN_DOMAIN: &str = "@plugins.ferrum.invalid";
 
 /// Creates and submits the payment request of an order; `None` when nothing is to be paid.
 pub async fn create_request(
@@ -32,7 +32,7 @@ pub async fn create_request(
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let amount = d(so, "rounded_total");
     if amount <= Decimal::ZERO {
-        set_order_status(k, ctx, tx, so_id, "Not Required").await?;
+        set_order_status(k, ctx, tx, so_id, "Not Required", Some(&method.gateway)).await?;
         return Ok(None);
     }
     let cur = id(so, "currency").ok_or_else(|| Error::internal("order without currency"))?;
@@ -59,37 +59,66 @@ pub async fn create_request(
     let draft = k.insert_tx(ctx, tx, "PaymentRequest", pr).await?;
     let pr_id = id(&draft, "id").ok_or_else(|| Error::internal("payment request without id"))?;
     let submitted = k.submit_tx(ctx, tx, "PaymentRequest", pr_id, None).await?;
-    set_order_status(k, ctx, tx, so_id, "Pending").await?;
+    set_order_status(k, ctx, tx, so_id, "Pending", Some(&method.gateway)).await?;
     Ok(Some(submitted))
 }
 
-async fn set_order_status(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid, status: &str) -> Result<()> {
+/// Sets the order's web payment status, and the method it is paid with when a request is made.
+async fn set_order_status(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid, status: &str, method: Option<&str>) -> Result<()> {
     let mut v = Doc::new();
     set(&mut v, "commerce_payment_status", status);
+    if let Some(m) = method {
+        set(&mut v, "commerce_payment_method", m);
+    }
     k.set_values_tx(&sys(ctx), tx, "SalesOrder", so, v).await
 }
 
-/// The order's web payment status from its requests: paid if any request is, else the latest.
+/// The order's web payment status from its requests: paid if any request is, else the latest; and,
+/// once money has gone back, how much of it (a cancelled order's payment is reversed, so it has no
+/// paid request left, only the refund).
 pub async fn refresh_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid) -> Result<()> {
-    let statuses: Vec<String> = sqlx::query_scalar(
-        "select status from e_payment_request where tenant_id = $1 and sales_order = $2 and docstatus > 0 order by created_at desc, id desc",
+    let requests: Vec<(String, Decimal)> = sqlx::query_as(
+        "select status, amount from e_payment_request where tenant_id = $1 and sales_order = $2 and docstatus > 0 order by created_at desc, id desc",
     )
     .bind(ctx.tenant)
     .bind(so)
     .fetch_all(&mut **tx)
     .await?;
-    let status = if statuses.iter().any(|x| x == "Paid") {
-        "Paid"
-    } else {
-        match statuses.first().map(String::as_str) {
-            Some("Initiated") => "Pending",
-            Some("Failed") => "Failed",
-            Some("Expired") => "Expired",
-            Some("Cancelled") => "Cancelled",
-            _ => return Ok(()),
-        }
-    };
-    set_order_status(k, ctx, tx, so, status).await
+    let sent: Decimal =
+        sqlx::query_scalar("select coalesce(sum(amount), 0) from e_order_refund where tenant_id = $1 and sales_order = $2 and status = 'Refunded'")
+            .bind(ctx.tenant)
+            .bind(so)
+            .fetch_one(&mut **tx)
+            .await?;
+    let status = web_status(&requests, sent);
+    match status {
+        Some(status) => set_order_status(k, ctx, tx, so, status, None).await,
+        None => Ok(()),
+    }
+}
+
+/// The status behind `refresh_order`: `requests` are (status, amount), newest first; `sent` is what
+/// refunds have returned.
+pub(crate) fn web_status(requests: &[(String, Decimal)], sent: Decimal) -> Option<&'static str> {
+    if let Some((_, paid)) = requests.iter().find(|(st, _)| st == "Paid") {
+        return Some(if sent <= Decimal::ZERO {
+            "Paid"
+        } else if sent >= *paid {
+            "Refunded"
+        } else {
+            "Partly Refunded"
+        });
+    }
+    if sent > Decimal::ZERO {
+        return Some("Refunded");
+    }
+    match requests.first().map(|(st, _)| st.as_str()) {
+        Some("Initiated") => Some("Pending"),
+        Some("Failed") => Some("Failed"),
+        Some("Expired") => Some("Expired"),
+        Some("Cancelled") => Some("Cancelled"),
+        _ => None,
+    }
 }
 
 /// Gateway plugins act as `<name>@plugins.ferrum.invalid`; one may settle only its own requests.
@@ -101,7 +130,7 @@ fn caller_may_settle(ctx: &Ctx, gateway: &str) -> Result<()> {
     }
 }
 
-fn param_text(params: &Value, key: &str, max: usize) -> Result<Option<String>> {
+pub(crate) fn param_text(params: &Value, key: &str, max: usize) -> Result<Option<String>> {
     match params.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(v)) => {
@@ -460,6 +489,15 @@ pub struct WebOrderHook;
 
 #[async_trait]
 impl DocHook for WebOrderHook {
+    async fn action(&self, hc: &mut HookCtx<'_>, name: &str, doc: &Doc, params: &Value) -> Result<Option<Value>> {
+        Ok(Some(match name {
+            "web_ship" => crate::ship::web_ship(hc, doc, params).await?,
+            "web_invoice" => crate::ship::web_invoice(hc, doc).await?,
+            "web_tracking_link" => crate::ship::tracking_link(hc, doc).await?,
+            _ => return Ok(None),
+        }))
+    }
+
     async fn before_cancel(&self, hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
         if !crate::installed(hc.ctx) || !b(doc, "commerce_web_order") {
             return Ok(());
@@ -601,6 +639,24 @@ mod tests {
         assert!(caller_may_settle(&ctx("paypal@plugins.ferrum.invalid"), "stripe").is_err());
         assert!(caller_may_settle(&ctx("stripe@plugins.ferrum.invalid"), "Manual").is_err(), "plugins never settle offline payments");
         assert!(caller_may_settle(&ctx("accounts@shop.test"), "stripe").is_ok(), "staff may record a payment the gateway confirmed");
+    }
+
+    #[test]
+    fn the_web_status_follows_the_payment_and_what_went_back() {
+        let paid = |sent: &str| web_status(&[("Paid".into(), Decimal::from(100))], sent.parse().unwrap());
+        assert_eq!((paid("0"), paid("40"), paid("100")), (Some("Paid"), Some("Partly Refunded"), Some("Refunded")));
+        assert_eq!(
+            web_status(&[("Cancelled".into(), Decimal::from(100))], Decimal::from(100)),
+            Some("Refunded"),
+            "a cancelled order's payment was reversed, not lost"
+        );
+        let open = |st: &str| web_status(&[(st.into(), Decimal::from(100))], Decimal::ZERO);
+        assert_eq!(
+            (open("Initiated"), open("Failed"), open("Expired"), open("Cancelled"), open("Odd")),
+            (Some("Pending"), Some("Failed"), Some("Expired"), Some("Cancelled"), None)
+        );
+        // A paid request anywhere in the list wins over a newer failed one.
+        assert_eq!(web_status(&[("Failed".into(), Decimal::from(100)), ("Paid".into(), Decimal::from(100))], Decimal::ZERO), Some("Paid"));
     }
 
     #[test]

@@ -165,8 +165,12 @@ fn details(email: &str, name: &str, country: &str) -> Value {
     json!({"email": email, "name": name, "phone": "+91 98450 00000", "shipping_address": address(country)})
 }
 
+/// The tests share one database that each of them resets: one at a time.
+static DB: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn storefront_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
     // Same runtime shape as the server: unoptimized async hook chains need more than 2 MiB.
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
     rt.block_on(async { tokio::spawn(scenario()).await.unwrap() });
@@ -962,4 +966,441 @@ async fn scenario() {
     // The guest customer's contact links nobody: guests are never portal accounts.
     let meera = portal_user("meera@example.com").await;
     assert_eq!(t.ok(Some(&meera), "GET", "/orders", &[], None).await["orders"], json!([]));
+}
+
+// ───────────────────────────── shipping, tracking, returns and refunds ─────────────────────────────
+
+#[test]
+fn returns_and_refunds_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(refunds()).await.unwrap() });
+}
+
+/// What a customer's account owes, from the open item behind a document.
+async fn outstanding(t: &T, item: Uuid) -> Decimal {
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    let v: Option<Decimal> = sqlx::query_scalar("select outstanding from open_item where tenant_id = $1 and id = $2")
+        .bind(t.ctx.tenant)
+        .bind(item)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    v.expect("an open item")
+}
+
+/// The events a topic put in the outbox, oldest first.
+async fn events(t: &T, topic: &str) -> Vec<Value> {
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    sqlx::query_scalar("select payload from outbox where tenant_id = $1 and topic = $2 order by id")
+        .bind(t.ctx.tenant)
+        .bind(topic)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap()
+}
+
+struct Placed {
+    so: Uuid,
+    number: String,
+    token: String,
+    request: Option<Uuid>,
+    total: Decimal,
+}
+
+/// A gateway (or a person) confirms a payment request.
+async fn pay(t: &T, who: &Ctx, request: Uuid, total: Decimal, reference: &str) {
+    t.k.run_action(who, "PaymentRequest", request, "mark_paid", json!({"amount": total.to_string(), "currency": "INR", "gateway_reference": reference}))
+        .await
+        .expect("paid");
+}
+
+/// A guest's order through the storefront, as a browser would place it.
+async fn place(t: &T, items: Value, email: &str, method: &str, key: &str) -> Placed {
+    let (cart, _) = t.new_cart(None, items).await;
+    t.cart_ok(&cart, "PUT", "/cart/details", Some(details(email, "Asha Rao", "IN"))).await;
+    let done = t.checkout(None, &cart, key, json!({"payment_method": method, "accept_terms": true})).await.expect("checkout");
+    let number = done["order"]["number"].as_str().unwrap().to_string();
+    let so = uid(&t.find_one("SalesOrder", json!({"number": number})).await);
+    Placed {
+        so,
+        number,
+        token: done["order_token"].as_str().unwrap().to_string(),
+        request: done["payment_request"]["id"].as_str().map(|r| r.parse().unwrap()),
+        total: dec(&done["order"]["totals"]["rounded_total"]),
+    }
+}
+
+async fn refunds() {
+    let k = fresh_kernel().await;
+    let tenant = k
+        .create_tenant(NewTenant {
+            slug: "refunds".into(),
+            name: "Refund Shop".into(),
+            admin_email: "admin@shop.test".into(),
+            admin_password: "Correct-Horse-9".into(),
+            admin_name: None,
+            packages: vec!["commerce".into()],
+            settings: Some(json!({"fiscal_year_start_month": 4})),
+        })
+        .await
+        .expect("tenant");
+    let session = k.login("refunds", "admin@shop.test", "Correct-Horse-9").await.expect("login");
+    let ctx = k.load_ctx(tenant, session.user, Some(session.token_version), "it".into()).await.expect("ctx");
+    let site = k.hooks.site("commerce").cloned().expect("storefront registered");
+    let t = T { k: k.clone(), ctx, site };
+
+    // ───────────── a small shop: mugs and tees at 18% VAT, a flat delivery charge of 50 ─────────────
+    let inr = t.find_one("Currency", json!({"code": "INR"})).await;
+    let company = t.insert("Company", json!({"company_name": "Refund Shop Pvt Ltd", "abbr": "RS", "default_currency": inr["id"]})).await;
+    let cid = uid(&company);
+    let stores = t.find_one("Warehouse", json!({"warehouse_name": "Stores", "company": cid.to_string()})).await;
+    let output_tax = t.find_one("Account", json!({"account_name": "Output Tax", "company": cid.to_string()})).await;
+    let vat = t
+        .insert(
+            "TaxTemplate",
+            json!({"title": "VAT 18%", "company": cid.to_string(), "kind": "Sales", "is_default": true,
+                   "rows": [{"charge_type": "On Net Total", "account": output_tax["id"], "description": "VAT", "rate": "18"}]}),
+        )
+        .await;
+    let products = t.find_one("ItemGroup", json!({"group_name": "Products"})).await;
+    let services = t.find_one("ItemGroup", json!({"group_name": "Services"})).await;
+    let nos = t.find_one("Uom", json!({"uom_name": "Nos"})).await;
+    let item = |code: &str, name: &str, extra: Value| {
+        let mut v = json!({"item_code": code, "item_name": name, "item_group": products["id"], "stock_uom": nos["id"]});
+        v.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+        v
+    };
+    let mug = uid(&t.insert("Item", item("MUG", "Blue Mug", json!({}))).await);
+    let tee = uid(&t.insert("Item", item("TEE", "Logo Tee", json!({}))).await);
+    let ship = uid(&t.insert("Item", item("SHIP", "Shipping", json!({"is_stock_item": false, "item_group": services["id"]}))).await);
+    let selling = t.find_one("PriceList", json!({"price_list_name": "Standard Selling"})).await;
+    for (it, rate) in [(mug, "250"), (tee, "400")] {
+        t.insert("ItemPrice", json!({"item": it.to_string(), "price_list": selling["id"], "rate": rate})).await;
+    }
+    let opening = t
+        .insert(
+            "StockEntry",
+            json!({"company": cid.to_string(), "purpose": "Opening Stock", "items": [
+                {"item": mug.to_string(), "qty": "10", "basic_rate": "90", "target_warehouse": stores["id"]},
+                {"item": tee.to_string(), "qty": "5", "basic_rate": "150", "target_warehouse": stores["id"]}]}),
+        )
+        .await;
+    t.submit("StockEntry", uid(&opening)).await;
+    t.insert(
+        "StoreSettings",
+        json!({"store_name": "Refund Shop", "company": cid.to_string(), "currency": inr["id"], "price_list": selling["id"], "tax_template": sid(&vat),
+               "warehouses": [{"warehouse": stores["id"]}], "fulfilment_warehouse": stores["id"], "enforce_stock": true, "show_stock_quantity": true,
+               "allow_guest_checkout": true, "shipping_item": ship.to_string(), "allowed_countries": [{"country_code": "IN", "country_name": "India"}],
+               "payment_methods": [{"gateway": "fakepay", "label": "Card", "expiry_minutes": 30},
+                                   {"gateway": "Cash on Delivery", "label": "Cash on delivery", "expiry_minutes": 0}],
+               "store_url": "https://shop.example.com"}),
+    )
+    .await;
+    t.insert("ShippingRule", json!({"label": "Standard", "basis": "Fixed", "amount": "50", "countries": [{"country_code": "IN"}]})).await;
+    t.insert("WebsiteItem", json!({"item": mug.to_string(), "published": true})).await;
+    t.insert("WebsiteItem", json!({"item": tee.to_string(), "published": true})).await;
+
+    // ───────────── who is who ─────────────
+    let person = |email: &'static str, roles: Vec<String>| {
+        let (k, admin) = (t.k.clone(), t.ctx.clone());
+        async move {
+            let u = k.create_user(&admin, email, "Someone", Some("Correct-Horse-9"), &roles, false).await.unwrap();
+            k.load_ctx(tenant, u, None, "it".into()).await.unwrap()
+        }
+    };
+    let manager = person("manager@shop.test", vec!["Website Manager".into()]).await;
+    let clerk = person("clerk@shop.test", vec!["Sales User".into()]).await;
+    let stranger = person("stranger@example.com", vec![]).await;
+    let gateway_user = |name: &'static str| {
+        let (k, admin) = (t.k.clone(), t.ctx.clone());
+        async move {
+            let role = format!("plugin:{name}");
+            for entity in ["PaymentRequest", "PaymentException", "OrderRefund"] {
+                let p = PermissionDef { entity: entity.into(), read: true, write: true, ..Default::default() };
+                k.set_role_permission(&admin, &role, &p).await.unwrap();
+            }
+            let u = k.create_user(&admin, &format!("{name}@plugins.ferrum.invalid"), &format!("Plugin: {name}"), None, &[role], false).await.unwrap();
+            k.load_ctx(tenant, u, None, format!("plugin-{name}")).await.unwrap()
+        }
+    };
+    let fakepay = gateway_user("fakepay").await;
+    let otherpay = gateway_user("otherpay").await;
+
+    // ───────────── an order is paid, and the store's manager ships it from the desk ─────────────
+    // A first order is abandoned: cash on delivery, cancelled before anything happened.
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "kiran@example.com", "Cash on Delivery", "refund-a-0001").await;
+    t.k.cancel(&t.ctx, "SalesOrder", a.so, None).await.expect("cancelled");
+    assert_eq!(t.available("blue-mug").await, n("10"), "its mug is free again");
+    let seen_a = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": a.number, "token": a.token}))).await;
+    assert_eq!(seen_a["order"]["status"], json!("Cancelled"), "a cancelled order can still be followed");
+
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 2}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "refund-b-0001").await;
+    assert_eq!(b.total, n("1121"), "950 of goods and delivery, 171 of VAT");
+    assert_eq!(t.get("SalesOrder", b.so).await["commerce_payment_method"], json!("fakepay"), "the order remembers how it is paid");
+    pay(&t, &fakepay, b.request.unwrap(), b.total, "pi_b").await;
+    assert_eq!(t.get("SalesOrder", b.so).await["commerce_payment_status"], json!("Paid"));
+    let refused = t.k.run_action(&stranger, "SalesOrder", b.so, "web_ship", json!({})).await;
+    assert!(matches!(refused, Err(Error::Forbidden(_))), "only the store's people ship: {refused:?}");
+    let bad_link = t.k.run_action(&manager, "SalesOrder", b.so, "web_ship", json!({"tracking_url": "http://insecure.example/x"})).await;
+    assert!(matches!(bad_link, Err(Error::Validation(_))), "tracking links are https: {bad_link:?}");
+    let shipped =
+        t.k.run_action(
+            &manager,
+            "SalesOrder",
+            b.so,
+            "web_ship",
+            json!({"carrier": "BlueDart", "tracking_number": "BD123", "tracking_url": "https://track.example.com/BD123", "notify": "Yes", "invoice": "Yes"}),
+        )
+        .await
+        .expect("a Website Manager ships and invoices without holding the Sales roles");
+    let dn = shipped["delivery_note"]["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    let dn_doc = t.get("DeliveryNote", dn).await;
+    assert_eq!(
+        (dn_doc["docstatus"].clone(), dn_doc["commerce_tracking_number"].clone(), dn_doc["transporter"].clone()),
+        (json!(1), json!("BD123"), json!("BlueDart"))
+    );
+    let invoice = shipped["sales_invoice"]["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    let si = t.get("SalesInvoice", invoice).await;
+    assert_eq!((si["docstatus"].clone(), dec(&si["outstanding_amount"])), (json!(1), Decimal::ZERO), "the web payment is applied to the invoice");
+    assert_eq!(dec(&t.get("SalesOrder", b.so).await["per_delivered"]), n("100"));
+    let again = t.k.run_action(&manager, "SalesOrder", b.so, "web_ship", json!({})).await;
+    assert!(again.is_err(), "nothing is left to ship: {again:?}");
+    let told = events(&t, "commerce.order_shipped").await;
+    let mine = told.iter().find(|e| e["number"] == json!(b.number)).expect("the shipment is announced");
+    assert_eq!((mine["tracking_number"].clone(), mine["notify"].clone()), (json!("BD123"), json!(true)));
+    assert_eq!(mine["order_link"], json!(format!("https://shop.example.com/order#n={}&t={}", b.number, b.token)), "the link a mailer sends");
+
+    // ───────────── a shopper follows the order from a link, with no sign-in ─────────────
+    let tracked = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
+    let order = &tracked["order"];
+    assert_eq!(order["shipments"][0]["tracking_number"], json!("BD123"));
+    assert_eq!(order["shipments"][0]["tracking_url"], json!("https://track.example.com/BD123"));
+    assert_eq!(order["steps"].as_array().unwrap().iter().map(|s| s["done"].as_bool().unwrap()).collect::<Vec<_>>(), vec![true, true, true]);
+    let raw = tracked.to_string();
+    for private in [GUEST, "MG Road", "Flat 4", "Asha Rao"] {
+        assert!(!raw.contains(private), "the link holder is not shown {private}: {raw}");
+    }
+    assert_eq!(order["ship_to"], json!("Bengaluru, Karnataka 560001 · IN"));
+    for (number, token) in [(b.number.as_str(), "AAAA"), ("SO-NOPE", b.token.as_str()), (b.number.as_str(), a.token.as_str())] {
+        let miss = t.call(None, "POST", "/orders/track", &[], Some(json!({"number": number, "token": token}))).await;
+        assert!(matches!(miss, Err(Error::NotFound(_))), "every wrong link looks the same: {miss:?}");
+    }
+    let link = t.k.run_action(&manager, "SalesOrder", b.so, "web_tracking_link", json!({})).await.unwrap();
+    assert_eq!(link["link"], json!(format!("https://shop.example.com/order#n={}&t={}", b.number, b.token)), "the desk can copy it too");
+
+    // ───────────── a return: one mug and the delivery charge ─────────────
+    let so_b = t.get("SalesOrder", b.so).await;
+    let line =
+        |item: Uuid| so_b["items"].as_array().unwrap().iter().find(|l| l["item"] == json!(item.to_string())).unwrap()["id"].as_str().unwrap().to_string();
+    let (mug_line, tee_line) = (line(mug), line(tee));
+    let reason = t.find_one("ReturnReason", json!({"reason": "Changed their mind"})).await;
+    let ask = |lines: Value, shipping: bool| json!({"sales_order": b.so.to_string(), "kind": "Return", "reason": reason["id"], "lines": lines, "include_shipping": shipping});
+    let over = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "3"}]), false))).await;
+    assert!(matches!(&over, Err(Error::Validation(f)) if f.iter().any(|x| x.message.contains("at most 2 of Blue Mug"))), "{over:?}");
+    let strange = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": Uuid::new_v4().to_string(), "qty": "1"}]), false))).await;
+    assert!(matches!(&strange, Err(Error::Validation(_))), "a line that is not the order's: {strange:?}");
+    let nothing = t.k.insert(&manager, "OrderRefund", obj(ask(json!([]), true))).await;
+    assert!(nothing.is_err(), "choose what comes back: {nothing:?}");
+    let twice =
+        t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "1"}, {"sales_order_line": mug_line, "qty": "1"}]), false)))
+            .await;
+    assert!(matches!(&twice, Err(Error::Validation(_))), "the same line twice: {twice:?}");
+    let mut sneaky = ask(json!([{"sales_order_line": mug_line, "qty": "1"}]), false);
+    sneaky["amount"] = json!("1");
+    match t.k.insert(&manager, "OrderRefund", obj(sneaky)).await {
+        Err(Error::Validation(_)) => {}
+        Ok(made) => {
+            assert_eq!(dec(&made["amount"]), n("295"), "an amount from the caller is not taken");
+            t.k.run_action(&manager, "OrderRefund", uid(&made), "decline", json!({})).await.unwrap();
+        }
+        other => panic!("{other:?}"),
+    }
+    let r1 = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "1", "restock": true}]), true))).await;
+    let r1 = r1.unwrap_or_else(|e| panic!("a return is asked for: {e:?}"));
+    let r1id = uid(&r1);
+    assert_eq!(dec(&r1["amount"]), n("354"), "(250 + 50 delivery) + 18% VAT, worked out by the server, not taken from the caller");
+    assert_eq!(
+        (r1["status"].clone(), r1["gateway"].clone(), r1["payment_reference"].clone(), r1["requested_by"].clone()),
+        (json!("Requested"), json!("fakepay"), json!("pi_b"), json!("manager@shop.test"))
+    );
+    assert_eq!(r1["lines"][0]["item_name"], json!("Blue Mug"));
+    assert!(r1["number"].as_str().unwrap().starts_with("REFUND-"));
+    let more = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "2"}]), false))).await;
+    assert!(
+        matches!(&more, Err(Error::Validation(f)) if f.iter().any(|x| x.message.contains("at most 1 of Blue Mug"))),
+        "the one asked for is spoken for: {more:?}"
+    );
+    let edit = t.k.update(&manager, "OrderRefund", r1id, obj(json!({"include_shipping": false})), None).await;
+    assert!(edit.is_err(), "a refund asked for is not edited: decline it and ask again: {edit:?}");
+
+    // Who decides.
+    let clerk_ask = t.k.insert(&clerk, "OrderRefund", obj(ask(json!([{"sales_order_line": tee_line, "qty": "1"}]), false))).await;
+    let clerk_ask = clerk_ask.unwrap_or_else(|e| panic!("a Sales User asks: {e:?}"));
+    let by_clerk = t.k.run_action(&clerk, "OrderRefund", uid(&clerk_ask), "approve_refund", json!({})).await;
+    assert!(matches!(by_clerk, Err(Error::Forbidden(_))), "asking is not approving: {by_clerk:?}");
+    t.k.run_action(&manager, "OrderRefund", uid(&clerk_ask), "decline", json!({"note": "Not eligible"})).await.expect("declined");
+    assert_eq!(t.get("OrderRefund", uid(&clerk_ask)).await["status"], json!("Declined"));
+    let by_gateway = t.k.run_action(&fakepay, "OrderRefund", r1id, "approve_refund", json!({})).await;
+    assert!(matches!(by_gateway, Err(Error::Forbidden(_))), "a gateway never approves a refund: {by_gateway:?}");
+    let early = t.k.run_action(&fakepay, "OrderRefund", r1id, "refund_done", json!({"refund_reference": "re_1"})).await;
+    assert!(matches!(early, Err(Error::Conflict(_))), "nor reports one nobody approved: {early:?}");
+    t.k.run_action(&manager, "OrderRefund", r1id, "approve_refund", json!({})).await.expect("a manager approves");
+    let approved = t.get("OrderRefund", r1id).await;
+    assert_eq!((approved["status"].clone(), approved["approved_by"].clone()), (json!("Approved"), json!("manager@shop.test")));
+    let wrong = t.k.run_action(&otherpay, "OrderRefund", r1id, "refund_done", json!({"refund_reference": "re_1"})).await;
+    assert!(matches!(wrong, Err(Error::Forbidden(_))), "only the gateway the order was paid with reports it: {wrong:?}");
+    assert_eq!(t.available("blue-mug").await, n("8"), "nothing is back on the shelf until the refund is done");
+
+    // The gateway refuses once, then sends it.
+    t.k.run_action(&fakepay, "OrderRefund", r1id, "refund_failed", json!({"error": "card closed"})).await.expect("refused at the provider");
+    let failed = t.get("OrderRefund", r1id).await;
+    assert_eq!((failed["status"].clone(), failed["refund_error"].clone()), (json!("Refund Failed"), json!("card closed")));
+    t.k.run_action(&manager, "OrderRefund", r1id, "approve_refund", json!({})).await.expect("approved again");
+    let no_reference = t.k.run_action(&fakepay, "OrderRefund", r1id, "refund_done", json!({})).await;
+    assert!(matches!(no_reference, Err(Error::Validation(_))), "the gateway says what it sent: {no_reference:?}");
+    t.k.run_action(&fakepay, "OrderRefund", r1id, "refund_done", json!({"refund_reference": "re_b1"})).await.expect("refunded");
+    t.k.run_action(&fakepay, "OrderRefund", r1id, "refund_done", json!({"refund_reference": "re_b1"})).await.expect("told twice, refunded once");
+    let done = t.get("OrderRefund", r1id).await;
+    assert_eq!(
+        (done["status"].clone(), done["refund_reference"].clone(), done["booked"].clone(), done["booking_error"].clone()),
+        (json!("Refunded"), json!("re_b1"), json!(true), Value::Null),
+        "{done:?}"
+    );
+    assert_eq!(
+        t.count("JournalEntry", json!({"remark": format!("Refund {} of web order {}", done["number"].as_str().unwrap(), b.number)})).await,
+        1,
+        "booked once"
+    );
+
+    // The books followed: the goods are back, the invoice credited, the money posted out and matched.
+    assert_eq!(t.available("blue-mug").await, n("9"), "the returned mug is on the shelf");
+    let back = t.get("DeliveryNote", done["delivery_note"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((back["is_return"].clone(), back["docstatus"].clone(), back["return_against"].clone()), (json!(true), json!(1), json!(dn.to_string())));
+    let credit = t.get("SalesInvoice", done["credit_note"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((credit["is_return"].clone(), credit["docstatus"].clone(), dec(&credit["rounded_total"])), (json!(true), json!(1), n("-354")));
+    assert_eq!(credit["items"].as_array().unwrap().len(), 2, "the mug and the delivery charge, not the tee");
+    assert_eq!(outstanding(&t, uid(&credit)).await, Decimal::ZERO, "what the credit note owed the shopper has been paid back");
+    let entry = t.get("JournalEntry", done["journal_entry"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((entry["docstatus"].clone(), dec(&entry["total_debit"])), (json!(1), n("354")));
+    assert_eq!(dec(&t.get("PaymentRequest", b.request.unwrap()).await["refunded_amount"]), n("354"));
+    let so_after = t.get("SalesOrder", b.so).await;
+    assert_eq!(
+        (so_after["commerce_payment_status"].clone(), so_after["status"].clone()),
+        (json!("Partly Refunded"), json!("Closed")),
+        "nothing is left to ship, and it must not hold stock"
+    );
+    let told = events(&t, "commerce.order_refunded").await;
+    assert_eq!((told[0]["amount"].clone(), told[0]["email"].clone(), told[0]["notify"].clone()), (json!("354"), json!(GUEST), json!(true)));
+    let seen = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
+    assert_eq!(
+        (seen["order"]["refunds"][0]["status"].clone(), dec(&seen["order"]["refunds"][0]["amount"])),
+        (json!("Refunded"), n("354")),
+        "the shopper sees it"
+    );
+    let twice = t.k.run_action(&manager, "OrderRefund", r1id, "post_books", json!({})).await;
+    assert!(matches!(twice, Err(Error::Invalid(_))), "nothing left to post: {twice:?}");
+
+    // The rest comes back: the second mug and the tee. Together the refunds are the payment, no more.
+    let rest =
+        t.k.insert(
+            &manager,
+            "OrderRefund",
+            obj(ask(json!([{"sales_order_line": mug_line, "qty": "1"}, {"sales_order_line": tee_line, "qty": "1", "restock": false}]), false)),
+        )
+        .await;
+    let rest = rest.unwrap_or_else(|e| panic!("the rest is asked for: {e:?}"));
+    assert_eq!(dec(&rest["amount"]), n("767"), "(250 + 400) + 18% VAT");
+    let beyond = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "1"}]), false))).await;
+    assert!(matches!(&beyond, Err(Error::Validation(f)) if f.iter().any(|x| x.message.contains("all come back already"))), "{beyond:?}");
+    let shipping_again = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": tee_line, "qty": "1"}]), true))).await;
+    assert!(shipping_again.is_err(), "the delivery charge went back with the first one, and the tee is spoken for: {shipping_again:?}");
+    let rid = uid(&rest);
+    t.k.run_action(&manager, "OrderRefund", rid, "approve_refund", json!({})).await.unwrap();
+    t.k.run_action(&fakepay, "OrderRefund", rid, "refund_done", json!({"refund_reference": "re_b2"})).await.unwrap();
+    let rest = t.get("OrderRefund", rid).await;
+    assert_eq!((rest["booked"].clone(), rest["booking_error"].clone()), (json!(true), Value::Null), "{rest:?}");
+    assert_eq!(t.available("blue-mug").await, n("10"), "both mugs are back; the tee was not restocked");
+    assert_eq!(t.available("logo-tee").await, n("4"), "a tee that cannot be sold again stays out of stock");
+    let so_end = t.get("SalesOrder", b.so).await;
+    assert_eq!(so_end["commerce_payment_status"], json!("Refunded"), "1121 paid, 1121 sent back");
+    assert_eq!(dec(&t.get("PaymentRequest", b.request.unwrap()).await["refunded_amount"]), n("1121"));
+
+    // ───────────── an order cancelled before it shipped: the payment goes back whole ─────────────
+    let c = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "ravi@example.com", "fakepay", "refund-c-0001").await;
+    let before_pay = t.k.insert(&manager, "OrderRefund", obj(json!({"sales_order": c.so.to_string(), "kind": "Cancellation", "reason": reason["id"]}))).await;
+    assert!(before_pay.is_err(), "nothing was paid, so nothing goes back: {before_pay:?}");
+    pay(&t, &fakepay, c.request.unwrap(), c.total, "pi_c").await;
+    assert_eq!(t.available("blue-mug").await, n("9"), "the order holds a mug");
+    let cancel =
+        t.k.insert(
+            &manager,
+            "OrderRefund",
+            obj(
+                json!({"sales_order": c.so.to_string(), "kind": "Cancellation", "reason": reason["id"], "lines": [{"sales_order_line": mug_line, "qty": "1"}]}),
+            ),
+        )
+        .await;
+    let cancel = cancel.unwrap_or_else(|e| panic!("a cancellation is asked for: {e:?}"));
+    assert_eq!((dec(&cancel["amount"]), cancel["lines"].as_array().unwrap().len()), (n("354"), 0), "the whole payment, whatever lines were sent");
+    let cid_ = uid(&cancel);
+    let second = t.k.insert(&manager, "OrderRefund", obj(json!({"sales_order": c.so.to_string(), "kind": "Cancellation", "reason": reason["id"]}))).await;
+    assert!(second.is_err(), "the payment is spoken for: {second:?}");
+    t.k.run_action(&manager, "OrderRefund", cid_, "approve_refund", json!({})).await.unwrap();
+    t.k.run_action(&fakepay, "OrderRefund", cid_, "refund_done", json!({"refund_reference": "re_c"})).await.unwrap();
+    let cancelled = t.get("OrderRefund", cid_).await;
+    assert_eq!(
+        (cancelled["status"].clone(), cancelled["booked"].clone(), cancelled["booking_error"].clone()),
+        (json!("Refunded"), json!(true), Value::Null),
+        "{cancelled:?}"
+    );
+    let so_c = t.get("SalesOrder", c.so).await;
+    assert_eq!((so_c["docstatus"].clone(), so_c["status"].clone(), so_c["commerce_payment_status"].clone()), (json!(2), json!("Cancelled"), json!("Refunded")));
+    assert_eq!(
+        t.get("PaymentEntry", t.get("PaymentRequest", c.request.unwrap()).await["payment_entry"].as_str().unwrap().parse().unwrap()).await["docstatus"],
+        json!(2),
+        "the payment was reversed in the books"
+    );
+    assert_eq!(t.available("blue-mug").await, n("10"), "the cancelled order let its mug go");
+
+    // ───────────── cash on delivery: paid at the door, returned, refunded by hand ─────────────
+    let d_ = place(&t, json!([{"item": "logo-tee", "qty": 1}]), "meera@example.com", "Cash on Delivery", "refund-d-0001").await;
+    assert_eq!(t.get("SalesOrder", d_.so).await["commerce_payment_method"], json!("Cash on Delivery"));
+    t.k.run_action(&manager, "SalesOrder", d_.so, "web_ship", json!({"invoice": "Yes", "notify": "No"})).await.expect("shipped before it is paid");
+    let d_line = t.get("SalesOrder", d_.so).await["items"][0]["id"].as_str().unwrap().to_string();
+    let unpaid =
+        t.k.insert(
+            &manager,
+            "OrderRefund",
+            obj(json!({"sales_order": d_.so.to_string(), "kind": "Return", "reason": reason["id"], "lines": [{"sales_order_line": d_line, "qty": "1"}]})),
+        )
+        .await;
+    assert!(unpaid.is_err(), "no money came in, so none goes back: {unpaid:?}");
+    t.k.run_action(&manager, "PaymentRequest", d_.request.unwrap(), "mark_paid", json!({"amount": d_.total.to_string(), "currency": "INR"}))
+        .await
+        .expect("the courier handed the cash over");
+    assert_eq!(t.get("SalesOrder", d_.so).await["commerce_payment_status"], json!("Paid"));
+    let hand = t.k.insert(&manager, "OrderRefund", obj(json!({"sales_order": d_.so.to_string(), "kind": "Return", "reason": reason["id"], "lines": [{"sales_order_line": d_line, "qty": "1"}], "notify_customer": false}))).await;
+    let hand = hand.unwrap_or_else(|e| panic!("a return of an order paid in cash: {e:?}"));
+    assert_eq!(
+        (hand["gateway"].clone(), dec(&hand["amount"])),
+        (json!("Cash on Delivery"), d_.total - n("59")),
+        "the tee and its VAT, not the delivery charge"
+    );
+    let hid = uid(&hand);
+    let plugin = t.k.run_action(&fakepay, "OrderRefund", hid, "refund_done", json!({"refund_reference": "re_x"})).await;
+    assert!(plugin.is_err(), "no plugin refunds cash");
+    let no_note = t.k.run_action(&manager, "OrderRefund", hid, "mark_refunded", json!({})).await;
+    assert!(matches!(no_note, Err(Error::Validation(_))), "say how it was refunded: {no_note:?}");
+    t.k.run_action(&manager, "OrderRefund", hid, "mark_refunded", json!({"note": "Handed back in cash at the shop", "refund_reference": "receipt 17"}))
+        .await
+        .expect("refunded by hand");
+    let hand = t.get("OrderRefund", hid).await;
+    assert_eq!(
+        (hand["status"].clone(), hand["booked"].clone(), hand["approved_by"].clone(), hand["decision_note"].clone()),
+        (json!("Refunded"), json!(true), json!("manager@shop.test"), json!("Handed back in cash at the shop")),
+        "{hand:?}"
+    );
+    assert_eq!(t.available("logo-tee").await, n("4"), "the tee is back (it went out with the order, and came back)");
+    assert_eq!(events(&t, "commerce.order_refunded").await.last().unwrap()["notify"], json!(false), "the shopper was not to be told");
 }

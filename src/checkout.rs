@@ -350,10 +350,11 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     )
     .await?;
     let order_token = token::order_token(tx, ctx.tenant, so_id).await?;
+    let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &order_token));
     let event = json!({
         "sales_order": so_id, "number": number, "customer": customer, "email": s(&cart, "email"), "name": s(&cart, "contact_name"),
         "currency": store.currency_code, "grand_total": money(d(&so, "rounded_total")), "payment_method": method.gateway,
-        "payment_request": request.as_ref().and_then(|r| s(r, "id")), "order_token": order_token,
+        "payment_request": request.as_ref().and_then(|r| s(r, "id")), "order_token": order_token, "order_link": order_link,
     });
     outbox::enqueue(tx, ctx.tenant, "commerce.order_placed", Some("SalesOrder"), Some(so_id), event).await?;
     response(k, ctx, tx, &store, so_id).await
@@ -365,7 +366,8 @@ async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid
     let view = orders::order_view(k, &sys(ctx), tx, store, &so).await?;
     let active = view["payments"].as_array().and_then(|p| p.first()).cloned().unwrap_or(Value::Null);
     let token = token::order_token(tx, ctx.tenant, so_id).await?;
-    Ok(json!({"order": view, "order_token": token, "payment_request": active}))
+    let link = s(&so, "number").zip(store.store_url.as_deref()).map(|(number, url)| orders::tracking_url(url, number, &token));
+    Ok(json!({"order": view, "order_token": token, "order_link": link, "payment_request": active}))
 }
 
 #[cfg(test)]

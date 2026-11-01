@@ -13,7 +13,8 @@ overlays:
     ops:
       - {op: add_field, after: po_no, field: {name: commerce_web_order, type: check, label: Web Order, read_only: true, in_filter: true}}
       - {op: add_field, after: commerce_web_order, field: {name: commerce_payment_status, type: select, label: Web Payment, read_only: true, in_filter: true,
-          options: [Pending, Paid, Failed, Expired, Cancelled, Not Required]}}
+          options: [Pending, Paid, Failed, Expired, Cancelled, Not Required, Partly Refunded, Refunded]}}
+      - {op: add_field, after: commerce_payment_status, field: {name: commerce_payment_method, type: data, label: Web Payment Method, read_only: true, max_length: 40, in_filter: true}}
       - {op: add_field, field: {name: commerce_contact_email, type: email, label: Contact Email, read_only: true}}
       - {op: add_field, field: {name: commerce_contact_phone, type: phone, label: Contact Phone, read_only: true}}
       - {op: add_field, field: {name: commerce_shipping_address, type: text, label: Ship To, read_only: true}}
@@ -21,6 +22,20 @@ overlays:
       - {op: add_field, field: {name: commerce_shipping_rule, type: link, to: ShippingRule, label: Shipping Method, read_only: true}}
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
+      # The store's people ship and invoice web orders from the desk without holding the Sales roles:
+      # these actions do exactly that, for web orders only (src/ship.rs checks who may).
+      - {op: add_action, action: {name: web_ship, label: Ship Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
+          confirm: "Ship everything still to deliver on this order? Stock leaves the warehouse.",
+          params: [{name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: Create the invoice too, type: select, options: ["Yes", "No"]}]}}
+      - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
+          confirm: "Create the invoice for this delivered order?"}}
+      - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
+  - entity: DeliveryNote
+    ops:
+      - {op: add_field, field: {name: commerce_tracking_number, type: data, label: Tracking Number, max_length: 120, description: "Shown to the shopper on the order page"}}
+      - {op: add_field, field: {name: commerce_tracking_url, type: url, label: Tracking Link, max_length: 2000}}
+      - {op: add_field, field: {name: commerce_notify, type: check, label: Tell the Customer, description: "Sends the shopper the shipping news (the commerce.order_shipped event) when this is submitted"}}
   - entity: PaymentEntry
     ops:
       - {op: add_field, field: {name: commerce_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true}}
@@ -31,7 +46,7 @@ modules:
     label: Commerce
     icon: shopping-bag
     order: 42
-    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, ShippingRule, CouponCode, SalesOrder,
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnReason, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
 # What a personal-data request exports and erases for a shopper (their email): their carts'
@@ -54,7 +69,11 @@ roles:
       - {entity: ShoppingCart, read: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
       - {entity: PaymentException, read: true, write: true, export: true}
+      - {entity: OrderRefund, read: true, write: true, create: true, export: true}
+      - {entity: ReturnReason, read: true, write: true, create: true, delete: true}
       - {entity: SalesOrder, read: true, export: true}
+      - {entity: DeliveryNote, read: true}
+      - {entity: SalesInvoice, read: true}
       - {entity: Customer, read: true}
       - {entity: CustomerGroup, read: true}
       - {entity: Item, read: true}
@@ -72,6 +91,8 @@ roles:
       - {entity: ShoppingCart, read: true}
       - {entity: PaymentRequest, read: true}
       - {entity: PaymentException, read: true}
+      - {entity: OrderRefund, read: true, create: true}
+      - {entity: ReturnReason, read: true}
       - {entity: WebsiteItem, read: true}
       - {entity: ItemCategory, read: true}
       - {entity: ShippingRule, read: true}
@@ -81,6 +102,8 @@ roles:
     permissions:
       - {entity: ShoppingCart, read: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: OrderRefund, read: true, write: true, create: true, export: true}
+      - {entity: ReturnReason, read: true}
       - {entity: WebsiteItem, read: true}
       - {entity: ItemCategory, read: true}
       - {entity: ShippingRule, read: true}
@@ -89,7 +112,22 @@ roles:
   - name: Accounts Manager
     permissions:
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: OrderRefund, read: true, write: true, export: true}
+      - {entity: ReturnReason, read: true}
       - {entity: StoreSettings, read: true}
   - name: Accounts User
     permissions:
       - {entity: PaymentRequest, read: true, write: true}
+      - {entity: OrderRefund, read: true}
+
+seed:
+  - entity: ReturnReason
+    key: [reason]
+    records:
+      - {reason: Changed their mind}
+      - {reason: Wrong item sent}
+      - {reason: Damaged or defective, restock: false}
+      - {reason: Not as described}
+      - {reason: Arrived too late}
+      - {reason: Cancelled before it shipped, restock: false}
+      - {reason: Other}

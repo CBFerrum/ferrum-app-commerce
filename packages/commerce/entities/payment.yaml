@@ -27,6 +27,7 @@
     - {name: description, type: data, read_only: true, max_length: 200}
     - {name: paid_at, type: datetime, read_only: true}
     - {name: payment_entry, type: link, to: PaymentEntry, read_only: true}
+    - {name: refunded_amount, type: currency, currency: currency, read_only: true, no_copy: true, description: "Sent back to the shopper so far (refunds of this payment)"}
     - {name: failure_reason, type: text, read_only: true, max_length: 2000}
   indexes: [[status, expires_at]]
   actions:
