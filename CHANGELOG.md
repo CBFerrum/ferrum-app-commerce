@@ -9,7 +9,8 @@
   turns the orders to send into what to take off the shelves, and prints. Each order has a page of its
   own: items, every payment with its reference and expiry, shipments with tracking, invoices, refunds,
   the customer, where it goes and the story so far. A Website Manager ships and invoices web orders
-  without holding the Sales roles (two actions on web orders do exactly that).
+  without holding the Sales roles (two actions on web orders do exactly that). An order placed before this
+  version does not remember how it is paid, so the desk reads that from the order's latest payment request.
 - Money that needs a person has one screen (Money): refunds waiting for a decision, and payments a gateway
   took and could not book. A manager approves a refund (the amount, the gateway and a warning that it
   sends money are on the confirmation), declines it with a reason, or says it was refunded another way.
