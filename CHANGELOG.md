@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Personal data: a person's request now exports their payment requests, and says why they are kept: they are payment records.
+
 ## 0.3.2
 
 - The interface starts faster: its first download holds the frame and the app's own pages, and
