@@ -10,7 +10,7 @@
 //! host: this plugin names them and never reads them.
 
 use ferrum_plugin_sdk::{Request, Value, data, fetch_with, json, kv, log, now, plugin, serde_json, verify_hmac_sha256, warn};
-use gateway_kit::{Refund, final_status, refused, report_exception, run_refunds, to_major, to_minor, unix};
+use gateway_kit::{Refund, final_status, refunded_part, refunded_payment, refused, report_exception, run_refunds, to_major, to_minor, unix};
 
 plugin!(handle);
 
@@ -212,8 +212,8 @@ fn reconcile() -> Result<(), String> {
 
 /// Refunds a payment in full. Razorpay takes no idempotency key on this call, so a refund made by a
 /// run that never heard back is found by its note first, and the exception is told about that one.
-fn refund(exception: &Value) -> Refund {
-    let (id, payment) = (text(exception, "id"), text(exception, "gateway_reference"));
+fn refund(row: &Value) -> Refund {
+    let (id, payment) = (text(row, "id"), refunded_payment(row));
     let known = match call("GET", &format!("/payments/{payment}/refunds"), Value::Null) {
         Ok(known) => known,
         Err((status, e)) if final_status(status) => return Refund::Refused(e),
@@ -222,7 +222,13 @@ fn refund(exception: &Value) -> Refund {
     if let Some(done) = known["items"].as_array().and_then(|i| i.iter().find(|r| text(&r["notes"], "ferrum_exception") == id)) {
         return Refund::Done(text(done, "id").to_string());
     }
-    match call("POST", &format!("/payments/{payment}/refund"), json!({"notes": {"ferrum_exception": id}})) {
+    let mut body = json!({"notes": {"ferrum_exception": id}});
+    match refunded_part(row) {
+        Ok(Some((_, minor))) => body["amount"] = json!(minor),
+        Ok(None) => {}
+        Err(e) => return Refund::Refused(e),
+    }
+    match call("POST", &format!("/payments/{payment}/refund"), body) {
         Ok(r) => Refund::Done(text(&r, "id").to_string()),
         Err((status, e)) if final_status(status) => Refund::Refused(e),
         Err((_, e)) => Refund::Later(e),
@@ -409,6 +415,20 @@ mod tests {
         assert_eq!(paid.1["params"]["amount"], json!("1149.88"));
         assert!(c.iter().any(|(op, a)| op == "http.fetch" && a["url"].as_str().unwrap().ends_with("plink_2/cancel")), "a closed request's link is cancelled");
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2);
+    }
+
+    #[test]
+    fn an_order_refund_gives_back_the_part_asked_for() {
+        let calls = host(|op, a| match op {
+            "http.fetch" if a["method"] == "GET" => http(200, json!({"items": []})),
+            "http.fetch" => http(200, json!({"id": "rfnd_9"})),
+            _ => Ok(Value::Null),
+        });
+        let row = json!({"id": "r-1", "payment_reference": "pay_7", "amount": "12.50", "currency_code": "INR"});
+        assert_eq!(refund(&row), Refund::Done("rfnd_9".into()));
+        let c = calls.borrow();
+        let sent = c.iter().rev().find(|(op, _)| op == "http.fetch").unwrap();
+        assert_eq!(sent.1["body"]["amount"], json!(1250), "{}", sent.1);
     }
 
     #[test]

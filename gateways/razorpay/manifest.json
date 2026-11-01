@@ -4,7 +4,7 @@
   "description": "Razorpay for Ferrum Commerce: a Payment Link for each payment request, confirmed by Razorpay's signed webhook",
   "config": {"key_id": "", "key_secret": "", "webhook_secret": ""},
   "credentials": [{"name": "key_secret", "hosts": ["api.razorpay.com"], "scheme": "basic", "user": "key_id"}, {"name": "webhook_secret"}],
-  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}, {"entity": "PaymentException", "read": true, "write": true}],
+  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}, {"entity": "PaymentException", "read": true, "write": true}, {"entity": "OrderRefund", "read": true, "write": true}],
   "subscriptions": ["PaymentRequest.submitted"],
   "routes": [{"path": "/webhook", "public": true}],
   "schedules": [{"name": "reconcile", "every_seconds": 300}],

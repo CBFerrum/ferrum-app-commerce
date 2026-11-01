@@ -9,7 +9,7 @@
 //! access token it buys is what this plugin keeps.
 
 use ferrum_plugin_sdk::{Request, Value, data, fetch_with, json, kv, log, plugin, serde_json, warn};
-use gateway_kit::{Refund, final_status, refused, report_exception, run_refunds, to_minor};
+use gateway_kit::{Refund, final_status, refunded_part, refunded_payment, refused, report_exception, run_refunds, to_minor};
 
 plugin!(handle);
 
@@ -54,7 +54,8 @@ fn call(req: &Request, method: &str, path: &str, body: Value, request_id: Option
     if let Some(id) = request_id {
         headers["paypal-request-id"] = json!(id);
     }
-    let r = fetch_with("client_secret", method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| (0, format!("PayPal cannot be reached: {e}")))?;
+    let r =
+        fetch_with("client_secret", method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| (0, format!("PayPal cannot be reached: {e}")))?;
     let status = r["status"].as_u64().unwrap_or(0);
     let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
     if (200..300).contains(&status) {
@@ -230,9 +231,14 @@ fn reconcile(req: &Request) -> Result<(), String> {
 }
 
 /// Refunds a capture in full. The exception's id is PayPal's request id, so repeating it refunds once.
-fn refund(req: &Request, exception: &Value) -> Refund {
-    let (id, capture) = (text(exception, "id"), text(exception, "gateway_reference"));
-    match call(req, "POST", &format!("/v2/payments/captures/{capture}/refund"), json!({}), Some(&format!("ferrum-refund-{id}"))) {
+fn refund(req: &Request, row: &Value) -> Refund {
+    let (id, capture) = (text(row, "id"), refunded_payment(row));
+    let body = match refunded_part(row) {
+        Ok(Some((amount, _))) => json!({"amount": {"value": amount, "currency_code": text(row, "currency_code")}}),
+        Ok(None) => json!({}),
+        Err(e) => return Refund::Refused(e),
+    };
+    match call(req, "POST", &format!("/v2/payments/captures/{capture}/refund"), body, Some(&format!("ferrum-refund-{id}"))) {
         Ok(r) => Refund::Done(text(&r, "id").to_string()),
         Err((status, e)) if final_status(status) => Refund::Refused(e),
         Err((_, e)) => Refund::Later(e),
@@ -325,10 +331,7 @@ mod tests {
         let c = calls.borrow();
         let create = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
         assert_eq!(url(&create.1), "https://api-m.sandbox.paypal.com/v2/checkout/orders");
-        assert_eq!(
-            (&create.1["auth"], &create.1["headers"]["paypal-request-id"]),
-            (&json!("client_secret"), &json!(format!("ferrum-payment-request-{ID}")))
-        );
+        assert_eq!((&create.1["auth"], &create.1["headers"]["paypal-request-id"]), (&json!("client_secret"), &json!(format!("ferrum-payment-request-{ID}"))));
         let unit = &create.1["body"]["purchase_units"][0];
         assert_eq!((&unit["custom_id"], &unit["amount"]), (&json!(ID), &json!({"currency_code": "USD", "value": "49.90"})));
         let set = c.iter().find(|(op, _)| op == "data.action").unwrap();
@@ -452,6 +455,21 @@ mod tests {
         assert!(matches!(refund(&req, &json!({"id": "x-2", "gateway_reference": "CAP-0"})), Refund::Refused(_)));
         assert!(matches!(refund(&req, &json!({"id": "x-3", "gateway_reference": "CAP-5"})), Refund::Later(_)));
         assert_eq!(calls.borrow().iter().find(|(op, _)| op == "http.fetch").unwrap().1["headers"]["paypal-request-id"], json!("ferrum-refund-x-1"));
+    }
+
+    #[test]
+    fn an_order_refund_gives_back_the_part_asked_for() {
+        let calls = host(|op, _| match op {
+            "http.fetch" => http(201, json!({"id": "RF-2"})),
+            _ => Ok(Value::Null),
+        });
+        let req = Request(json!({"kind": "schedule", "config": config()}));
+        let row = json!({"id": "r-1", "payment_reference": "CAP-7", "amount": "12.50", "currency_code": "USD"});
+        assert_eq!(refund(&req, &row), Refund::Done("RF-2".into()));
+        let c = calls.borrow();
+        let sent = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
+        assert!(url(&sent.1).ends_with("/captures/CAP-7/refund"));
+        assert_eq!(sent.1["body"], json!({"amount": {"value": "12.50", "currency_code": "USD"}}));
     }
 
     /// Against PayPal's sandbox when PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET are

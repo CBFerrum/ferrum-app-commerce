@@ -4,7 +4,7 @@
   "description": "PayPal for Ferrum Commerce: a PayPal order for each payment request, captured when the buyer approves it and confirmed by PayPal's verified webhook",
   "config": {"client_id": "", "client_secret": "", "webhook_id": "", "environment": "live"},
   "credentials": [{"name": "client_secret", "hosts": ["api-m.paypal.com", "api-m.sandbox.paypal.com"], "scheme": "oauth2", "user": "client_id", "token_path": "/v1/oauth2/token"}],
-  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}, {"entity": "PaymentException", "read": true, "write": true}],
+  "permissions": [{"entity": "PaymentRequest", "read": true, "write": true}, {"entity": "PaymentException", "read": true, "write": true}, {"entity": "OrderRefund", "read": true, "write": true}],
   "subscriptions": ["PaymentRequest.submitted"],
   "routes": [{"path": "/webhook", "public": true}],
   "schedules": [{"name": "reconcile", "every_seconds": 300}],

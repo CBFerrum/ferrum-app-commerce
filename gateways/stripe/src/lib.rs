@@ -10,7 +10,7 @@
 //! this plugin names them and never reads them.
 
 use ferrum_plugin_sdk::{HostError, Request, Value, data, fetch_with, json, kv, log, now, plugin, serde_json, verify_hmac_sha256, warn};
-use gateway_kit::{Refund, final_status, form, refused, report_exception, run_refunds, to_major, to_minor, unix};
+use gateway_kit::{Refund, final_status, form, refunded_part, refunded_payment, refused, report_exception, run_refunds, to_major, to_minor, unix};
 
 plugin!(handle);
 
@@ -236,13 +236,18 @@ fn reconcile() -> Result<(), String> {
 }
 
 /// Refunds a payment in full. The exception's id is the idempotency key, so repeating it refunds once.
-fn refund(exception: &Value) -> Refund {
-    let (id, payment) = (text(exception, "id"), text(exception, "gateway_reference"));
+fn refund(row: &Value) -> Refund {
+    let (id, payment) = (text(row, "id"), refunded_payment(row));
     if !payment.starts_with("pi_") {
         return Refund::Refused(format!("{payment} is not a payment Stripe can refund"));
     }
-    let body = form(&[("payment_intent", payment.to_string()), ("metadata[ferrum_exception]", id.to_string())]);
-    match call("POST", "/refunds", Some(body), Some(&format!("ferrum-refund-{id}"))) {
+    let mut fields = vec![("payment_intent", payment.to_string()), ("metadata[ferrum_exception]", id.to_string())];
+    match refunded_part(row) {
+        Ok(Some((_, minor))) => fields.push(("amount", minor.to_string())),
+        Ok(None) => {}
+        Err(e) => return Refund::Refused(e),
+    }
+    match call("POST", "/refunds", Some(form(&fields)), Some(&format!("ferrum-refund-{id}"))) {
         Ok(r) => Refund::Done(text(&r, "id").to_string()),
         Err((status, e)) if final_status(status) => Refund::Refused(e),
         Err((_, e)) => Refund::Later(e),
@@ -457,6 +462,7 @@ mod tests {
         let due = json!({"rows": [exception("x-1", "pi_ok"), exception("x-2", "pi_no"), exception("x-3", "pi_later"), exception("x-4", "cs_never_paid")]});
         let calls = host(move |op, a| match op {
             "kv.list" => Ok(json!([])),
+            "data.query" if a["entity"] == "OrderRefund" => Ok(json!({"rows": []})),
             "data.query" => {
                 assert_eq!(a["filters"], json!({"gateway": "stripe", "status": "Refund Approved"}), "only what a person approved");
                 Ok(due.clone())
@@ -475,6 +481,30 @@ mod tests {
         let sent = c.iter().filter(|(op, _)| op == "http.fetch").collect::<Vec<_>>();
         assert_eq!(sent.len(), 3, "a session with no payment behind it is not sent");
         assert_eq!(sent[0].1["headers"]["idempotency-key"], json!("ferrum-refund-x-1"), "repeating it refunds once");
+    }
+
+    #[test]
+    fn an_order_refund_gives_back_the_part_asked_for() {
+        let calls = host(|op, a| match op {
+            "kv.list" => Ok(json!([])),
+            "data.query" if a["entity"] == "OrderRefund" => {
+                assert_eq!(a["filters"], json!({"gateway": "stripe", "status": "Approved"}));
+                Ok(json!({"rows": [{"id": "r-1", "payment_reference": "pi_ok", "amount": "12.50", "currency_code": "USD"},
+                                    {"id": "r-2", "payment_reference": "pi_ok", "amount": "12.505", "currency_code": "USD"}]}))
+            }
+            "data.query" => Ok(json!({"rows": []})),
+            "http.fetch" => http(200, json!({"id": "re_9"})),
+            _ => Ok(Value::Null),
+        });
+        assert_eq!(handle(Request(json!({"kind": "schedule", "name": "reconcile", "config": config()}))), json!({}));
+        let c = calls.borrow();
+        let sent: Vec<_> = c.iter().filter(|(op, _)| op == "http.fetch").collect();
+        assert_eq!(sent.len(), 1, "an amount the provider cannot take is refused here");
+        assert!(sent[0].1["body"].as_str().unwrap().contains("amount=1250"), "{}", sent[0].1["body"]);
+        assert_eq!(sent[0].1["headers"]["idempotency-key"], json!("ferrum-refund-r-1"));
+        let told: Vec<_> = c.iter().filter(|(op, _)| op == "data.action").map(|(_, a)| (a["entity"].clone(), a["id"].clone(), a["action"].clone())).collect();
+        assert_eq!(told[0], (json!("OrderRefund"), json!("r-1"), json!("refund_done")));
+        assert_eq!(told[1], (json!("OrderRefund"), json!("r-2"), json!("refund_failed")));
     }
 
     /// Against Stripe's test mode when STRIPE_TEST_SECRET_KEY (`sk_test_…`) is set: a real
