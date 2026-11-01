@@ -177,6 +177,14 @@ pub mod sandbox {
         SIGN_IN.with(|s| s.borrow_mut().insert(name.to_string(), authorization.into()));
     }
 
+    /// As the plugin host does for an `oauth2` credential: trades the client's key and secret for
+    /// a token at `url`, and signs this thread's `http.fetch` calls in with it.
+    pub fn client_credentials(name: &str, url: &str, client: &str, secret: &str) {
+        let answer = reqwest::blocking::Client::new().post(url).basic_auth(client, Some(secret)).header("content-type", "application/x-www-form-urlencoded").body("grant_type=client_credentials").send();
+        let token: Value = serde_json::from_str(&answer.and_then(|r| r.text()).expect("an answer from the sandbox")).expect("JSON");
+        sign_in_as(name, format!("Bearer {}", token["access_token"].as_str().expect("access_token")));
+    }
+
     /// A test key from the environment (empty counts as unset).
     pub fn key(name: &str) -> Option<String> {
         std::env::var(name).ok().filter(|v| !v.trim().is_empty())
