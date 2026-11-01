@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError, api, docPath, errorMessage } from "@ferrum/client";
 import { confirmDialog, toast } from "@ferrum/kit";
 import { can, useEntityMeta, useMe } from "@ferrum/records";
-import { amountText, type Order } from "./queues";
+import { amountText, type Order, withMethods } from "./queues";
 
 export const list = <T,>(entity: string, query: Record<string, string | number | boolean>, signal?: AbortSignal) => api.get<{ rows: T[]; total?: number }>(`/api/v1/${entity}`, query, signal);
 export const f = (filters: unknown[]) => JSON.stringify(filters);
@@ -29,7 +29,12 @@ export async function workingOrders(signal?: AbortSignal): Promise<Order[]> {
     list<Order>("SalesOrder", { ...q, limit: 100, filters: f([WEB, ["docstatus", "=", 1], ["status", "in", ["Completed", "Closed"]], ["commerce_payment_status", "=", "Pending"]]) }, signal),
   ]);
   const seen = new Set<string>();
-  return [...open.rows, ...unpaid.rows].filter((o) => !seen.has(o.id) && seen.add(o.id));
+  const orders = [...open.rows, ...unpaid.rows].filter((o) => !seen.has(o.id) && seen.add(o.id));
+  // Orders from before the method was remembered on the order: ask their payment requests.
+  const lacking = orders.filter((o) => !o.commerce_payment_method && o.commerce_payment_status !== "Not Required").map((o) => o.id);
+  if (!lacking.length) return orders;
+  const requests = await soft(list<{ sales_order?: string | null; gateway?: string | null }>("PaymentRequest", { filters: f([["sales_order", "in", lacking]]), fields: "sales_order,gateway", sort: "created_at desc", limit: 500 }, signal));
+  return withMethods(orders, requests);
 }
 
 /** Roles that run the store's orders: the server holds the same list and refuses anyone else. */

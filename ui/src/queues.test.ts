@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ago, amountText, counts, nextStep, type Order, pickList, queue, stage, statusWords, units, waitedDays } from "./queues";
+import { ago, amountText, counts, nextStep, type Order, pickList, queue, stage, statusWords, units, waitedDays, withMethods } from "./queues";
 
 const order = (o: Partial<Order>): Order => ({ id: "1", docstatus: 1, status: "To Deliver and Bill", per_delivered: 0, per_billed: 0, commerce_payment_status: "Pending", commerce_payment_method: "stripe", ...o });
 
@@ -87,5 +87,17 @@ describe("the web-order desk", () => {
     expect(units(2)).toBe("2");
     expect(units(0.5)).toBe("0.5");
     expect(units(2.0004)).toBe("2");
+  });
+
+  it("gives an older order the method of its latest payment request", () => {
+    const old = order({ id: "a", commerce_payment_method: null, commerce_payment_status: "Pending" });
+    const known = order({ id: "b", commerce_payment_method: "stripe" });
+    const filled = withMethods([old, known, order({ id: "c", commerce_payment_method: null })], [
+      { sales_order: "a", gateway: "Cash on Delivery" },
+      { sales_order: "a", gateway: "stripe" },
+      { sales_order: "b", gateway: "paypal" },
+    ]);
+    expect(filled.map((o) => o.commerce_payment_method)).toEqual(["Cash on Delivery", "stripe", null]);
+    expect(stage(filled[0])).toBe("ship");
   });
 });

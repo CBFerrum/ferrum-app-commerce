@@ -91,6 +91,14 @@ export function nextStep(o: Order): Next {
   }
 }
 
+/** Orders placed before an order remembered how it is paid get the method from their latest payment
+ *  request (`requests` newest first), so that a cash-on-delivery order is not mistaken for one waiting on a gateway. */
+export function withMethods(orders: Order[], requests: { sales_order?: string | null; gateway?: string | null }[]): Order[] {
+  const by = new Map<string, string>();
+  for (const r of requests) if (r.sales_order && r.gateway && !by.has(r.sales_order)) by.set(r.sales_order, r.gateway);
+  return orders.map((o) => (o.commerce_payment_method ? o : { ...o, commerce_payment_method: by.get(o.id) ?? null }));
+}
+
 /** Orders per queue. */
 export function counts(orders: Order[]): Record<Stage, number> {
   const out: Record<Stage, number> = { pay: 0, ship: 0, invoice: 0, done: 0 };

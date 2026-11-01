@@ -138,6 +138,15 @@ describe("an order", () => {
     expect(html).toMatch(/Ship/);
   });
 
+  it("knows an older cash-on-delivery order, placed before orders remembered how they are paid, is ready to ship", () => {
+    const old = { ...full, per_delivered: "0", per_billed: "0", status: "To Deliver and Bill", commerce_payment_status: "Pending", commerce_payment_method: null, items: (full.items as { delivered_qty: string }[]).map((l) => ({ ...l, delivered_qty: "0" })) };
+    const asked = [{ id: "p1", gateway: "Cash on Delivery", amount: "1121", currency_code: "INR", status: "Initiated", created_at: "2026-11-01T09:00:05Z" }];
+    const qc = client([[["commerce", "order", "o1"], old], [["commerce", "order", "o1", "related"], { ...related, payments: asked, deliveries: [], invoices: [], refunds: [] }]]);
+    const html = plain(draw(qc, "/o/o1", "/o/:id", <OrderRoute />));
+    expect(html).toContain("Cash on delivery: the courier collects the money.");
+    expect(html).not.toContain("Waiting for");
+  });
+
   it("is not for an order that did not come from the web", () => {
     const qc = client([[["commerce", "order", "o1"], order({ commerce_web_order: false })]]);
     expect(plain(draw(qc, "/o/o1", "/o/:id", <OrderRoute />))).toContain("This is not a web order");
@@ -196,10 +205,10 @@ describe("the home", () => {
       [["commerce", "desk"], [order({}), order({ id: "o2", number: "SO-2", commerce_payment_status: "Pending", customer_name: "Ravi" })]],
       [["commerce", "payments"], [{ id: "p1", sales_order: "o2", order_number: "SO-2", payer_name: "Ravi", gateway: "stripe", amount: "100", currency_code: "INR", status: "Expired" }]],
       [["commerce", "reviews"], { rows: [], total: 0 }],
-      [["commerce", "catalog"], [4, 1]],
+      [["commerce", "catalog"], [4, 1, 3]],
     ]);
     const html = plain(draw(qc, "/", "/", <CommerceHome />));
-    for (const expected of ["2 refunds and payments need a decision", "Decide", "Today", "3 orders", "Orders at the desk", "To ship", "Waiting longest to be sent", "SO-1", "Payments that did not go through", "SO-2", "Expired", "No reviews waiting.", "4 published", "1 not published"]) {
+    for (const expected of ["2 refunds and payments need a decision", "Decide", "Today", "3 orders", "Orders at the desk", "To ship", "Waiting longest to be sent", "SO-1", "Payments that did not go through", "SO-2", "Expired", "No reviews waiting.", "4 published", "1 not published", "3 variants", "on its form, say which item it is a variant of"]) {
       expect(html, expected).toContain(expected);
     }
   });

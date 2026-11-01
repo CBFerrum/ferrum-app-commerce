@@ -177,16 +177,26 @@ function Reviews() {
 }
 
 function Catalog() {
-  const count = (published: boolean) => list("WebsiteItem", { filters: f([["published", "=", published]]), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
-  const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(true), count(false)]) });
+  const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
+  const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
   if (q.error) return <p className="muted">The catalog cannot be shown ({errorMessage(q.error)}).</p>;
   if (!q.data) return <Spinner small label="Loading the catalog" />;
-  const [shown, hidden] = q.data;
+  const [shown, hidden, variants] = q.data;
+  const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
   return (
-    <p>
-      <Link to={`/e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", true]]))}`}>{shown} published</Link>,{" "}
-      <Link to={`/e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", false]]))}`}>{hidden} not published</Link>. <Link to="/e/WebsiteItem/new">Add an item to the store</Link>
-    </p>
+    <>
+      <p>
+        <Link to={open(["published", "=", true], ["variant_of", "is", "not set"])}>{shown} published</Link>,{" "}
+        <Link to={open(["published", "=", false], ["variant_of", "is", "not set"])}>{hidden} not published</Link>
+        {variants > 0 && (
+          <>
+            , and <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? "variant" : "variants"}</Link> of them
+          </>
+        )}
+        . <Link to="/e/WebsiteItem/new">Add an item to the store</Link>
+      </p>
+      <p className="faint cm-tight">A size or a colour is an item of its own: on its form, say which item it is a variant of.</p>
+    </>
   );
 }
 
