@@ -1601,6 +1601,29 @@ async fn variants() {
     let (_, _, map) = html(&t, "/sitemap.xml", &[]).await;
     assert!(map.contains("/p/logo-tee<") && !map.contains("logo-tee-red"), "variants are not pages of their own: {map}");
 
+    // ───────────── listings say what to do next, and sorting is in the address ─────────────
+    let (_, _, none) = html(&t, "/search", &[("q", "zzz")]).await;
+    assert!(
+        none.contains("<h2>No results for “zzz”</h2>") && none.contains(r#"class="refine""#) && none.contains(r#"<input type="hidden" name="q" value="zzz">"#),
+        "{none}"
+    );
+    let (_, _, sorted) = html(&t, "/", &[("sort", "price_desc")]).await;
+    assert!(
+        sorted.contains(r#"<option value="price_desc" selected>"#) && sorted.contains(r#"<meta name="robots" content="noindex">"#),
+        "a sorted page is not indexed: {sorted}"
+    );
+    let (_, _, plain) = html(&t, "/", &[]).await;
+    assert!(!plain.contains(r#"<meta name="robots" content="noindex">"#), "the plain home is");
+    let (_, _, stocked) = html(&t, "/", &[("in_stock", "1")]).await;
+    assert!(stocked.contains(r#"name="in_stock" value="1" checked>"#), "{stocked}");
+    let (_, _, cart_page) = html(&t, "/cart", &[]).await;
+    assert!(
+        cart_page.contains(r#"id="live""#)
+            && cart_page.contains(r#"aria-busy="true""#)
+            && cart_page.contains("Your cart, checkout and order work once it is on"),
+        "{cart_page}"
+    );
+
     // ───────────── buying one ─────────────
     let (cart, _) = t.new_cart(None, json!([{"item": "logo-tee-red-m", "qty": 2}])).await;
     assert_eq!(

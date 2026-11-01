@@ -51,10 +51,10 @@ pub async fn handle(k: &Kernel, ctx: &Ctx, req: &SiteRequest) -> Result<SiteResp
     let site = Shop { origin, api, store: &store, cats: catalog::category_tree(&mut tx, ctx.tenant).await?, path: rest };
     let query = |n: &str| req.query.get(n).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     let out = match segs.as_slice() {
-        [] => listing(k, ctx, &mut tx, &site, None, None, query("cursor")).await?,
-        ["c", slug] => listing(k, ctx, &mut tx, &site, Some(slug), None, query("cursor")).await?,
+        [] => listing(k, ctx, &mut tx, &site, Lens::of(None, None, &query), query("cursor")).await?,
+        ["c", slug] => listing(k, ctx, &mut tx, &site, Lens::of(Some(slug), None, &query), query("cursor")).await?,
         ["search"] => match query("q") {
-            Some(q) if q.chars().count() <= 100 => listing(k, ctx, &mut tx, &site, None, Some(q), query("cursor")).await?,
+            Some(q) if q.chars().count() <= 100 => listing(k, ctx, &mut tx, &site, Lens::of(None, Some(q), &query), query("cursor")).await?,
             Some(_) => site.page(400, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Search for at most 100 characters.</p>"),
             None => site.page(200, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Type what you are looking for above.</p>"),
         },
@@ -122,7 +122,7 @@ impl Shop<'_> {
             .map(|u| format!(r#" · <a href="{}">Terms</a>"#, esc(u)))
             .unwrap_or_default();
         let html = format!(
-            r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}{sep}{store}</title>{description}<link rel="canonical" href="{c}">{social}{robots}<link rel="stylesheet" href="/assets/store.css?v={v}"><script type="module" src="/assets/store.js?v={v}"></script>{data}</head><body data-api="{api}" data-currency="{cur}" data-precision="{prec}" data-tax="{tax}"{return_to}><a class="skip" href="#main">Skip to content</a><header class="top"><a class="brand" href="/">{store}</a><form class="search" action="/search" role="search"><input name="q" type="search" placeholder="Search the store" aria-label="Search the store" maxlength="100"></form><a class="cart-link" href="/cart">Cart<span class="count" data-cart-count hidden></span></a></header>{nav}<main id="main">{main}</main><footer><span>© {store}</span>{terms}</footer></body></html>"##,
+            r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}{sep}{store}</title>{description}<link rel="canonical" href="{c}">{social}{robots}<link rel="stylesheet" href="/assets/store.css?v={v}"><script type="module" src="/assets/store.js?v={v}"></script>{data}</head><body data-api="{api}" data-currency="{cur}" data-precision="{prec}" data-tax="{tax}"{return_to}><a class="skip" href="#main">Skip to content</a><header class="top"><a class="brand" href="/">{store}</a><form class="search" action="/search" role="search"><input name="q" type="search" placeholder="Search the store" aria-label="Search the store" maxlength="100"></form><a class="cart-link" href="/cart">Cart<span class="count" data-cart-count hidden></span></a></header>{nav}<main id="main">{main}</main><div id="live" class="visually-hidden" role="status" aria-live="polite"></div><footer><span>© {store}</span>{terms}</footer></body></html>"##,
             t = esc(title),
             sep = if title.is_empty() { "" } else { " · " },
             c = esc(&canonical),
@@ -139,7 +139,7 @@ impl Shop<'_> {
     /// A page the script fills (cart, checkout, order), never indexed.
     fn script_page(&self, title: &str, view: &str, loading: &str) -> SiteResponse {
         let main = format!(
-            r#"<h1>{t}</h1><div id="view" data-view="{view}"><p class="muted">{l}</p></div><noscript><p>This page needs JavaScript. Your cart and checkout work once it is on.</p></noscript>"#,
+            r#"<h1>{t}</h1><div id="view" data-view="{view}" aria-busy="true"><div class="skeleton" aria-hidden="true"><span></span><span></span></div><p class="visually-hidden">{l}</p></div><noscript><p class="notice">This page needs JavaScript. Your cart, checkout and order work once it is on.</p></noscript>"#,
             t = esc(title),
             l = esc(loading)
         );
@@ -172,7 +172,7 @@ impl Shop<'_> {
 
     fn cards(&self, items: &[Value]) -> String {
         if items.is_empty() {
-            return r#"<p class="muted">Nothing here yet.</p>"#.into();
+            return String::new();
         }
         let li: String = items
             .iter()
@@ -201,17 +201,88 @@ struct Meta {
     data: Option<Value>,
 }
 
+/// What a listing is of, and how the shopper asked to see it (all from the address): a category or a
+/// search, sorted, and perhaps only what is in stock.
+struct Lens<'a> {
+    category: Option<&'a str>,
+    q: Option<&'a str>,
+    sort: Sort,
+    in_stock: bool,
+}
+
+impl<'a> Lens<'a> {
+    fn of(category: Option<&'a str>, q: Option<&'a str>, query: &dyn Fn(&str) -> Option<&'a str>) -> Lens<'a> {
+        Lens { category, q, sort: Sort::parse(query("sort")).unwrap_or(Sort::Ranking), in_stock: matches!(query("in_stock"), Some("1" | "true")) }
+    }
+
+    /// The address's own query for the next page or the same page again: what is asked, then `more`.
+    fn query(&self, more: &str) -> String {
+        let mut qs = String::new();
+        if let Some(q) = self.q {
+            qs.push_str(&format!("q={}&", enc(q)));
+        }
+        if self.sort != Sort::Ranking {
+            qs.push_str(&format!("sort={}&", self.sort.name()));
+        }
+        if self.in_stock {
+            qs.push_str("in_stock=1&");
+        }
+        qs.push_str(more);
+        qs.trim_end_matches('&').to_string()
+    }
+}
+
+/// The sort and stock choices over a listing: a plain form (works without scripts; the script
+/// submits it when a choice changes).
+fn refine_form(site: &Shop<'_>, lens: &Lens<'_>) -> String {
+    let options: String = [
+        (Sort::Ranking, "Featured"),
+        (Sort::PriceAsc, "Price: low to high"),
+        (Sort::PriceDesc, "Price: high to low"),
+        (Sort::Newest, "Newest"),
+        (Sort::Name, "Name"),
+        (Sort::Rating, "Best rated"),
+    ]
+    .iter()
+    .map(|(s, label)| format!(r#"<option value="{}"{}>{label}</option>"#, s.name(), if *s == lens.sort { " selected" } else { "" }))
+    .collect();
+    let hidden = lens.q.map(|q| format!(r#"<input type="hidden" name="q" value="{}">"#, esc(q))).unwrap_or_default();
+    format!(
+        r#"<form class="refine" action="{}" method="get" aria-label="Sort and filter">{hidden}<label>Sort by <select name="sort">{options}</select></label><label><input type="checkbox" name="in_stock" value="1"{}> In stock only</label><button class="quiet" type="submit">Apply</button></form>"#,
+        esc(if site.path.is_empty() { "/" } else { site.path }),
+        if lens.in_stock { " checked" } else { "" }
+    )
+}
+
+/// What a listing says when it has no cards, in words that tell the shopper what to do next.
+fn nothing(lens: &Lens<'_>, category: bool) -> String {
+    let (title, hint) = match (lens.q, lens.in_stock) {
+        (Some(q), _) => {
+            (format!("No results for “{}”", esc(q)), r#"Check the spelling, or try fewer or different words. <a href="/">Browse the store</a>."#.to_string())
+        }
+        (None, true) => (
+            "Nothing in stock here".to_string(),
+            format!(r#"Everything here is sold out for now. <a href="{}">Show it all</a>."#, esc(&format!("?{}", Lens { in_stock: false, ..*lens }.query("")))),
+        ),
+        (None, false) if category => ("No items in this category yet".to_string(), r#"<a href="/">Browse the rest of the store</a>."#.to_string()),
+        (None, false) => ("This store has no items yet".to_string(), "Come back soon.".to_string()),
+    };
+    format!(r#"<div class="nothing"><h2>{title}</h2><p class="muted">{hint}</p></div>"#)
+}
+
 /// The home page, a category or search results: cards, a page at a time.
-async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, category: Option<&str>, q: Option<&str>, cursor: Option<&str>) -> Result<SiteResponse> {
-    let cat = match category {
+async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, lens: Lens<'_>, cursor: Option<&str>) -> Result<SiteResponse> {
+    let cat = match lens.category {
         Some(slug) => match find_category(&site.cats, slug) {
             Some(c) => Some(c.clone()),
             None => return Ok(site.missing()),
         },
         None => None,
     };
-    let f = Listing { category: category.map(str::to_string), q: q.map(str::to_string), min_price: None, max_price: None, in_stock: false, ids: None };
-    let found = catalog::cards(k, ctx, tx, site.store, &f, Sort::parse(None)?, PAGE, cursor, None).await;
+    let q = lens.q;
+    let f =
+        Listing { category: lens.category.map(str::to_string), q: q.map(str::to_string), min_price: None, max_price: None, in_stock: lens.in_stock, ids: None };
+    let found = catalog::cards(k, ctx, tx, site.store, &f, lens.sort, PAGE, cursor, None).await;
     let (items, next) = match found {
         Ok(f) => f,
         // A cursor from another listing, or one tampered with: start again.
@@ -219,11 +290,17 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, category: 
         Err(Error::NotFound(_)) => return Ok(site.missing()),
         Err(e) => return Err(e),
     };
-    let more = next.map(|n| {
-        let qs = q.map(|q| format!("q={}&", enc(q))).unwrap_or_default();
-        format!(r#"<p class="more"><a class="button" href="{}?{qs}cursor={}">More</a></p>"#, esc(if site.path.is_empty() { "/" } else { site.path }), enc(&n))
-    });
-    let more = more.unwrap_or_default();
+    let more = next
+        .map(|n| {
+            format!(
+                r#"<p class="more"><a class="button" href="{}?{}">More</a></p>"#,
+                esc(if site.path.is_empty() { "/" } else { site.path }),
+                esc(&lens.query(&format!("cursor={}", enc(&n))))
+            )
+        })
+        .unwrap_or_default();
+    let refine = if items.is_empty() && !lens.in_stock && lens.q.is_none() { String::new() } else { refine_form(site, &lens) };
+    let grid = if items.is_empty() { nothing(&lens, cat.is_some()) } else { format!("{}{more}", site.cards(&items)) };
     Ok(match (&cat, q) {
         (Some(c), _) => {
             let name = c["name"].as_str().unwrap_or_default();
@@ -242,17 +319,24 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, category: 
                 image: c["image"].as_str().map(str::to_string),
                 data: None,
             };
-            site.page(200, title, Some(&meta), cursor.is_some(), &format!(r#"<h1>{}</h1>{about}{subs}{}{more}"#, esc(name), site.cards(&items)))
+            let crumbs = r#"<p class="crumbs"><a href="/">Home</a></p>"#;
+            site.page(
+                200,
+                title,
+                Some(&meta),
+                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking,
+                &format!(r#"{crumbs}<h1>{}</h1>{about}{subs}{refine}{grid}"#, esc(name)),
+            )
         }
-        (None, Some(q)) => site.page(200, &format!("Search: {q}"), None, true, &format!(r#"<h1>Results for “{}”</h1>{}{more}"#, esc(q), site.cards(&items))),
+        (None, Some(q)) => site.page(200, &format!("Search: {q}"), None, true, &format!(r#"<h1>Results for “{}”</h1>{refine}{grid}"#, esc(q))),
         (None, None) => {
             let meta = Meta { kind: "website", description: None, image: None, data: None };
             site.page(
                 200,
                 "",
                 Some(&meta),
-                cursor.is_some(),
-                &format!(r#"<h1 class="visually-hidden">{}</h1>{}{more}"#, esc(&site.store.name), site.cards(&items)),
+                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking,
+                &format!(r#"<h1 class="visually-hidden">{}</h1>{refine}{grid}"#, esc(&site.store.name)),
             )
         }
     })
