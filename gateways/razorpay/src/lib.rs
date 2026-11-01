@@ -4,9 +4,13 @@
 //! confirms the payment (or reports the link expired). A schedule asks Razorpay about the links
 //! still open, so a lost webhook delays a confirmation by minutes, and cancels the links of
 //! requests that closed.
+//!
+//! Money taken that cannot be booked becomes a Payment Exception, and the refund a person approves
+//! there goes out from the same schedule. The key secret and the webhook secret are held by the
+//! host: this plugin names them and never reads them.
 
-use ferrum_plugin_sdk::{Request, Value, data, fetch, json, kv, log, now, plugin, serde_json, warn};
-use gateway_kit::{basic, hmac_sha256_hex, refused, same, to_major, to_minor, unix};
+use ferrum_plugin_sdk::{Request, Value, data, fetch_with, json, kv, log, now, plugin, serde_json, verify_hmac_sha256, warn};
+use gateway_kit::{Refund, final_status, refused, report_exception, run_refunds, to_major, to_minor, unix};
 
 plugin!(handle);
 
@@ -21,7 +25,7 @@ pub fn handle(req: Request) -> Value {
     match req.kind() {
         "event" => reply(on_event(&req)),
         "http" => webhook(&req),
-        "schedule" => reply(reconcile(&req)),
+        "schedule" => reply(reconcile()),
         _ => json!({}),
     }
 }
@@ -37,25 +41,21 @@ fn open_key(id: &str) -> String {
     format!("open:{id}")
 }
 
-fn auth(req: &Request) -> Result<String, String> {
-    let (id, secret) = (req.config("key_id").as_str().unwrap_or_default(), req.config("key_secret").as_str().unwrap_or_default());
-    if id.trim().is_empty() || secret.trim().is_empty() {
-        return Err("set key_id and key_secret in the razorpay plugin's settings".into());
-    }
-    Ok(basic(id.trim(), secret.trim()))
-}
-
-/// A call to Razorpay → its answer on success, its error description otherwise.
-fn api(method: &str, path: &str, auth: &str, body: Value) -> Result<Value, String> {
-    let r = fetch(method, &format!("{API}{path}"), json!({"authorization": auth, "accept": "application/json"}), body)
-        .map_err(|e| format!("Razorpay cannot be reached: {e}"))?;
+/// A call to Razorpay → its answer on success, its HTTP status and description otherwise.
+fn call(method: &str, path: &str, body: Value) -> Result<Value, (u64, String)> {
+    let r = fetch_with("key_secret", method, &format!("{API}{path}"), json!({"accept": "application/json"}), body)
+        .map_err(|e| (0, format!("Razorpay cannot be reached: {e}")))?;
     let status = r["status"].as_u64().unwrap_or(0);
     let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
     if (200..300).contains(&status) {
         Ok(answer)
     } else {
-        Err(format!("Razorpay answered HTTP {status}: {}", answer["error"]["description"].as_str().unwrap_or("no reason given")))
+        Err((status, format!("Razorpay answered HTTP {status}: {}", answer["error"]["description"].as_str().unwrap_or("no reason given"))))
     }
+}
+
+fn api(method: &str, path: &str, body: Value) -> Result<Value, String> {
+    call(method, path, body).map_err(|(_, e)| e)
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -73,8 +73,7 @@ fn on_event(req: &Request) -> Result<(), String> {
     if text(&doc, "gateway") != NAME || text(&doc, "status") != "Initiated" {
         return Ok(());
     }
-    let auth = auth(req)?;
-    let found = api("GET", &format!("/payment_links?reference_id={id}"), &auth, Value::Null)?;
+    let found = api("GET", &format!("/payment_links?reference_id={id}"), Value::Null)?;
     let link = match found["payment_links"].as_array().and_then(|l| l.first()) {
         Some(link) => link.clone(),
         None => {
@@ -85,7 +84,7 @@ fn on_event(req: &Request) -> Result<(), String> {
                     return Ok(());
                 }
             };
-            api("POST", "/payment_links", &auth, link_request(&doc, &id, amount))?
+            api("POST", "/payment_links", link_request(&doc, &id, amount))?
         }
     };
     kv::set(&open_key(&id), json!(text(&link, "id"))).map_err(|e| e.to_string())?;
@@ -134,13 +133,14 @@ fn link_request(doc: &Value, id: &str, amount: i64) -> Value {
     body
 }
 
-/// Books the payment; a refusal (request closed, amount changed) is final: the payment is to be
-/// refunded in Razorpay.
+/// Books the payment; a refusal (request closed, amount changed) is final, and the money is
+/// reported for a person to decide on.
 fn settle(id: &str, minor: i64, currency: &str, payment: &str) -> Result<(), String> {
-    let params = json!({"amount": to_major(minor, currency), "currency": currency.to_ascii_uppercase(), "gateway_reference": payment});
+    let (amount, currency) = (to_major(minor, currency), currency.to_ascii_uppercase());
+    let params = json!({"amount": amount, "currency": currency, "gateway_reference": payment});
     match data::action("PaymentRequest", id, "mark_paid", params) {
         Ok(_) => {}
-        Err(e) if refused(&e) => warn(&format!("razorpay: payment {payment} for request {id} was not booked ({e}); refund it in Razorpay")),
+        Err(e) if refused(&e) => report_exception(NAME, id, payment, &amount, &currency, &format!("it could not be booked: {}", e.message))?,
         Err(e) => return Err(format!("booking payment {payment} for request {id}: {e}")),
     }
     kv::delete(&open_key(id)).map_err(|e| e.to_string())
@@ -169,13 +169,15 @@ fn webhook(req: &Request) -> Value {
     if req.str("method") != "POST" {
         return respond(405, "POST only");
     }
-    let secret = req.config("webhook_secret").as_str().unwrap_or_default();
-    if secret.is_empty() {
-        return respond(503, "set webhook_secret in the razorpay plugin's settings");
-    }
     let body = req.str("body");
-    if !same(&hmac_sha256_hex(secret, body), req.get("headers")["x-razorpay-signature"].as_str().unwrap_or_default()) {
-        return respond(401, "bad signature");
+    match verify_hmac_sha256("webhook_secret", body, req.get("headers")["x-razorpay-signature"].as_str().unwrap_or_default()) {
+        Ok(true) => {}
+        Ok(false) => return respond(401, "bad signature"),
+        // Unset, or the host cannot say: Razorpay tries again.
+        Err(e) => {
+            log(&format!("razorpay webhook: {e}"));
+            return respond(503, "set webhook_secret in the razorpay plugin's settings");
+        }
     }
     let Ok(event) = serde_json::from_str::<Value>(body) else { return respond(400, "not JSON") };
     let link = &event["payload"]["payment_link"]["entity"];
@@ -197,25 +199,43 @@ fn webhook(req: &Request) -> Value {
     }
 }
 
-/// Every few minutes: asks Razorpay about the links still open.
-fn reconcile(req: &Request) -> Result<(), String> {
-    let Ok(auth) = auth(req) else { return Ok(()) };
+/// Every few minutes: asks Razorpay about the links still open, and carries out approved refunds.
+fn reconcile() -> Result<(), String> {
     for entry in kv::list("open:").map_err(|e| e.to_string())?.iter().take(PER_RUN) {
         let id = text(entry, "key").trim_start_matches("open:");
-        if let Err(e) = check(&auth, id, entry["value"].as_str().unwrap_or_default()) {
+        if let Err(e) = check(id, entry["value"].as_str().unwrap_or_default()) {
             log(&format!("razorpay: checking payment request {id}: {e}"));
         }
     }
-    Ok(())
+    run_refunds(NAME, refund)
 }
 
-fn check(auth: &str, id: &str, link_id: &str) -> Result<(), String> {
+/// Refunds a payment in full. Razorpay takes no idempotency key on this call, so a refund made by a
+/// run that never heard back is found by its note first, and the exception is told about that one.
+fn refund(exception: &Value) -> Refund {
+    let (id, payment) = (text(exception, "id"), text(exception, "gateway_reference"));
+    let known = match call("GET", &format!("/payments/{payment}/refunds"), Value::Null) {
+        Ok(known) => known,
+        Err((status, e)) if final_status(status) => return Refund::Refused(e),
+        Err((_, e)) => return Refund::Later(e),
+    };
+    if let Some(done) = known["items"].as_array().and_then(|i| i.iter().find(|r| text(&r["notes"], "ferrum_exception") == id)) {
+        return Refund::Done(text(done, "id").to_string());
+    }
+    match call("POST", &format!("/payments/{payment}/refund"), json!({"notes": {"ferrum_exception": id}})) {
+        Ok(r) => Refund::Done(text(&r, "id").to_string()),
+        Err((status, e)) if final_status(status) => Refund::Refused(e),
+        Err((_, e)) => Refund::Later(e),
+    }
+}
+
+fn check(id: &str, link_id: &str) -> Result<(), String> {
     let status = match data::get("PaymentRequest", id) {
         Ok(doc) => text(&doc, "status").to_string(),
         Err(e) if e.code == "not_found" => "Gone".into(),
         Err(e) => return Err(e.to_string()),
     };
-    let link = api("GET", &format!("/payment_links/{link_id}"), auth, Value::Null)?;
+    let link = api("GET", &format!("/payment_links/{link_id}"), Value::Null)?;
     let captured = link["payments"].as_array().and_then(|p| p.iter().find(|p| text(p, "status") == "captured")).cloned();
     match (status.as_str(), text(&link, "status")) {
         ("Initiated" | "Failed", "paid") => match captured {
@@ -228,10 +248,12 @@ fn check(auth: &str, id: &str, link_id: &str) -> Result<(), String> {
         // The request is done with (paid, expired, cancelled, gone): so is its link.
         (_, link_status) => {
             if matches!(link_status, "created" | "partially_paid") {
-                api("POST", &format!("/payment_links/{link_id}/cancel"), auth, json!({}))?;
+                api("POST", &format!("/payment_links/{link_id}/cancel"), json!({}))?;
             }
             if let Some(p) = captured.filter(|_| status != "Paid") {
-                warn(&format!("razorpay: payment {} reached request {id} after it closed ({status}); refund it in Razorpay", text(&p, "payment_id")));
+                let currency = text(&link, "currency");
+                let amount = to_major(p["amount"].as_i64().unwrap_or_default(), currency);
+                report_exception(NAME, id, text(&p, "payment_id"), &amount, currency, &format!("it reached the request after it closed ({status})"))?;
             }
             kv::delete(&open_key(id)).map_err(|e| e.to_string())
         }
@@ -242,6 +264,7 @@ fn check(auth: &str, id: &str, link_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use ferrum_plugin_sdk::testing;
+    use gateway_kit::{hmac_sha256_hex, same};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -255,6 +278,10 @@ mod tests {
         let calls: Calls = Rc::default();
         let seen = calls.clone();
         testing::host(move |op, args| {
+            if op == "crypto.verify_hmac_sha256" {
+                assert_eq!(args["credential"], json!("webhook_secret"));
+                return Ok(json!({"valid": same(&hmac_sha256_hex("whsec", args["message"].as_str().unwrap()), args["signature"].as_str().unwrap())}));
+            }
             seen.borrow_mut().push((op.to_string(), args.clone()));
             answer(op, args)
         });
@@ -266,7 +293,7 @@ mod tests {
     }
 
     fn config() -> Value {
-        json!({"key_id": "rzp_test_key", "key_secret": "secret", "webhook_secret": "whsec"})
+        json!({"key_id": "rzp_test_key"})
     }
 
     fn submitted(gateway: &str) -> Request {
@@ -291,7 +318,8 @@ mod tests {
         assert_eq!(handle(submitted("razorpay")), json!({}));
         assert_eq!(ops(&calls), ["http.fetch GET", "time.now ", "http.fetch POST", "kv.set ", "data.action set_gateway_details"]);
         let c = calls.borrow();
-        assert_eq!(c[0].1["headers"]["authorization"], json!("Basic cnpwX3Rlc3Rfa2V5OnNlY3JldA=="));
+        assert_eq!(c[0].1["auth"], json!("key_secret"), "the host signs the call in");
+        assert_eq!(c[0].1["headers"].get("authorization"), None, "with a secret this plugin never holds");
         let body = &c[2].1["body"];
         assert_eq!((&body["amount"], &body["currency"], &body["reference_id"]), (&json!(114_988), &json!("INR"), &json!(ID)));
         assert_eq!((&body["callback_url"], &body["expire_by"]), (&json!("https://shop.example.test/thanks"), &json!(1_793_358_900)));
@@ -340,10 +368,18 @@ mod tests {
         assert_eq!((c[1].0.as_str(), &c[1].1["key"]), ("kv.delete", &json!(format!("open:{ID}"))));
         drop(c);
 
-        // Refused for good (the request expired): answered, logged for a refund; failing for now: retried.
-        let calls = host(|op, _| if op == "data.action" { Err(("invalid".into(), "this payment request has expired".into())) } else { Ok(Value::Null) });
+        // Refused for good (the request expired): answered, and reported for a person to decide on;
+        // failing for now: retried.
+        let calls = host(|op, a| {
+            if op == "data.action" && a["action"] == "mark_paid" { Err(("invalid".into(), "this payment request has expired".into())) } else { Ok(Value::Null) }
+        });
         assert_eq!(handle(webhook_request(&paid_event(), "whsec"))["status"], json!(200));
-        assert!(calls.borrow().iter().any(|(op, a)| op == "log" && a["level"] == "warn" && a["message"].as_str().unwrap().contains("refund")));
+        assert!(
+            calls
+                .borrow()
+                .iter()
+                .any(|(op, a)| op == "data.action" && a["action"] == "report_exception" && a["params"]["reason"].as_str().unwrap().contains("expired"))
+        );
         host(|op, _| if op == "data.action" { Err(("unavailable".into(), "database pool exhausted".into())) } else { Ok(Value::Null) });
         assert_eq!(handle(webhook_request(&paid_event(), "whsec"))["status"], json!(500));
 
@@ -375,6 +411,37 @@ mod tests {
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2);
     }
 
+    #[test]
+    fn a_refund_made_by_a_run_that_never_heard_back_is_not_made_again() {
+        let done = json!({"id": "x-1", "gateway_reference": "pay_9"});
+        let calls = host(|op, a| match op {
+            "http.fetch" if a["method"] == "GET" => http(200, json!({"items": [{"id": "rfnd_1", "notes": {"ferrum_exception": "x-1"}}]})),
+            _ => Ok(Value::Null),
+        });
+        assert_eq!(refund(&done), Refund::Done("rfnd_1".into()));
+        assert_eq!(calls.borrow().iter().filter(|(op, _)| op == "http.fetch").count(), 1, "found, not repeated");
+
+        let calls = host(|op, a| match op {
+            "http.fetch" if a["method"] == "GET" => http(200, json!({"items": []})),
+            "http.fetch" => http(200, json!({"id": "rfnd_2"})),
+            _ => Ok(Value::Null),
+        });
+        assert_eq!(refund(&done), Refund::Done("rfnd_2".into()));
+        let c = calls.borrow();
+        let sent = c.iter().rfind(|(op, _)| op == "http.fetch").unwrap();
+        assert_eq!(sent.1["body"]["notes"]["ferrum_exception"], json!("x-1"), "and marked, so the next run can find it");
+        drop(c);
+
+        host(|op, a| match op {
+            "http.fetch" if a["method"] == "GET" => http(200, json!({"items": []})),
+            "http.fetch" => http(400, json!({"error": {"description": "the payment is fully refunded"}})),
+            _ => Ok(Value::Null),
+        });
+        assert!(matches!(refund(&done), Refund::Refused(why) if why.contains("fully refunded")));
+        host(|op, _| if op == "http.fetch" { http(502, json!({})) } else { Ok(Value::Null) });
+        assert!(matches!(refund(&done), Refund::Later(_)));
+    }
+
     /// Against Razorpay's test mode when RAZORPAY_TEST_KEY_ID (`rzp_test_…`) and
     /// RAZORPAY_TEST_KEY_SECRET are set: a real Payment Link, cancelled again afterwards.
     #[test]
@@ -388,7 +455,7 @@ mod tests {
         let id = sandbox::fresh_id();
         let mut req = submitted("razorpay");
         req.0["config"]["key_id"] = json!(key_id);
-        req.0["config"]["key_secret"] = json!(secret);
+        sandbox::sign_in_as("key_secret", gateway_kit::basic(&key_id, &secret));
         req.0["event"]["id"] = json!(id);
         req.0["event"]["doc"]["id"] = json!(id);
         req.0["event"]["doc"]["expires_at"] = json!(sandbox::utc_in(3600));
@@ -399,7 +466,7 @@ mod tests {
         assert!(details["payment_url"].as_str().unwrap().starts_with("https://rzp.io/"), "{details}");
         let link = details["gateway_reference"].as_str().unwrap();
         let cancelled = sandbox::fetch(&json!({"method": "POST", "url": format!("{API}/payment_links/{link}/cancel"),
-            "headers": {"authorization": basic(&key_id, &secret)}, "body": {}}))
+            "headers": {"authorization": gateway_kit::basic(&key_id, &secret)}, "body": {}}))
         .unwrap();
         assert_eq!(cancelled["status"], json!(200), "{cancelled}");
     }

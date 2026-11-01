@@ -102,6 +102,62 @@ pub fn refused(e: &HostError) -> bool {
     matches!(e.code.as_str(), "validation_failed" | "invalid" | "conflict" | "forbidden" | "not_found")
 }
 
+use ferrum_plugin_sdk::{Value, data, json, log, warn};
+
+/// What a refund came to.
+#[derive(Debug, PartialEq)]
+pub enum Refund {
+    /// Done: the provider's reference for it.
+    Done(String),
+    /// The provider refused it for good: a person looks again.
+    Refused(String),
+    /// Not now: the next run tries again.
+    Later(String),
+}
+
+/// Refunds carried out per schedule run (a run's host calls are limited).
+const REFUNDS_PER_RUN: u32 = 10;
+
+/// Whether a provider's HTTP status means asking again would get the same answer.
+pub fn final_status(status: u64) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 429)
+}
+
+/// Reports money this gateway took and could not book, on the request it was for. A person decides
+/// what happens to it. With no request left to hang it on, the log is all there is.
+pub fn report_exception(gateway: &str, request: &str, reference: &str, amount: &str, currency: &str, reason: &str) -> Result<(), String> {
+    let params = json!({"gateway_reference": reference, "amount": amount, "currency": currency, "reason": reason});
+    match data::action("PaymentRequest", request, "report_exception", params) {
+        Ok(_) => Ok(()),
+        Err(e) if refused(&e) => {
+            warn(&format!("{gateway}: payment {reference} for request {request} must be refunded at the gateway: {reason} ({e})"));
+            Ok(())
+        }
+        Err(e) => Err(format!("reporting payment {reference}: {e}")),
+    }
+}
+
+/// Carries out the refunds people approved. `refund` must be safe to repeat for one exception: a run
+/// that dies between the provider's answer and recording it does it again.
+pub fn run_refunds(gateway: &str, refund: impl Fn(&Value) -> Refund) -> Result<(), String> {
+    let due = data::query("PaymentException", json!({"gateway": gateway, "status": "Refund Approved"}), REFUNDS_PER_RUN).map_err(|e| e.to_string())?;
+    for exception in &due {
+        let id = exception["id"].as_str().unwrap_or_default();
+        let told = match refund(exception) {
+            Refund::Done(reference) => data::action("PaymentException", id, "refund_done", json!({"refund_reference": reference})),
+            Refund::Refused(why) => data::action("PaymentException", id, "refund_failed", json!({"error": why})),
+            Refund::Later(why) => {
+                log(&format!("{gateway}: the refund of {id} waits: {why}"));
+                continue;
+            }
+        };
+        if let Err(e) = told {
+            log(&format!("{gateway}: the refund of {id}: {e}"));
+        }
+    }
+    Ok(())
+}
+
 /// For a gateway's tests against its provider's sandbox (native builds only): a host that makes
 /// `http.fetch` calls for real and reads the clock.
 #[cfg(not(target_arch = "wasm32"))]
@@ -111,6 +167,15 @@ pub mod sandbox {
 
     /// The host calls made, in order: `(op, args)`.
     pub type Calls = Rc<RefCell<Vec<(String, Value)>>>;
+
+    thread_local! {
+        static SIGN_IN: RefCell<std::collections::HashMap<String, String>> = RefCell::default();
+    }
+
+    /// What this thread's `http.fetch` sends for `auth: name`, as the plugin host would.
+    pub fn sign_in_as(name: &str, authorization: impl Into<String>) {
+        SIGN_IN.with(|s| s.borrow_mut().insert(name.to_string(), authorization.into()));
+    }
 
     /// A test key from the environment (empty counts as unset).
     pub fn key(name: &str) -> Option<String> {
@@ -153,6 +218,9 @@ pub mod sandbox {
         let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30)).build().map_err(|e| failed(e.to_string()))?;
         let method = reqwest::Method::from_bytes(args["method"].as_str().unwrap_or("GET").as_bytes()).map_err(|e| failed(e.to_string()))?;
         let mut req = client.request(method, args["url"].as_str().unwrap_or_default());
+        if let Some(name) = args["auth"].as_str() {
+            req = req.header("authorization", SIGN_IN.with(|s| s.borrow().get(name).cloned()).unwrap_or_default());
+        }
         for (k, v) in args["headers"].as_object().into_iter().flatten() {
             if let Some(v) = v.as_str() {
                 req = req.header(k.as_str(), v);

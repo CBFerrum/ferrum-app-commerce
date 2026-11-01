@@ -43,6 +43,7 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("CouponCode", Arc::new(coupon::CouponHook))
         .register("PricingRule", Arc::new(coupon::PricingRuleGuard))
         .register("PaymentRequest", Arc::new(payment::PaymentRequestHook))
+        .register("PaymentException", Arc::new(payment::PaymentExceptionHook))
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))
         .register("PaymentEntry", Arc::new(payment::PaymentEntryHook));
