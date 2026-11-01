@@ -442,7 +442,7 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
         .iter()
         .filter(|l| store.shipping_item.is_none() || id(l, "item") != store.shipping_item)
         .map(|l| {
-            let have = claimed.get(&s(l, "id").unwrap_or_default().to_string()).copied().unwrap_or_default();
+            let have = claimed.get(s(l, "id").unwrap_or_default()).copied().unwrap_or_default();
             let room = if d(l, "billed_qty").is_zero() { Decimal::ZERO } else { returnable(d(l, "delivered_qty"), d(l, "billed_qty"), have.restocked, have.all) };
             json!({"id": s(l, "id"), "item": s(l, "item"), "name": s(l, "item_name"), "qty": money(d(l, "qty")), "delivered": money(d(l, "delivered_qty")), "invoiced": !d(l, "billed_qty").is_zero(),
                    "returnable": money(room), "rate": money(d(l, "rate"))})
@@ -486,6 +486,8 @@ pub struct OrderRefundHook;
 
 /// Fills a new refund: the order, the payment, the lines and what they come to.
 async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
+    // The order is read with engine rights below: only someone who may read orders asks about one.
+    hc.ctx.require("SalesOrder", Action::Read)?;
     let so_id = id(doc, "sales_order").ok_or_else(|| Error::field("sales_order", "is required"))?;
     // Locked, so two refunds of one order queue up and the second counts the first.
     let so = hc.kernel.get_tx(&sys(hc.ctx), hc.tx, "SalesOrder", so_id, true).await?;
@@ -702,7 +704,8 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
     }
     hc.kernel.set_values_tx(&sctx, hc.tx, "OrderRefund", refund, v).await?;
     if let Some(pr) = id(doc, "payment_request") {
-        let request = get(hc.kernel, hc.ctx, hc.tx, "PaymentRequest", pr).await?;
+        // Locked: two refunds of one payment finishing together each add theirs.
+        let request = hc.kernel.get_tx(&sctx, hc.tx, "PaymentRequest", pr, true).await?;
         let mut p = Doc::new();
         set(&mut p, "refunded_amount", money(d(&request, "refunded_amount") + amount));
         hc.kernel.set_values_tx(&sctx, hc.tx, "PaymentRequest", pr, p).await?;

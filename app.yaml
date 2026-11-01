@@ -1,8 +1,8 @@
 id: commerce
 name: Commerce
-version: 0.4.0
+version: 0.5.0
 publisher: cbferrum
-summary: "Online store: catalog, carts, coupons, shipping, guest and portal checkout, web orders and payment requests for gateway plugins"
+summary: "Online store: catalog with variants, carts, coupons, shipping, guest and portal checkout, a web-order desk, refunds and returns, order tracking, payment requests for gateway plugins"
 description: README.md
 categories: [commerce, sales]
 license: AGPL-3.0-only
@@ -21,7 +21,7 @@ contributes:
     - id: commerce
       route: commerce
       title: Store
-      description: Your online store's sales, orders to deliver, payments, reviews and catalog
+      description: Your online store's sales, orders to ship, refunds, payments, reviews and catalog
       icon: shopping-cart
       color: "#be185d"
       roles: [Website Manager, Sales Manager]

@@ -208,7 +208,7 @@ async fn funnel(k: &Kernel, ctx: &Ctx, tx: &mut Tx, co: &ReportCompany, p: &Para
     let (from, to) = period(p, co)?;
     let mut qb = QueryBuilder::new(
         "select count(*), count(*) filter (where coalesce(c.item_count, 0) > 0 or c.status = 'Ordered'), count(*) filter (where c.status = 'Ordered'), \
-         count(*) filter (where c.status = 'Ordered' and o.docstatus = 1 and (o.ext->>'commerce_payment_status') in ('Paid', 'Not Required')) \
+         count(*) filter (where c.status = 'Ordered' and o.docstatus = 1 and (o.ext->>'commerce_payment_status') in ('Paid', 'Not Required', 'Partly Refunded', 'Refunded')) \
          from e_shopping_cart c left join e_sales_order o on o.tenant_id = c.tenant_id and o.id = c.sales_order where c.tenant_id = ",
     );
     qb.push_bind(ctx.tenant).push(" and c.company = ").push_bind(co.id);

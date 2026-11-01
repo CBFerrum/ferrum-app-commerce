@@ -6,7 +6,8 @@ Sell online from the same items, prices, stock and books as the rest of Ferrum. 
 
 * **Catalog** — `ItemCategory` (a tree), `WebsiteItem` (the published face of an `Item`: slug,
   title, descriptions, images, categories, related items, SEO, ranking, weight, order limit) and
-  moderated `ItemReview`s.
+  moderated `ItemReview`s. A `WebsiteItem` can be a **variant** of another (`variant_of`, plus
+  `options`: Size M, Colour Red): see "Variants".
 * **Carts** — `ShoppingCart` is a sales-shaped document. Every change re-prices it with the
   selling engine (`ferrum_domain::pricing::calculate`: price list, pricing rules, tax template,
   rounding), so cart, sales order and invoice agree to the cent. Clients choose items,
@@ -84,7 +85,8 @@ newest), `price_asc`, `price_desc`, `newest`, `name`, `rating`), `limit` (1–48
 `cursor` (from `next_cursor`; valid for the same sort) →
 `{items: [Card], next_cursor, currency}`. Only published items of enabled items with a price.
 
-`Card` = `{slug, title, short_description, image: {url, alt} | null, price: Price,
+`Card` = `{slug, title, short_description, image: {url, alt} | null, price: Price, from (true
+for an item with variants: the price is its cheapest variant's),
 in_stock, available_qty (string, only when the store shows quantities), rating: {average,
 count}}` and `Price` = `{currency, list_price, price, discount_percent, price_with_tax | null}`
 (`price` after automatic pricing rules for one unit; signed-in customers get their own;
@@ -95,7 +97,10 @@ count}}` and `Price` = `{currency, list_price, price, discount_percent, price_wi
 sanitize when rendering), images: [{url, alt}], categories: [{slug, name}], price: Price | null,
 purchasable, in_stock, available_qty, unit: {name, whole_number}, max_qty, seo: {title,
 description}, rating: {average, count}, reviews: [Review] (latest 10), reviews_next_cursor,
-related: [Card]}`. `404` when the item is missing or unpublished.
+related: [Card], variant_of: {slug, title, published} | null, options: [{option, value}],
+variants: [{slug, title, options, price, purchasable, in_stock, available_qty, image}]}`.
+An item with variants is not `purchasable` itself (choose a variant: adding it to a cart is
+refused); a variant says which item it is one of. `404` when the item is missing or unpublished.
 
 **`GET /items/{slug}/reviews?cursor=&limit=`** (limit ≤ 50) → `{reviews: [Review], next_cursor}`,
 `Review` = `{rating, title, review, reviewer_name, verified_purchase, date}` — approved reviews
@@ -146,8 +151,9 @@ Changing an ordered or expired cart is `409`.
 characters; or `idempotency_key` in the body); body `{payment_method: gateway, accept_terms
 (required when the store has a terms page), expected_total? (the rounded total the customer
 saw), return_url? (must start with the store URL), details?: {same as PUT /cart/details}}` →
-`{order: Order, order_token, payment_request: PaymentRequest | null}` (`null` when nothing is
-to be paid).
+`{order: Order, order_token, order_link, payment_request: PaymentRequest | null}` (`null` when
+nothing is to be paid). `order_link` is the shopper's tracking link (see "After checkout"), made when the
+store has a storefront URL.
 
 It re-prices the cart for the customer, re-checks every line (published, priced, within limits,
 in stock — under per-item locks, so two checkouts cannot both take the last unit) and the
@@ -162,7 +168,10 @@ the message has the new total —, cart already ordered or expired), `403` guest
 disabled. Keep `order_token`: it is the guest's key to the order.
 
 `Order` = `{number, date, status (sales order status), delivered_percent, payment_status
-(Pending | Paid | Failed | Expired | Cancelled | Not Required), currency, email,
+(Pending | Paid | Failed | Expired | Cancelled | Not Required | Partly Refunded | Refunded),
+payment_method, steps: [{key, label, done}] (placed, paid, shipped), shipments: [{date, carrier,
+tracking_number, tracking_url}], refunds: [{status (Approved | Refunded), kind, amount, currency,
+date}], currency, email,
 shipping_address, billing_address (multi-line text), notes, items: [{item (slug), title, qty,
 price, amount, delivered_qty}], shipping: {method, amount}, totals: {subtotal, shipping, taxes,
 total_taxes, grand_total, rounding_adjustment, rounded_total}, payments: [PaymentRequest]}`.
@@ -177,12 +186,19 @@ expires_at, paid_at}`.
 |---|---|---|
 | `GET /payment-requests/{id}` | anyone with the order token | `X-Order-Token` → `PaymentRequest`. Poll it after checkout until `payment_url` appears, then redirect the shopper there. `404` for any mismatch |
 | `POST /orders/lookup` | guest | `{number, email, token}` → `{order: Order}`; `404` when any of the three is wrong |
+| `POST /orders/track` | anyone with the tracking link | `{number, token}` → `{order: Order}` without `email`, `billing_address`, `notes` and the street: `ship_to` names only the town and country. `404` for any mismatch; a cancelled order answers, with its status |
 | `POST /orders/pay` | guest | `{number, email, token, payment_method, return_url?}` → `{payment_request}`: pay again after a failed or expired payment, or switch method (an open request of the same method is returned; one of another method is cancelled). `422` paid, closed or cancelled order |
 | `GET /orders?cursor=` | signed in | `{orders: [{number, date, status, payment_status, web_order, currency, grand_total}], next_cursor}` — 20 per page, newest first; `401` when not signed in |
 | `GET /orders/{number}` | signed in | `{order: Order}`; `404` unless it is the user's |
 | `POST /orders/{number}/pay` | signed in | as `/orders/pay` |
 | `POST /orders/{number}/reorder` | signed in | `201 {token, cart: Cart, skipped: [titles]}` — a new cart with the order's goods at today's prices |
 | `GET /invoices?cursor=` | signed in | `{invoices: [{number, date, due_date, status, currency, grand_total, outstanding}], next_cursor}` |
+
+**The tracking link** is `{store_url}/order#n={number}&t={order_token}`. The token is in the address'
+*fragment*, which browsers never send, so no server, log or `Referer` sees it; the order page reads it and
+calls `/orders/track`. It comes with the checkout result (`order_link`), in the `commerce.order_placed` and
+`commerce.order_shipped` events, and from the desk (the `web_tracking_link` action on a web order). Anyone
+who has the link can follow the order, so mailers should treat it as confidential.
 
 A signed-in user's customers are those whose email is the user's (on the customer, or on a CRM
 contact of the customer when the CRM package is installed) — never guest customers, whose
@@ -294,16 +310,86 @@ failed requests become `Expired` (`commerce.payment_expired`) and, when the stor
 orders, the order is cancelled — releasing its stock — unless it was paid or has a newer open
 request. Expired requests are never paid: refund late captures.
 
-**Refunds.** Cancel the payment entry (refund at the provider); the request then shows
-`Cancelled` and the order can be cancelled. A paid web order cannot be cancelled before that.
+**Refunds.** Money a gateway took and could not book is a `PaymentException` (above). Refunds of
+payments that *were* booked, whole or in part, are `OrderRefund` records: see "Refunds of booked
+payments". A paid web order cannot be cancelled except through a cancellation refund.
+
+## Refunds of booked payments
+
+A person asks for a refund from the order's page in the store's admin (or by inserting an `OrderRefund`),
+and the server does the sums. Two kinds:
+
+* **Return** (`kind: Return`, `lines: [{sales_order_line, qty, restock}]`, `include_shipping`): delivered
+  and invoiced goods come back. The server checks each line against what was delivered, invoiced and
+  already asked for, makes the credit note, and takes its total as `amount`; the caller never sets it. An
+  order must be invoiced first (a return credits an invoice).
+* **Cancellation** (`kind: Cancellation`): nothing shipped or was invoiced; the whole payment goes back.
+
+`amount` can never pass what the payment still holds (paid, less the refunds that are asked for,
+approved, failed or done). The record then moves `Requested` → `Approved` (a person, with write on
+`OrderRefund`; a plugin is refused) → `Refunded` or `Refund Failed` (the gateway, or a person with
+`mark_refunded` for cash, a bank transfer or a refund made from the provider's dashboard) and `Declined`
+(a person). `refund_failed` can be approved again.
+
+**What a gateway plugin does**, on its schedule, alongside `PaymentException`:
+
+1. Permission in its manifest: `{"entity": "OrderRefund", "read": true, "write": true}`.
+2. `data.query("OrderRefund", {"gateway": "<name>", "status": "Approved"}, N)`. Each row has `id`,
+   `number`, `payment_reference` (the provider's own id of the payment, as given to `mark_paid` as
+   `gateway_reference`), `amount` (a decimal string, **in the request's currency: whole or part, never
+   assume the whole payment**) and `currency_code`.
+3. Ask the provider for a refund of `amount` on `payment_reference`, with the refund's `id` as the
+   idempotency key (or find a refund made earlier by it, as Razorpay's plugin does for exceptions).
+4. Report with `data.action("OrderRefund", id, "refund_done", {"refund_reference": "re_…"})`, or
+   `refund_failed` with `{"error": "…"}` for a refusal that will not change. Repeating either is harmless.
+   Only the plugin whose name is the refund's `gateway` may; the others get `403`.
+
+`refund_done` also does the books, in the same call and all or nothing: a return delivery note puts the
+goods back (for the lines marked to restock), the credit note is submitted, the refund is posted out of
+the bank the payment came into and matched to what the credit note owes, and the order is closed when
+nothing is left to ship (a cancellation reverses the payment entry and cancels the order instead). If the
+books refuse (a closed period, a missing account, a payment in another currency than the company's), the
+call still succeeds: the refund is `Refunded`, `booked` is false and `booking_error` says why, the
+managers are told, and `post_books` tries again. The gateways in `gateways/` do not carry these out yet;
+until they do, a person records the refund with `mark_refunded` after sending it from the provider.
+
+`POST /api/app/commerce/desk/refund-plan` (signed in; needs create on `OrderRefund` and read on the order)
+is what the dialog asks: `{sales_order, kind?, lines?, include_shipping?}` → what may still come back per
+line, the payment and what it holds, whether the order can be cancelled, and the amount the choice comes
+to. It writes nothing.
+
+## The store's desk
+
+Three actions on web orders let the store's people (Website Manager, Sales Manager, Sales User, and
+administrators) run them without the broader Sales rights: `web_ship` (one delivery note for everything
+still to deliver, with `carrier`, `tracking_number`, `tracking_url`, `notify` and `invoice`, submitted,
+and the invoice that applies the shopper's payment; all or nothing), `web_invoice` and
+`web_tracking_link`. `DeliveryNote` carries the tracking fields and a *Tell the Customer* switch, and
+`SalesOrder` the *Web Payment Method*. A queue, per order, is read from `status`, `per_delivered`,
+`per_billed`, the web payment status and method; the admin's rules for it are in `ui/src/queues.ts`.
+
+## Variants
+
+`Item` has no variants, so a variant here is a `WebsiteItem` of its own, with its own `Item` (price, stock,
+code), whose `variant_of` names the website item it is a variant of and whose `options` say what sets it
+apart (`Colour` = `Red`, `Size` = `M`). Rules: variants go one level deep; every variant of an item names
+the same options; no two have the same choices; an item with variants is sold only through them. Cart,
+checkout, stock and orders need nothing more: a variant is an item, named "Logo Tee — Red / M" by default.
+The storefront lists the parent once ("From" its cheapest published variant, in stock when one is), the
+variant's address redirects to the parent's page with `?v=` choosing it, and search takes each word of a
+query anywhere in an item, its variants and their choices. Reviews of the parent are verified by a
+purchase of any variant.
 
 ## Events for mailers
 
 Besides the usual document events, the outbox carries (for a comms package, webhooks or
 automations): `commerce.order_placed` `{sales_order, number, customer, email, name, currency,
 grand_total, payment_method, payment_request, order_token}` — the token belongs in the
-confirmation email (the order page needs number + email + token), so treat these payloads as
-confidential —; `commerce.order_paid`, `commerce.payment_failed`, `commerce.payment_expired`
+confirmation email (the order page needs number + email + token, or the `order_link` alone), so treat
+these payloads as confidential —; `commerce.order_shipped` `{sales_order, number, delivery_note, email, carrier, tracking_number,
+tracking_url, notify, order_link, ship_to}` (`notify` is the *Tell the Customer* switch),
+`commerce.order_refunded` `{sales_order, number, refund, kind, amount, currency, gateway, email, notify}`,
+`commerce.order_paid`, `commerce.payment_failed`, `commerce.payment_expired`
 and `commerce.cart_abandoned` `{cart, email, name, item_count, grand_total, currency}` (carts
 with an email that went idle).
 
@@ -331,8 +417,13 @@ shopper revives them) and carts idle for *cart expiry days* as `Expired` (frozen
 
 * One store per tenant; prices come from one price list read as company-currency prices (the
   selling engine converts them to a foreign store currency at the day's rate).
-* Item variants and attributes are not modelled by `Item`, so the store has none; a default
-  territory is not set on customers (core customers have no territory).
+* Item variants are not modelled by `Item`: each variant is a store item of its own (see "Variants"), made
+  one by one; there is no generator for all the combinations of a size and a colour. A default territory
+  is not set on customers (core customers have no territory).
+* Reports count orders as they were placed: refunds are not netted from `web_sales` or `top_products`.
+* A refund is booked in the company's currency only (a payment in another currency is refunded, then
+  posted by hand), and an order must be invoiced before goods can be returned. A tax template with fixed
+  (`Actual`) charges is left out of a partial credit note.
 * Expired carts are kept (with their contact details) until deleted by staff.
 * Advances in another currency at a different booked rate are left for the accountant to
   allocate (an exchange difference needs a journal entry).

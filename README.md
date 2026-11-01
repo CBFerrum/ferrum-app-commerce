@@ -5,7 +5,7 @@
   <img alt="Ferrum Commerce" src="docs/assets/banner-light.svg" width="100%">
 </picture>
 
-[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.3.2-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.1%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
+[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.5.0-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.1%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
 
 **A native app for [Ferrum](https://github.com/CBFerrum/Ferrum), the open-source, AI-first business platform.**
 
@@ -25,14 +25,14 @@ plugins mark payment requests paid, which books an advance applied when the orde
 
 | At a glance | |
 |---|---|
-| 📦 Version | `0.3.2` |
+| 📦 Version | `0.5.0` |
 | 🧱 Platform | Ferrum `>=0.3.1, <0.4` |
 | 🔗 Requires | erp `>=0.1` |
 | 🖥️ Interface | its own, at `/commerce/` |
-| 🗃️ Records | 17 entities in 1 package |
+| 🗃️ Records | 22 entities in 1 package |
 | 👥 Roles | 5: Website Manager, Sales User, Sales Manager, Accounts Manager, Accounts User |
 | 📊 Reports | 5 |
-| 🧪 Tests | 21 Rust tests, 1 interface test file |
+| 🧪 Tests | 36 Rust tests, 6 interface test files |
 
 
 ## Highlights
@@ -77,6 +77,34 @@ Open orders reserve stock, locked per item at checkout.
 
 ### 📊 Store reports
 Web sales, abandoned carts, the conversion funnel, top products and coupon usage.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧾 A desk for web orders
+What waits for money, what to pick and send, what to invoice, each with its next step; shipping with tracking; a pick list.
+
+</td>
+<td width="50%" valign="top">
+
+### ↩️ Returns and refunds
+Choose the lines, restock them, credit the invoice and send the money back through the gateway the order was paid with; a manager decides.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🎨 Variants
+A size or a colour is an item of its own with its own price and stock, chosen on its item's page.
+
+</td>
+<td width="50%" valign="top">
+
+### 🔎 Order tracking
+A link, no sign-in: the steps, the carrier and the parcel, refunds on their way.
 
 </td>
 </tr>
@@ -154,7 +182,7 @@ with them under the same rules as people.
 
 ## Data model
 
-The main records and how they connect (17 entities in all; `packages/` has every field).
+The main records and how they connect (22 entities in all; `packages/` has every field).
 
 ```mermaid
 erDiagram
@@ -201,11 +229,11 @@ erDiagram
 
 | Role | What it is for | Entities |
 |---|---|---|
-| **Website Manager** | Runs the online store - settings, catalog, categories, review moderation, shipping, coupons and payment requests. | 22 |
-| **Sales User** |  | 7 |
-| **Sales Manager** |  | 7 |
-| **Accounts Manager** |  | 2 |
-| **Accounts User** |  | 1 |
+| **Website Manager** | Runs the online store - settings, catalog, categories, review moderation, shipping, coupons and payment requests. | 27 |
+| **Sales User** |  | 10 |
+| **Sales Manager** |  | 9 |
+| **Accounts Manager** |  | 4 |
+| **Accounts User** |  | 2 |
 
 <details>
 <summary><b>Reports (5)</b></summary>
@@ -296,6 +324,8 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.5.0** | A desk for web orders, orders whole, money that needs a person in one place, returns and refunds through the gateway, order tracking from a link, variants, and a storefront finished for phones … |
+| **0.4.0** | A payment that cannot be booked is a Payment Exception a manager sees; gateways no longer hold their keys … |
 | **0.3.2** | The interface starts faster: its first download holds the frame and the app's own pages, and lists, forms, reports and other apps' screens load … |
 | **0.3.1** | Record cards (the bar's previews on hover, Ferrum apps-ui.md U5) stay off the web orders to deliver and the payments that did not go through … |
 | **0.3.0** | The storefront on a host of its own: on a workspace host whose target is `site:commerce`, the shop's pages are at its root, rendered on the server … |
