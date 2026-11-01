@@ -100,6 +100,38 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
         None => store.currency_code.clone(),
     };
     let requests = find(k, ctx, tx, "PaymentRequest", vec![Filter::eq("sales_order", so_id.to_string())], Some("created_at desc"), 20).await?;
+    let notes = find(
+        k,
+        ctx,
+        tx,
+        "DeliveryNote",
+        vec![Filter::eq("items.sales_order", so_id.to_string()), Filter::eq("docstatus", 1), Filter::eq("is_return", false)],
+        Some("posting_date asc"),
+        20,
+    )
+    .await?;
+    let shipments: Vec<Value> = notes
+        .iter()
+        .map(|n| {
+            json!({"date": s(n, "posting_date"), "carrier": s(n, "transporter"), "tracking_number": s(n, "commerce_tracking_number"),
+                   "tracking_url": s(n, "commerce_tracking_url").filter(|u| u.starts_with("https://"))})
+        })
+        .collect();
+    // What the shopper may hear of refunds: those on their way and those done.
+    let sent = find(
+        k,
+        ctx,
+        tx,
+        "OrderRefund",
+        vec![Filter::eq("sales_order", so_id.to_string()), Filter { field: "status".into(), op: Op::In, value: json!(["Approved", "Refunded"]) }],
+        Some("created_at asc"),
+        20,
+    )
+    .await?;
+    let refunds: Vec<Value> = sent
+        .iter()
+        .map(|r| json!({"status": s(r, "status"), "kind": s(r, "kind"), "amount": m(d(r, "amount")), "currency": s(r, "currency_code"), "date": s(r, "refunded_at").or(s(r, "approved_at")).map(|t| t.chars().take(10).collect::<String>())}))
+        .collect();
     let taxes: Vec<Value> = rows(so, "taxes")
         .iter()
         .filter(|t| !d(t, "tax_amount").is_zero())
@@ -111,6 +143,10 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
         "status": s(so, "status"),
         "delivered_percent": m(d(so, "per_delivered")),
         "payment_status": s(so, "commerce_payment_status"),
+        "payment_method": s(so, "commerce_payment_method"),
+        "steps": steps(s(so, "commerce_payment_status"), s(so, "commerce_payment_method"), !shipments.is_empty()),
+        "shipments": shipments,
+        "refunds": refunds,
         "currency": code,
         "email": s(so, "commerce_contact_email"),
         "shipping_address": s(so, "commerce_shipping_address"),
@@ -122,6 +158,56 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
                    "grand_total": m(d(so, "grand_total")), "rounding_adjustment": m(d(so, "rounding_adjustment")), "rounded_total": m(d(so, "rounded_total"))},
         "payments": requests.iter().map(|r| request_view(r, store)).collect::<Vec<_>>(),
     }))
+}
+
+/// The address a shopper opens to follow an order, with no sign-in. The token rides in the fragment,
+/// which a browser never sends to a server, so no log keeps it; the order page reads it from there.
+pub fn tracking_url(store_url: &str, number: &str, order_token: &str) -> String {
+    format!("{}/order#n={}&t={}", store_url.trim_end_matches('/'), crate::pages::enc(number), order_token)
+}
+
+/// The stages of an order as a shopper follows it, each done or not.
+pub(crate) fn steps(payment: Option<&str>, method: Option<&str>, shipped: bool) -> Vec<Value> {
+    let paid = matches!(payment, Some("Paid" | "Partly Refunded" | "Refunded" | "Not Required"));
+    let label = match (payment, method) {
+        (Some("Not Required"), _) => "Nothing to pay",
+        (_, Some("Cash on Delivery")) if !paid => "Pay on delivery",
+        _ => "Payment received",
+    };
+    vec![
+        json!({"key": "placed", "label": "Order placed", "done": true}),
+        json!({"key": "paid", "label": label, "done": paid}),
+        json!({"key": "shipped", "label": "Shipped", "done": shipped}),
+    ]
+}
+
+/// An order as the holder of its tracking link sees it: what was bought, what is due, where it
+/// stands, and only the town it goes to. The link proves the order is theirs to follow, not that
+/// the email or the street are theirs to read.
+pub(crate) fn track_view(mut order: Value) -> Value {
+    if let Some(m) = order.as_object_mut() {
+        let town = m.get("shipping_address").and_then(Value::as_str).map(|a| {
+            // The postal form ends with the locality and the country.
+            let lines: Vec<&str> = a.lines().collect();
+            lines.iter().rev().take(2).rev().copied().collect::<Vec<_>>().join(" · ")
+        });
+        for private in ["email", "billing_address", "notes", "shipping_address"] {
+            m.remove(private);
+        }
+        m.insert("ship_to".into(), json!(town));
+    }
+    order
+}
+
+/// An order by number and its token alone (the tracking link). Every failure looks the same.
+pub async fn tracked_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, order_token: &str) -> Result<Doc> {
+    let hidden = || Error::NotFound("order".into());
+    let so = web_order(k, ctx, tx, number).await?.ok_or_else(hidden)?;
+    let so_id = id(&so, "id").ok_or_else(hidden)?;
+    if !token::order_token_valid(tx, ctx.tenant, so_id, order_token).await? {
+        return Err(hidden());
+    }
+    Ok(so)
 }
 
 /// A web order by number, whole.
@@ -301,4 +387,38 @@ pub async fn reorder(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, user: &C
         }
     }
     Ok((cart_token, cart, skipped))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tracking_link_keeps_its_token_out_of_the_request() {
+        assert_eq!(tracking_url("https://shop.example.com/", "SO-2026-00001", "abc_DEF-123"), "https://shop.example.com/order#n=SO-2026-00001&t=abc_DEF-123");
+        assert!(tracking_url("https://shop.example.com", "A B", "t").contains("#n=A%20B&"), "the number is encoded");
+    }
+
+    #[test]
+    fn a_shopper_follows_three_steps() {
+        let done = |v: Vec<Value>| v.iter().map(|s| s["done"].as_bool().unwrap()).collect::<Vec<_>>();
+        assert_eq!(done(steps(Some("Pending"), Some("stripe"), false)), vec![true, false, false]);
+        assert_eq!(done(steps(Some("Paid"), Some("stripe"), true)), vec![true, true, true]);
+        assert_eq!(steps(Some("Pending"), Some("Cash on Delivery"), false)[1]["label"], json!("Pay on delivery"));
+        assert_eq!(steps(Some("Paid"), Some("Cash on Delivery"), true)[1]["label"], json!("Payment received"));
+        assert_eq!(steps(Some("Not Required"), None, false)[1]["label"], json!("Nothing to pay"));
+    }
+
+    #[test]
+    fn the_link_holder_sees_the_town_not_the_street_or_the_email() {
+        let order = json!({"number": "SO-1", "email": "asha@example.com", "billing_address": "x", "notes": "gate code 1234",
+                           "shipping_address": "Asha Rao\n12 MG Road\nFlat 4\nBengaluru, Karnataka 560001\nIN", "items": [{"title": "Mug"}]});
+        let seen = track_view(order);
+        let raw = seen.to_string();
+        for private in ["asha@example.com", "MG Road", "gate code", "Flat 4", "Asha Rao"] {
+            assert!(!raw.contains(private), "{private} leaks: {raw}");
+        }
+        assert_eq!(seen["ship_to"], json!("Bengaluru, Karnataka 560001 · IN"));
+        assert_eq!(seen["items"][0]["title"], json!("Mug"));
+    }
 }

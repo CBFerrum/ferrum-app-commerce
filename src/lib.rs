@@ -18,7 +18,9 @@ mod coupon;
 mod orders;
 mod pages;
 mod payment;
+mod refund;
 mod reports;
+mod ship;
 mod shipping;
 mod site;
 mod store;
@@ -44,6 +46,8 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("PricingRule", Arc::new(coupon::PricingRuleGuard))
         .register("PaymentRequest", Arc::new(payment::PaymentRequestHook))
         .register("PaymentException", Arc::new(payment::PaymentExceptionHook))
+        .register("OrderRefund", Arc::new(refund::OrderRefundHook))
+        .register("DeliveryNote", Arc::new(ship::DeliveryHook))
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))
         .register("PaymentEntry", Arc::new(payment::PaymentEntryHook));
