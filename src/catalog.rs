@@ -474,7 +474,7 @@ impl Sort {
         })
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Sort::Ranking => "ranking",
             Sort::PriceAsc => "price_asc",
