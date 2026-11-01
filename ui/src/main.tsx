@@ -1,7 +1,9 @@
 // Commerce's own interface, the store's admin (Ferrum docs/plan/apps-ui.md §13, U5) at /commerce/:
-// web sales, orders to deliver, payments and reviews on its home, and the store's records (catalog,
-// categories, coupons, shipping, carts, payment requests) as lists and forms in the records frame,
-// with its module in the sidebar under the platform's bar. Orders are ERP's, opened there.
+// the day on its home, the web-order desk at /orders (what waits for money, to be sent, to be
+// invoiced) with each order whole at /o/{id}, the money that needs a person at /money (refunds, and
+// payments a gateway took and could not book), and the store's records (catalog, categories,
+// coupons, shipping, carts, payment requests) as lists and forms in the records frame, with its
+// module in the sidebar under the platform's bar.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode, useEffect } from "react";
@@ -57,6 +59,9 @@ const router = createBrowserRouter(
       errorElement: <RouteError />,
       children: [
         { index: true, element: <CommerceHome /> },
+        { path: "orders", lazy: () => import("./Desk").then((m) => ({ Component: m.Desk })) },
+        { path: "o/:id", lazy: () => import("./Order").then((m) => ({ Component: m.OrderRoute })) },
+        { path: "money", lazy: () => import("./Money").then((m) => ({ Component: m.Money })) },
         { path: "e/:entity", lazy: page("ListView") },
         { path: "e/:entity/:id", lazy: page("FormView") },
         { path: "r/:name", lazy: page("ReportView") },

@@ -7,7 +7,7 @@
 use crate::catalog::{self, Listing, Sort, decimal_param};
 use crate::checkout::{self, Checkout};
 use crate::store::Store;
-use crate::{cart, orders};
+use crate::{cart, orders, refund};
 use async_trait::async_trait;
 use ferrum_domain::util::{id, s};
 use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
@@ -239,6 +239,11 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         ("POST", ["orders", "pay"]) => {
             let body = r.body()?;
             ok(pay(k, r, &body, None).await?)
+        }
+        // The store's people, at the desk: what may come back on an order, and what a choice comes to.
+        ("POST", ["desk", "refund-plan"]) => {
+            let user = r.signed_in()?;
+            ok(refund::plan(k, user, &r.ctx, &r.body()?).await?)
         }
         ("GET", ["orders"]) => {
             let user = r.signed_in()?;

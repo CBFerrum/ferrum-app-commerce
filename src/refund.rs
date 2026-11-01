@@ -19,9 +19,9 @@ use crate::store::{Store, is_offline, notify_managers};
 use async_trait::async_trait;
 use ferrum_app_erp::ledger;
 use ferrum_domain::util::{b, company, d, elevated, get, id, money, rows, s, set, sys};
-use ferrum_kernel::{Ctx, Doc, DocHook, Error, FieldError, HookCtx, Result, Tx, outbox};
+use ferrum_kernel::{Action, Ctx, Doc, DocHook, Error, FieldError, HookCtx, Kernel, Result, Tx, outbox};
 use rust_decimal::Decimal;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -380,6 +380,92 @@ async fn estimate(hc: &mut HookCtx<'_>, plan: &Plan) -> Result<Decimal> {
     }
     rollback(hc.tx).await?;
     failed.map_or(Ok(total), Err)
+}
+
+// ───────────────────────────── what the desk may ask for ─────────────────────────────
+
+/// What a person may send back on an order, and what a choice comes to, for the desk's dialog: the
+/// lines that can still come back and how many, the payment and what it still holds, whether the
+/// order can be cancelled with a refund instead, and, when lines are chosen, the amount the server
+/// would work out. Nothing is written: the credit notes it makes to find the amount are thrown away.
+pub async fn plan(k: &Kernel, user: &Ctx, ctx: &Ctx, body: &Map<String, Value>) -> Result<Value> {
+    user.require("OrderRefund", Action::Create)?;
+    user.require("SalesOrder", Action::Read)?;
+    let so = body.get("sales_order").and_then(Value::as_str).and_then(|v| v.parse::<Uuid>().ok()).ok_or_else(|| Error::field("sales_order", "is required"))?;
+    let asked: Vec<Asked> = body
+        .get("lines")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|l| l.as_object()).filter_map(|l| Some(Asked { line: l.get("sales_order_line")?.as_str()?.parse().ok()?, qty: d(l, "qty"), restock: l.get("restock").and_then(Value::as_bool).unwrap_or(true) })).filter(|a| a.qty > Decimal::ZERO).collect())
+        .unwrap_or_default();
+    let cancel = body.get("kind").and_then(Value::as_str) == Some("Cancellation");
+    let shipping = body.get("include_shipping").and_then(Value::as_bool).unwrap_or(false);
+    let mut tx = k.db.tenant_tx(ctx.tenant).await?;
+    let ent = k.entity(ctx, "OrderRefund")?;
+    let mut hc = HookCtx { kernel: k, ctx, tx: &mut tx, entity: &ent };
+    let out = plan_in(&mut hc, so, &asked, shipping, cancel).await;
+    tx.rollback().await?;
+    out
+}
+
+async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: bool, cancel: bool) -> Result<Value> {
+    let tenant = hc.ctx.tenant;
+    let so = hc.kernel.get_tx(&sys(hc.ctx), hc.tx, "SalesOrder", so_id, false).await?;
+    if !b(&so, "commerce_web_order") {
+        return Err(Error::NotFound("web order".into()));
+    }
+    let nothing = |why: &str| Ok(json!({"payable": false, "why": why}));
+    if d(&so, "docstatus") != Decimal::ONE {
+        return nothing("This order was cancelled.");
+    }
+    let (pr, _) = match paid_payment(hc, so_id).await {
+        Ok(p) => p,
+        Err(Error::Invalid(_)) => return nothing("Nothing has been paid on this order, so there is no money to send back."),
+        Err(e) => return Err(e),
+    };
+    let store = Store::load(hc.kernel, hc.ctx, hc.tx).await?;
+    let (paid, already) = (d(&pr, "amount"), held(hc.tx, tenant, so_id, None).await?);
+    let code = s(&pr, "currency_code").unwrap_or_default().to_string();
+    let claimed = claims(hc.tx, tenant, so_id, None).await?;
+    let lines: Vec<Value> = rows(&so, "items")
+        .iter()
+        .filter(|l| store.shipping_item.is_none() || id(l, "item") != store.shipping_item)
+        .map(|l| {
+            let have = claimed.get(&s(l, "id").unwrap_or_default().to_string()).copied().unwrap_or_default();
+            let room = if d(l, "billed_qty").is_zero() { Decimal::ZERO } else { returnable(d(l, "delivered_qty"), d(l, "billed_qty"), have.restocked, have.all) };
+            json!({"id": s(l, "id"), "item": s(l, "item"), "name": s(l, "item_name"), "qty": money(d(l, "qty")), "delivered": money(d(l, "delivered_qty")), "invoiced": !d(l, "billed_qty").is_zero(),
+                   "returnable": money(room), "rate": money(d(l, "rate"))})
+        })
+        .collect();
+    let charge = match store.shipping_item {
+        Some(item) => invoice_rooms(hc.tx, tenant, so_id, None, Some(item)).await?.first().map(|r| r.qty > Decimal::ZERO).unwrap_or(false),
+        None => false,
+    };
+    let started = rows(&so, "items").iter().any(|l| d(l, "delivered_qty") > Decimal::ZERO || d(l, "billed_qty") > Decimal::ZERO);
+    let can_cancel = !started && already.is_zero();
+    let estimate = if cancel {
+        json!({"amount": money(if can_cancel { paid } else { Decimal::ZERO }), "errors": if can_cancel { json!([]) } else { json!(["Part of this order was delivered or invoiced, or its payment is already being sent back."]) }})
+    } else if asked.is_empty() {
+        Value::Null
+    } else {
+        match plan_return(hc, &so, asked, shipping, None).await {
+            Ok(p) => {
+                let amount = estimate(hc, &p).await?;
+                json!({"amount": money(amount), "errors": []})
+            }
+            Err(Error::Validation(f)) => json!({"amount": money(Decimal::ZERO), "errors": f.iter().map(|x| x.message.clone()).collect::<Vec<_>>()}),
+            Err(e) => return Err(e),
+        }
+    };
+    Ok(json!({
+        "payable": true,
+        "currency": code,
+        "payment": {"gateway": s(&pr, "gateway"), "label": store.method(s(&pr, "gateway").unwrap_or_default()).map(|m| m.label.clone()), "reference": s(&pr, "gateway_reference"),
+                    "paid": money(paid), "held": money(already), "refundable": money((paid - already).max(Decimal::ZERO)), "offline": is_offline(s(&pr, "gateway").unwrap_or_default())},
+        "cancel": {"allowed": can_cancel},
+        "lines": lines,
+        "shipping": {"available": charge},
+        "estimate": estimate,
+    }))
 }
 
 // ───────────────────────────── asking for a refund ─────────────────────────────

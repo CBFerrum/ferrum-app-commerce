@@ -1194,6 +1194,23 @@ async fn refunds() {
     let line =
         |item: Uuid| so_b["items"].as_array().unwrap().iter().find(|l| l["item"] == json!(item.to_string())).unwrap()["id"].as_str().unwrap().to_string();
     let (mug_line, tee_line) = (line(mug), line(tee));
+    // The desk asks what may come back before it asks for anything, and nothing is left behind.
+    let plan = |body: Value| t.call(Some(&manager), "POST", "/desk/refund-plan", &[], Some(body));
+    let plan0 = plan(json!({"sales_order": b.so.to_string()})).await.unwrap();
+    assert_eq!((plan0["payable"].clone(), plan0["payment"]["gateway"].clone(), plan0["payment"]["label"].clone()), (json!(true), json!("fakepay"), json!("Card")));
+    assert_eq!((dec(&plan0["payment"]["paid"]), dec(&plan0["payment"]["refundable"])), (n("1121"), n("1121")));
+    assert_eq!(plan0["lines"].as_array().unwrap().len(), 2, "the delivery charge is not a line to send back");
+    assert!(plan0["lines"].as_array().unwrap().iter().all(|l| l["invoiced"] == json!(true)));
+    assert_eq!(dec(&plan0["lines"].as_array().unwrap().iter().find(|l| l["id"] == json!(mug_line)).unwrap()["returnable"]), n("2"));
+    assert_eq!((plan0["shipping"]["available"].clone(), plan0["cancel"]["allowed"].clone(), plan0["estimate"].clone()), (json!(true), json!(false), Value::Null), "it has shipped");
+    let plan1 = plan(json!({"sales_order": b.so.to_string(), "lines": [{"sales_order_line": mug_line, "qty": "1"}], "include_shipping": true})).await.unwrap();
+    assert_eq!((dec(&plan1["estimate"]["amount"]), plan1["estimate"]["errors"].clone()), (n("354"), json!([])));
+    let plan2 = plan(json!({"sales_order": b.so.to_string(), "lines": [{"sales_order_line": mug_line, "qty": "3"}]})).await.unwrap();
+    assert!(plan2["estimate"]["errors"][0].as_str().unwrap().contains("at most 2 of Blue Mug"), "{plan2}");
+    assert_eq!(t.count("SalesInvoice", json!({"is_return": true})).await, 0, "planning leaves no credit note behind");
+    let nobody = t.call(Some(&stranger), "POST", "/desk/refund-plan", &[], Some(json!({"sales_order": b.so.to_string()}))).await;
+    assert!(matches!(nobody, Err(Error::Forbidden(_))), "only the store's people plan refunds: {nobody:?}");
+    assert!(matches!(t.call(None, "POST", "/desk/refund-plan", &[], Some(json!({"sales_order": b.so.to_string()}))).await, Err(Error::Unauthorized(_))));
     let reason = t.find_one("ReturnReason", json!({"reason": "Changed their mind"})).await;
     let ask = |lines: Value, shipping: bool| json!({"sales_order": b.so.to_string(), "kind": "Return", "reason": reason["id"], "lines": lines, "include_shipping": shipping});
     let over = t.k.insert(&manager, "OrderRefund", obj(ask(json!([{"sales_order_line": mug_line, "qty": "3"}]), false))).await;
@@ -1368,6 +1385,8 @@ async fn refunds() {
     assert_eq!(t.get("SalesOrder", d_.so).await["commerce_payment_method"], json!("Cash on Delivery"));
     t.k.run_action(&manager, "SalesOrder", d_.so, "web_ship", json!({"invoice": "Yes", "notify": "No"})).await.expect("shipped before it is paid");
     let d_line = t.get("SalesOrder", d_.so).await["items"][0]["id"].as_str().unwrap().to_string();
+    let none_yet = plan(json!({"sales_order": d_.so.to_string()})).await.unwrap();
+    assert_eq!(none_yet["payable"], json!(false), "no money came in: {none_yet}");
     let unpaid =
         t.k.insert(
             &manager,
