@@ -9,7 +9,7 @@ import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ApiError, api, docPath, formatDate, relativeTime } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, PageLoading, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
-import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units } from "./queues";
+import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units, withMethods } from "./queues";
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { type Exception, gatewayName, type Refund } from "./standing";
@@ -238,7 +238,8 @@ function OrderPage({ id }: { id: string }) {
     );
   }
   const cancelled = o.docstatus === 2 || o.status === "Cancelled";
-  const next = nextStep(o);
+  // An order placed before orders remembered how they are paid learns it from its latest payment request.
+  const next = nextStep(withMethods([o], (more.data?.payments ?? []).map((p) => ({ sales_order: o.id, gateway: p.gateway })))[0]);
   const code = more.data?.payments[0]?.currency_code ?? o._titles?.currency;
   const say = (v: unknown, c?: string | null) => amountText(v, c ?? code);
   const paidRequest = more.data?.payments.find((p) => p.status === "Paid");
