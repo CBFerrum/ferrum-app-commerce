@@ -1,19 +1,20 @@
-// Commerce's home, the store's admin: web sales today and over the last week and month, the web
-// orders still to deliver, payments that did not go through, reviews waiting for moderation
-// (approved or rejected in place) and the catalog's state. Orders open in ERP (/open), where they
-// are delivered and billed; the store's own records in its forms and lists here.
+// Commerce's home, the store's day at a glance: what needs a decision, web sales today and over the
+// last week and month, the orders at the desk (what waits for money, to be sent, to be invoiced),
+// payments that did not go through, reviews waiting for moderation (published or rejected in place)
+// and the catalog's state. Orders open on their own page here; the store's records in forms and
+// lists of the records frame.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useState } from "react";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { api, errorMessage } from "@ferrum/client";
-import { Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
+import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
+import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
+import { f, list, soft, useWaiting, workingOrders } from "./data";
+import { Tabs } from "./Tabs";
 import { type DayRow, daysBefore, money, totals } from "./store";
 
-const list = <T,>(entity: string, query: Record<string, string | number>, signal?: AbortSignal) =>
-  api.get<{ rows: T[]; total?: number }>(`/api/v1/${entity}`, query, signal);
-const f = (filters: unknown[]) => JSON.stringify(filters);
 const today = () => new Date().toISOString().slice(0, 10);
 
 function Sales() {
@@ -32,7 +33,7 @@ function Sales() {
   return (
     <div className="cm-tiles">
       {tiles.map(({ label, t }) => (
-        <Link key={label} className="cm-tile" to={`r/web_sales?from_date=${label === "Today" ? end : daysBefore(end, label === "Last 7 days" ? 6 : 29)}&to_date=${end}`}>
+        <Link key={label} className="cm-tile" to={`/r/web_sales?from_date=${label === "Today" ? end : daysBefore(end, label === "Last 7 days" ? 6 : 29)}&to_date=${end}`}>
           <span className="faint">{label}</span>
           <strong>{money(t.revenue)}</strong>
           <span>
@@ -44,74 +45,73 @@ function Sales() {
   );
 }
 
-interface Order {
-  id: string;
-  number?: string | null;
-  customer_name?: string | null;
-  posting_date?: string | null;
-  grand_total?: string | null;
-  status?: string | null;
-  commerce_payment_status?: string | null;
-}
-
-function ToDeliver() {
-  const q = useQuery({
-    queryKey: ["commerce", "to-deliver"],
-    queryFn: ({ signal }) =>
-      list<Order>(
-        "SalesOrder",
-        { filters: f([["commerce_web_order", "=", true], ["docstatus", "=", 1], ["status", "in", ["To Deliver and Bill", "To Deliver"]]]), sort: "posting_date asc", limit: 20, count: "true", fields: "number,customer_name,posting_date,grand_total,status,commerce_payment_status" },
-        signal,
-      ),
-  });
+function AtTheDesk() {
+  const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
+  const tally = useMemo(() => counts(q.data ?? []), [q.data]);
   if (q.error) return <p className="muted">Orders cannot be shown ({errorMessage(q.error)}).</p>;
   if (!q.data) return <Spinner small label="Loading orders" />;
-  if (!q.data.rows.length) return <p className="muted">Every web order is delivered.</p>;
+  const oldest = queue(q.data, "ship").slice(0, 5);
   return (
     <>
-      <ul className="cm-rows" data-ferrum-nocard>
-        {q.data.rows.map((o) => (
-          <li key={o.id}>
-            {/* Orders are ERP's: delivered and billed there. */}
-            <a href={`/open/SalesOrder/${o.id}`}>{o.number}</a> <span className="faint">{[o.customer_name, o.posting_date].filter(Boolean).join(" · ")}</span>
-            <span className="cm-end">
-              {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{o.commerce_payment_status}</Badge>}
-              <strong>{money(Number(o.grand_total ?? 0))}</strong>
-            </span>
-          </li>
+      <div className="cm-tiles cm-tiles-small">
+        {STAGES.filter((s) => s.id !== "done").map((s) => (
+          <Link key={s.id} className="cm-tile" to={s.id === "ship" ? "/orders" : `/orders?stage=${s.id}`} title={s.hint}>
+            <span className="faint">{s.label}</span>
+            <strong>{tally[s.id as "pay" | "ship" | "invoice"]}</strong>
+          </Link>
         ))}
-      </ul>
-      {(q.data.total ?? 0) > q.data.rows.length && <p className="muted">The {q.data.rows.length} oldest of {q.data.total}.</p>}
+      </div>
+      {oldest.length ? (
+        <>
+          <h3 className="cm-minor">Waiting longest to be sent</h3>
+          <ul className="cm-rows" data-ferrum-nocard>
+            {oldest.map((o) => (
+              <li key={o.id}>
+                <Link to={`/o/${o.id}`}>{o.number}</Link> <span className="faint">{[o.customer_name, waitedDays(o) ? `${waitedDays(o)} days` : "today"].filter(Boolean).join(" · ")}</span>
+                <span className="cm-end">
+                  <strong>{amountText(o.rounded_total, o._titles?.currency)}</strong>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="muted">{tally.pay + tally.invoice ? "Nothing is ready to send." : "Every web order is sent and settled."}</p>
+      )}
+      <p className="cm-tight">
+        <Link to="/orders">Go to the orders</Link>
+      </p>
     </>
   );
 }
 
 interface Payment {
   id: string;
+  sales_order?: string | null;
   order_number?: string | null;
   payer_name?: string | null;
   gateway?: string | null;
   amount?: string | null;
+  currency_code?: string | null;
   status?: string | null;
 }
 
 function Payments() {
   const q = useQuery({
     queryKey: ["commerce", "payments"],
-    queryFn: ({ signal }) =>
-      list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "order_number,payer_name,gateway,amount,status" }, signal).then((r) => r.rows),
+    queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
-  if (q.error) return null;
+  if (q.error) return <p className="muted">Payments cannot be shown ({errorMessage(q.error)}).</p>;
   if (!q.data) return <Spinner small label="Loading payments" />;
   if (!q.data.length) return <p className="muted">No failed or expired payments.</p>;
   return (
     <ul className="cm-rows" data-ferrum-nocard>
       {q.data.map((p) => (
         <li key={p.id}>
-          <Link to={`e/PaymentRequest/${p.id}`}>{p.order_number ?? "Payment"}</Link> <span className="faint">{[p.payer_name, p.gateway].filter(Boolean).join(" · ")}</span>
+          {p.sales_order ? <Link to={`/o/${p.sales_order}`}>{p.order_number ?? "Payment"}</Link> : <span>{p.order_number ?? "Payment"}</span>} <span className="faint">{[p.payer_name, p.gateway].filter(Boolean).join(" · ")}</span>
           <span className="cm-end">
             <Badge tone={statusTone(p.status)}>{p.status}</Badge>
-            <strong>{money(Number(p.amount ?? 0))}</strong>
+            <strong>{amountText(p.amount, p.currency_code)}</strong>
           </span>
         </li>
       ))}
@@ -133,8 +133,7 @@ function Reviews() {
   const [busy, setBusy] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["commerce", "reviews"],
-    queryFn: ({ signal }) =>
-      list<Review>("ItemReview", { filters: f([["status", "=", "Pending"]]), sort: "created_at asc", limit: 20, count: "true", titles: "true", fields: "website_item,rating,title,review,reviewer_name" }, signal),
+    queryFn: ({ signal }) => list<Review>("ItemReview", { filters: f([["status", "=", "Pending"]]), sort: "created_at asc", limit: 20, count: "true", titles: "true", fields: "website_item,rating,title,review,reviewer_name" }, signal),
   });
   const decide = async (r: Review, status: "Approved" | "Rejected") => {
     setBusy(r.id);
@@ -148,7 +147,7 @@ function Reviews() {
       setBusy(null);
     }
   };
-  if (q.error) return null;
+  if (q.error) return <p className="muted">Reviews cannot be shown ({errorMessage(q.error)}).</p>;
   if (!q.data) return <Spinner small label="Loading reviews" />;
   if (!q.data.rows.length) return <p className="muted">No reviews waiting.</p>;
   return (
@@ -177,15 +176,15 @@ function Reviews() {
 }
 
 function Catalog() {
-  const count = (published: boolean) =>
-    list("WebsiteItem", { filters: f([["published", "=", published]]), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
+  const count = (published: boolean) => list("WebsiteItem", { filters: f([["published", "=", published]]), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(true), count(false)]) });
+  if (q.error) return <p className="muted">The catalog cannot be shown ({errorMessage(q.error)}).</p>;
   if (!q.data) return <Spinner small label="Loading the catalog" />;
   const [shown, hidden] = q.data;
   return (
     <p>
-      <Link to={`e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", true]]))}`}>{shown} published</Link>,{" "}
-      <Link to={`e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", false]]))}`}>{hidden} not published</Link>. <Link to="e/WebsiteItem/new">Add an item to the store</Link>
+      <Link to={`/e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", true]]))}`}>{shown} published</Link>,{" "}
+      <Link to={`/e/WebsiteItem?filters=${encodeURIComponent(f([["published", "=", false]]))}`}>{hidden} not published</Link>. <Link to="/e/WebsiteItem/new">Add an item to the store</Link>
     </p>
   );
 }
@@ -195,10 +194,13 @@ export function CommerceHome() {
   const meta = useMetaIndex().data;
   const readable = (e: string) => !!meta?.entities.find((x) => x.name === e && can(x.permissions, "read"));
   const qc = useQueryClient();
+  const waiting = useWaiting();
   const refresh = useCallback(() => void qc.invalidateQueries({ queryKey: ["commerce"] }), [qc]);
   useLiveEntity("SalesOrder", refresh);
   useLiveEntity("ItemReview", refresh);
   useLiveEntity("PaymentRequest", refresh);
+  useLiveEntity("OrderRefund", refresh);
+  useLiveEntity("PaymentException", refresh);
   if (meta && !readable("WebsiteItem") && !readable("SalesOrder")) {
     return (
       <EmptyState title="Nothing here for you" icon="store">
@@ -215,16 +217,28 @@ export function CommerceHome() {
     </section>
   );
   return (
-    <div className="stack">
-      <div className="page-head">
+    <div className="cm-page">
+      <header className="cm-head">
         <div>
-          <h1 className="page-title">Store</h1>
-          <p className="page-sub">Web sales, orders to deliver, payments and reviews.</p>
+          <Tabs />
+          <p className="page-sub">Web sales, the orders at the desk, payments and reviews.</p>
         </div>
-      </div>
+      </header>
+      {!!waiting && (
+        <Alert
+          tone="warning"
+          action={
+            <Link className="btn btn-default btn-sm" to="/money">
+              Decide
+            </Link>
+          }
+        >
+          {waiting} {waiting === 1 ? "refund or payment needs" : "refunds and payments need"} a decision.
+        </Alert>
+      )}
       {readable("SalesOrder") && <Sales />}
       <div className="cm-columns">
-        {readable("SalesOrder") && card("cm-deliver", "Web orders to deliver", <ToDeliver />)}
+        {readable("SalesOrder") && card("cm-deliver", "Orders at the desk", <AtTheDesk />)}
         {readable("ItemReview") && card("cm-reviews", "Reviews waiting", <Reviews />)}
         {readable("PaymentRequest") && card("cm-payments", "Payments that did not go through", <Payments />)}
         {readable("WebsiteItem") && card("cm-catalog", "Catalog", <Catalog />)}
