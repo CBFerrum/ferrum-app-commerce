@@ -137,22 +137,40 @@ pub fn report_exception(gateway: &str, request: &str, reference: &str, amount: &
     }
 }
 
-/// Carries out the refunds people approved. `refund` must be safe to repeat for one exception: a run
-/// that dies between the provider's answer and recording it does it again.
+/// Which payment a refund draws on: an exception's own, or the order's a refund was asked for on.
+pub fn refunded_payment(row: &Value) -> &str {
+    row["gateway_reference"].as_str().or(row["payment_reference"].as_str()).unwrap_or_default()
+}
+
+/// Part of a payment, in the provider's smallest unit, when a person asked for part of one: an
+/// order's refund names its amount, and an exception gives back all of what could not be booked.
+pub fn refunded_part(row: &Value) -> Result<Option<(String, i64)>, String> {
+    if row.get("payment_reference").is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    let (amount, currency) = (row["amount"].as_str().unwrap_or_default(), row["currency_code"].as_str().unwrap_or_default());
+    Ok(Some((amount.to_string(), to_minor(amount, currency)?)))
+}
+
+/// Carries out the refunds people approved, on money that could not be booked and on orders. `refund`
+/// must be safe to repeat for one row: a run that dies between the provider's answer and recording
+/// it does it again.
 pub fn run_refunds(gateway: &str, refund: impl Fn(&Value) -> Refund) -> Result<(), String> {
-    let due = data::query("PaymentException", json!({"gateway": gateway, "status": "Refund Approved"}), REFUNDS_PER_RUN).map_err(|e| e.to_string())?;
-    for exception in &due {
-        let id = exception["id"].as_str().unwrap_or_default();
-        let told = match refund(exception) {
-            Refund::Done(reference) => data::action("PaymentException", id, "refund_done", json!({"refund_reference": reference})),
-            Refund::Refused(why) => data::action("PaymentException", id, "refund_failed", json!({"error": why})),
-            Refund::Later(why) => {
-                log(&format!("{gateway}: the refund of {id} waits: {why}"));
-                continue;
+    for (entity, status) in [("PaymentException", "Refund Approved"), ("OrderRefund", "Approved")] {
+        let due = data::query(entity, json!({"gateway": gateway, "status": status}), REFUNDS_PER_RUN).map_err(|e| e.to_string())?;
+        for row in &due {
+            let id = row["id"].as_str().unwrap_or_default();
+            let told = match refund(row) {
+                Refund::Done(reference) => data::action(entity, id, "refund_done", json!({"refund_reference": reference})),
+                Refund::Refused(why) => data::action(entity, id, "refund_failed", json!({"error": why})),
+                Refund::Later(why) => {
+                    log(&format!("{gateway}: the refund of {id} waits: {why}"));
+                    continue;
+                }
+            };
+            if let Err(e) = told {
+                log(&format!("{gateway}: the refund of {id}: {e}"));
             }
-        };
-        if let Err(e) = told {
-            log(&format!("{gateway}: the refund of {id}: {e}"));
         }
     }
     Ok(())
@@ -180,7 +198,12 @@ pub mod sandbox {
     /// As the plugin host does for an `oauth2` credential: trades the client's key and secret for
     /// a token at `url`, and signs this thread's `http.fetch` calls in with it.
     pub fn client_credentials(name: &str, url: &str, client: &str, secret: &str) {
-        let answer = reqwest::blocking::Client::new().post(url).basic_auth(client, Some(secret)).header("content-type", "application/x-www-form-urlencoded").body("grant_type=client_credentials").send();
+        let answer = reqwest::blocking::Client::new()
+            .post(url)
+            .basic_auth(client, Some(secret))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("grant_type=client_credentials")
+            .send();
         let token: Value = serde_json::from_str(&answer.and_then(|r| r.text()).expect("an answer from the sandbox")).expect("JSON");
         sign_in_as(name, format!("Bearer {}", token["access_token"].as_str().expect("access_token")));
     }
