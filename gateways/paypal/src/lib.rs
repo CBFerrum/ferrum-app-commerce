@@ -8,8 +8,8 @@
 //! there goes out from the same schedule. The client secret is held by the host; the short-lived
 //! access token it buys is what this plugin keeps.
 
-use ferrum_plugin_sdk::{Request, Value, data, fetch, fetch_with, json, kv, log, now, plugin, serde_json, warn};
-use gateway_kit::{Refund, final_status, form, refused, report_exception, run_refunds, to_minor, unix};
+use ferrum_plugin_sdk::{Request, Value, data, fetch_with, json, kv, log, plugin, serde_json, warn};
+use gateway_kit::{Refund, final_status, refused, report_exception, run_refunds, to_minor};
 
 plugin!(handle);
 
@@ -47,46 +47,14 @@ fn api_base(req: &Request) -> &'static str {
     if req.config("environment").as_str() == Some("sandbox") { "https://api-m.sandbox.paypal.com" } else { "https://api-m.paypal.com" }
 }
 
-/// An access token, kept until a minute before it expires.
-fn token(req: &Request) -> Result<String, String> {
-    let id = req.config("client_id").as_str().unwrap_or_default().trim();
-    if id.is_empty() {
-        return Err("set client_id and client_secret in the paypal plugin's settings".into());
-    }
-    let now = unix(&now()).unwrap_or_default();
-    let cached = kv::get("token").map_err(|e| e.to_string())?;
-    if let (Some(t), Some(until)) = (cached["value"].as_str(), cached["until"].as_i64())
-        && until > now + 60
-        && cached["client"].as_str() == Some(id)
-    {
-        return Ok(t.to_string());
-    }
-    let headers = json!({"content-type": "application/x-www-form-urlencoded", "accept": "application/json"});
-    let r = fetch_with(
-        "client_secret",
-        "POST",
-        &format!("{}/v1/oauth2/token", api_base(req)),
-        headers,
-        json!(form(&[("grant_type", "client_credentials".into())])),
-    )
-    .map_err(|e| format!("PayPal cannot be reached: {e}"))?;
-    let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
-    let Some(t) = answer["access_token"].as_str() else {
-        return Err(format!("PayPal refused the credentials: {}", answer["error_description"].as_str().unwrap_or("no reason given")));
-    };
-    let until = now + answer["expires_in"].as_i64().unwrap_or(300);
-    kv::set("token", json!({"value": t, "until": until, "client": id})).map_err(|e| e.to_string())?;
-    Ok(t.to_string())
-}
-
 /// A call to PayPal's REST API → its answer on success, its HTTP status and message otherwise.
 fn call(req: &Request, method: &str, path: &str, body: Value, request_id: Option<&str>) -> Result<Value, (u64, String)> {
-    let mut headers =
-        json!({"authorization": format!("Bearer {}", token(req).map_err(|e| (0, e))?), "accept": "application/json", "prefer": "return=representation"});
+    // The host holds the access token as well as the secret that buys it (`oauth2` in the manifest).
+    let mut headers = json!({"accept": "application/json", "prefer": "return=representation"});
     if let Some(id) = request_id {
         headers["paypal-request-id"] = json!(id);
     }
-    let r = fetch(method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| (0, format!("PayPal cannot be reached: {e}")))?;
+    let r = fetch_with("client_secret", method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| (0, format!("PayPal cannot be reached: {e}")))?;
     let status = r["status"].as_u64().unwrap_or(0);
     let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
     if (200..300).contains(&status) {
@@ -249,7 +217,7 @@ fn webhook(req: &Request) -> Value {
 
 /// Every few minutes: asks PayPal about the orders still open, and carries out approved refunds.
 fn reconcile(req: &Request) -> Result<(), String> {
-    if token(req).is_err() {
+    if req.config("client_id").as_str().unwrap_or_default().trim().is_empty() {
         return Ok(());
     }
     for entry in kv::list("open:").map_err(|e| e.to_string())?.iter().take(PER_RUN) {
@@ -323,7 +291,6 @@ mod tests {
             seen.borrow_mut().push((op.to_string(), args.clone()));
             match op {
                 "time.now" => Ok(json!("2026-10-30T10:15:00.000Z")),
-                "kv.get" => Ok(json!({"value": "A21.cached", "until": 1_793_359_000, "client": "client-1"})),
                 _ => answer(op, args),
             }
         });
@@ -359,8 +326,8 @@ mod tests {
         let create = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
         assert_eq!(url(&create.1), "https://api-m.sandbox.paypal.com/v2/checkout/orders");
         assert_eq!(
-            (&create.1["headers"]["authorization"], &create.1["headers"]["paypal-request-id"]),
-            (&json!("Bearer A21.cached"), &json!(format!("ferrum-payment-request-{ID}")))
+            (&create.1["auth"], &create.1["headers"]["paypal-request-id"]),
+            (&json!("client_secret"), &json!(format!("ferrum-payment-request-{ID}")))
         );
         let unit = &create.1["body"]["purchase_units"][0];
         assert_eq!((&unit["custom_id"], &unit["amount"]), (&json!(ID), &json!({"currency_code": "USD", "value": "49.90"})));
@@ -448,23 +415,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_token_is_bought_with_a_secret_this_plugin_never_holds() {
-        let calls: Calls = Rc::default();
-        let seen = calls.clone();
-        testing::host(move |op, args| {
-            seen.borrow_mut().push((op.to_string(), args.clone()));
-            match op {
-                "time.now" => Ok(json!("2026-10-30T10:15:00.000Z")),
-                "http.fetch" => http(200, json!({"access_token": "A21.fresh", "expires_in": 3600})),
-                _ => Ok(Value::Null),
-            }
+    fn the_host_signs_every_call_and_this_plugin_holds_no_token() {
+        let calls = host(|op, _| match op {
+            "http.fetch" => http(200, json!({"id": "ORDER-1", "status": "CREATED"})),
+            _ => Ok(Value::Null),
         });
         let req = Request(json!({"kind": "schedule", "config": config()}));
-        assert_eq!(token(&req).unwrap(), "A21.fresh");
+        call(&req, "GET", "/v2/checkout/orders/ORDER-1", Value::Null, None).unwrap();
         let c = calls.borrow();
-        let bought = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
-        assert_eq!(bought.1["auth"], json!("client_secret"), "the host signs the call in");
-        assert_eq!(bought.1["headers"].get("authorization"), None);
+        let sent = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
+        assert_eq!(sent.1["auth"], json!("client_secret"), "the host signs the call in");
+        assert_eq!(sent.1["headers"].get("authorization"), None);
+        assert!(!c.iter().any(|(op, _)| op == "kv.set"), "nothing kept here");
     }
 
     #[test]
@@ -501,7 +463,7 @@ mod tests {
             return eprintln!("skipped: set PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET to test against PayPal's sandbox");
         };
         let calls = sandbox::host();
-        sandbox::sign_in_as("client_secret", gateway_kit::basic(&client, &secret));
+        sandbox::client_credentials("client_secret", "https://api-m.sandbox.paypal.com/v1/oauth2/token", &client, &secret);
         let id = sandbox::fresh_id();
         let req = Request(json!({"kind": "event", "topic": "PaymentRequest.submitted",
             "config": {"client_id": client, "webhook_id": "", "environment": "sandbox"},
@@ -515,8 +477,7 @@ mod tests {
     /// Against PayPal's own API definitions (paypal/paypal-rest-api-specifications) served by a
     /// validating mock when PAYPAL_ORDERS_MOCK and PAYPAL_WEBHOOKS_MOCK are set (CI starts Prism with
     /// them): the order, its capture, a look at it and a webhook's verification must each be a
-    /// request the definitions accept. The access token comes from the cache: the definitions
-    /// leave OAuth out.
+    /// request the definitions accept. The definitions leave OAuth out, so any token will do.
     #[test]
     fn paypal_definitions_accept_every_call() {
         use gateway_kit::sandbox;
@@ -524,6 +485,7 @@ mod tests {
             return eprintln!("skipped: set PAYPAL_ORDERS_MOCK and PAYPAL_WEBHOOKS_MOCK to check the calls against PayPal's API definitions");
         };
         const BASE: &str = "https://api-m.sandbox.paypal.com";
+        sandbox::sign_in_as("client_secret", "Bearer A21-mock");
         let calls: Calls = Rc::default();
         let seen = calls.clone();
         testing::host(move |op, args| {
@@ -540,7 +502,6 @@ mod tests {
                     sent["url"] = json!(format!("{}{path}", mock.trim_end_matches('/')));
                     sandbox::fetch(&sent)
                 }
-                "kv.get" if args["key"] == "token" => Ok(json!({"value": "A21-mock", "until": 4_102_444_800_i64, "client": "client-1"})),
                 "data.get" => Ok(json!({"status": "Initiated"})),
                 "time.now" => Ok(json!(sandbox::utc_in(0))),
                 _ => Ok(Value::Null),
