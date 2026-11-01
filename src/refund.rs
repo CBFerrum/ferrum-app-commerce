@@ -395,7 +395,19 @@ pub async fn plan(k: &Kernel, user: &Ctx, ctx: &Ctx, body: &Map<String, Value>) 
     let asked: Vec<Asked> = body
         .get("lines")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|l| l.as_object()).filter_map(|l| Some(Asked { line: l.get("sales_order_line")?.as_str()?.parse().ok()?, qty: d(l, "qty"), restock: l.get("restock").and_then(Value::as_bool).unwrap_or(true) })).filter(|a| a.qty > Decimal::ZERO).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| l.as_object())
+                .filter_map(|l| {
+                    Some(Asked {
+                        line: l.get("sales_order_line")?.as_str()?.parse().ok()?,
+                        qty: d(l, "qty"),
+                        restock: l.get("restock").and_then(Value::as_bool).unwrap_or(true),
+                    })
+                })
+                .filter(|a| a.qty > Decimal::ZERO)
+                .collect()
+        })
         .unwrap_or_default();
     let cancel = body.get("kind").and_then(Value::as_str) == Some("Cancellation");
     let shipping = body.get("include_shipping").and_then(Value::as_bool).unwrap_or(false);
