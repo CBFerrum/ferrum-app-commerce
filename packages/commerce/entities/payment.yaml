@@ -33,4 +33,33 @@
     - {name: set_gateway_details, label: Set Gateway Details, docstatus: [1], permission: write}
     - {name: mark_paid, label: Mark Paid, docstatus: [1], permission: write, confirm: "Record the payment of this request and book it?"}
     - {name: mark_failed, label: Mark Failed, docstatus: [1], permission: write}
+    - {name: report_exception, label: Report Exception, docstatus: [1, 2], permission: write, hidden: true}
   list: {columns: [number, order_number, gateway, amount, status], sort: created_at desc}
+
+- name: PaymentException
+  label: Payment Exception
+  kind: master
+  module: commerce
+  title_field: gateway_reference
+  description: "Money a gateway took that could not be booked: the request had closed, or the amount changed. It stays open until someone approves a refund, which the gateway carries out, or records how it was settled."
+  search_fields: [gateway_reference]
+  fields:
+    - {name: gateway, type: data, required: true, read_only: true, max_length: 40, in_list: true, in_filter: true}
+    - {name: gateway_reference, type: data, required: true, read_only: true, max_length: 200, in_list: true}
+    - {name: payment_request, type: link, to: PaymentRequest, read_only: true, in_filter: true}
+    - {name: amount, type: decimal, read_only: true, in_list: true}
+    - {name: currency_code, type: data, read_only: true, max_length: 3, in_list: true}
+    - {name: reason, type: text, required: true, read_only: true, max_length: 2000}
+    - {name: status, type: select, options: [Open, Refund Approved, Refunded, Refund Failed, Resolved], default: Open, read_only: true, in_list: true, in_filter: true}
+    - {name: approved_by, type: email, read_only: true, no_copy: true}
+    - {name: approved_at, type: datetime, read_only: true, no_copy: true}
+    - {name: refund_reference, type: data, read_only: true, max_length: 200, no_copy: true}
+    - {name: refund_error, type: text, read_only: true, max_length: 2000, no_copy: true}
+    - {name: note, type: text, read_only: true, max_length: 2000, no_copy: true}
+  unique: [[gateway, gateway_reference]]
+  actions:
+    - {name: approve_refund, label: Approve Refund, permission: write, condition: "doc.status == 'Open' || doc.status == 'Refund Failed'", confirm: "Refund this payment at the gateway? This sends the money back."}
+    - {name: resolve, label: Settled Another Way, permission: write, condition: "doc.status == 'Open' || doc.status == 'Refund Failed'", params: [{name: note, label: How it was settled, type: text, required: true}]}
+    - {name: refund_done, label: Refund Done, permission: write, hidden: true}
+    - {name: refund_failed, label: Refund Failed, permission: write, hidden: true}
+  list: {columns: [gateway_reference, gateway, amount, currency_code, status], sort: created_at desc}

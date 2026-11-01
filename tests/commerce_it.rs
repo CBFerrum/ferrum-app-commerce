@@ -390,7 +390,7 @@ async fn scenario() {
         let admin = t.ctx.clone();
         async move {
             let role = format!("plugin:{name}");
-            for entity in ["PaymentRequest"] {
+            for entity in ["PaymentRequest", "PaymentException"] {
                 let p = PermissionDef { entity: entity.into(), read: true, write: true, ..Default::default() };
                 k.set_role_permission(&admin, &role, &p).await.unwrap();
             }
@@ -639,6 +639,53 @@ async fn scenario() {
     let double =
         t.k.run_action(&fakepay, "PaymentRequest", pr_a, "mark_paid", json!({"amount": "1149.88", "currency": "INR", "gateway_reference": "pi_2"})).await;
     assert!(matches!(double, Err(Error::Conflict(_))), "a second, different payment is flagged: {double:?}");
+
+    // ───────────── money a gateway took and could not book ─────────────
+    let reported = json!({"gateway_reference": "pi_2", "amount": "1149.88", "currency": "INR", "reason": "it could not be booked: already paid"});
+    let as_admin = t.k.run_action(&t.ctx, "PaymentRequest", pr_a, "report_exception", reported.clone()).await;
+    assert!(matches!(as_admin, Err(Error::Forbidden(_))), "only a gateway reports one: {as_admin:?}");
+    let foreign = t.k.run_action(&otherpay, "PaymentRequest", pr_a, "report_exception", reported.clone()).await;
+    assert!(matches!(foreign, Err(Error::Forbidden(_))), "and only for its own requests: {foreign:?}");
+    let made = t.k.run_action(&fakepay, "PaymentRequest", pr_a, "report_exception", reported.clone()).await.expect("reported");
+    let again = t.k.run_action(&fakepay, "PaymentRequest", pr_a, "report_exception", reported.clone()).await.expect("reported again");
+    assert_eq!(made["exception"], again["exception"], "a repeated webhook is one exception");
+    let exception: Uuid = made["exception"].as_str().unwrap().parse().unwrap();
+    let x = t.get("PaymentException", exception).await;
+    assert_eq!((&x["status"], &x["gateway"], &x["gateway_reference"]), (&json!("Open"), &json!("fakepay"), &json!("pi_2")));
+    assert_eq!(dec(&x["amount"]), n("1149.88"));
+    let own_refund = t.k.run_action(&fakepay, "PaymentException", exception, "approve_refund", json!({})).await;
+    assert!(matches!(own_refund, Err(Error::Forbidden(_))), "a gateway never approves its own refund: {own_refund:?}");
+    let early = t.k.run_action(&fakepay, "PaymentException", exception, "refund_done", json!({"refund_reference": "re_1"})).await;
+    assert!(matches!(early, Err(Error::Conflict(_))), "nor reports one nobody approved: {early:?}");
+    let nameless = t.k.run_action(&t.ctx, "PaymentException", exception, "resolve", json!({"note": "  "})).await;
+    assert!(matches!(nameless, Err(Error::Validation(_))), "settling it another way needs saying how: {nameless:?}");
+    t.k.run_action(&t.ctx, "PaymentException", exception, "approve_refund", json!({})).await.expect("a person approves");
+    let approved = t.get("PaymentException", exception).await;
+    assert_eq!(approved["status"], json!("Refund Approved"));
+    assert_eq!(approved["approved_by"], json!(t.ctx.email));
+    let twice = t.k.run_action(&t.ctx, "PaymentException", exception, "approve_refund", json!({})).await;
+    assert!(twice.is_err(), "approved once");
+    let foreign = t.k.run_action(&otherpay, "PaymentException", exception, "refund_done", json!({"refund_reference": "re_1"})).await;
+    assert!(matches!(foreign, Err(Error::Forbidden(_))), "another gateway cannot report it: {foreign:?}");
+    t.k.run_action(&fakepay, "PaymentException", exception, "refund_failed", json!({"error": "card closed"})).await.expect("refused at the provider");
+    let failed = t.get("PaymentException", exception).await;
+    assert_eq!((&failed["status"], &failed["refund_error"]), (&json!("Refund Failed"), &json!("card closed")));
+    t.k.run_action(&t.ctx, "PaymentException", exception, "approve_refund", json!({})).await.expect("approved again");
+    assert!(t.get("PaymentException", exception).await["refund_error"].is_null());
+    t.k.run_action(&fakepay, "PaymentException", exception, "refund_done", json!({"refund_reference": "re_1"})).await.expect("refunded");
+    t.k.run_action(&fakepay, "PaymentException", exception, "refund_done", json!({"refund_reference": "re_1"})).await.expect("told twice, one refund");
+    let refunded = t.get("PaymentException", exception).await;
+    assert_eq!((&refunded["status"], &refunded["refund_reference"]), (&json!("Refunded"), &json!("re_1")));
+    let closed = t.k.run_action(&t.ctx, "PaymentException", exception, "approve_refund", json!({})).await;
+    assert!(closed.is_err(), "refunded, nothing is left to approve");
+    let other =
+        t.k.run_action(&fakepay, "PaymentRequest", pr_a, "report_exception", json!({"gateway_reference": "pi_3", "reason": "paid twice"}))
+            .await
+            .expect("reported");
+    let other: Uuid = other["exception"].as_str().unwrap().parse().unwrap();
+    t.k.run_action(&t.ctx, "PaymentException", other, "resolve", json!({"note": "Refunded from the Stripe dashboard on 3 May"})).await.expect("settled");
+    let settled = t.get("PaymentException", other).await;
+    assert_eq!((&settled["status"], settled["amount"].is_null()), (&json!("Resolved"), true));
     let pe = t.get("PaymentEntry", pe_a).await;
     assert_eq!(pe["docstatus"], json!(1));
     assert_eq!(dec(&pe["paid_amount"]), n("1149.88"));

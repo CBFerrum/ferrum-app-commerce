@@ -31,7 +31,7 @@ modules:
     label: Commerce
     icon: shopping-bag
     order: 42
-    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, ShippingRule, CouponCode, SalesOrder,
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
 # What a personal-data request exports and erases for a shopper (their email): their carts'
@@ -53,6 +53,7 @@ roles:
       - {entity: PricingRule, read: true, write: true, create: true}
       - {entity: ShoppingCart, read: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
+      - {entity: PaymentException, read: true, write: true, export: true}
       - {entity: SalesOrder, read: true, export: true}
       - {entity: Customer, read: true}
       - {entity: CustomerGroup, read: true}
@@ -70,6 +71,7 @@ roles:
     permissions:
       - {entity: ShoppingCart, read: true}
       - {entity: PaymentRequest, read: true}
+      - {entity: PaymentException, read: true}
       - {entity: WebsiteItem, read: true}
       - {entity: ItemCategory, read: true}
       - {entity: ShippingRule, read: true}

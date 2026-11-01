@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
+- A payment that cannot be booked is a Payment Exception a manager sees, not a log line. Someone approves a refund,
+  which the gateway carries out once however often it is retried, or records how it was settled.
+- Gateways no longer hold their API keys or webhook secrets: the plugin host does.
 - Personal data: a person's request now exports their payment requests, and says why they are kept: they are payment records.
 
 ## 0.3.2

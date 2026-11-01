@@ -3,9 +3,13 @@
 //! back). The buyer approves it on PayPal's page; the order is then captured — on PayPal's webhook
 //! for the approval, or by the schedule that asks PayPal about open orders — and the capture books
 //! the payment. Webhooks are checked with PayPal's own verification call before anything is done.
+//!
+//! Money taken that cannot be booked becomes a Payment Exception, and the refund a person approves
+//! there goes out from the same schedule. The client secret is held by the host; the short-lived
+//! access token it buys is what this plugin keeps.
 
-use ferrum_plugin_sdk::{Request, Value, data, fetch, json, kv, log, now, plugin, serde_json, warn};
-use gateway_kit::{basic, form, refused, to_minor, unix};
+use ferrum_plugin_sdk::{Request, Value, data, fetch, fetch_with, json, kv, log, now, plugin, serde_json, warn};
+use gateway_kit::{Refund, final_status, form, refused, report_exception, run_refunds, to_minor, unix};
 
 plugin!(handle);
 
@@ -45,8 +49,8 @@ fn api_base(req: &Request) -> &'static str {
 
 /// An access token, kept until a minute before it expires.
 fn token(req: &Request) -> Result<String, String> {
-    let (id, secret) = (req.config("client_id").as_str().unwrap_or_default().trim(), req.config("client_secret").as_str().unwrap_or_default().trim());
-    if id.is_empty() || secret.is_empty() {
+    let id = req.config("client_id").as_str().unwrap_or_default().trim();
+    if id.is_empty() {
         return Err("set client_id and client_secret in the paypal plugin's settings".into());
     }
     let now = unix(&now()).unwrap_or_default();
@@ -57,9 +61,15 @@ fn token(req: &Request) -> Result<String, String> {
     {
         return Ok(t.to_string());
     }
-    let headers = json!({"authorization": basic(id, secret), "content-type": "application/x-www-form-urlencoded", "accept": "application/json"});
-    let r = fetch("POST", &format!("{}/v1/oauth2/token", api_base(req)), headers, json!(form(&[("grant_type", "client_credentials".into())])))
-        .map_err(|e| format!("PayPal cannot be reached: {e}"))?;
+    let headers = json!({"content-type": "application/x-www-form-urlencoded", "accept": "application/json"});
+    let r = fetch_with(
+        "client_secret",
+        "POST",
+        &format!("{}/v1/oauth2/token", api_base(req)),
+        headers,
+        json!(form(&[("grant_type", "client_credentials".into())])),
+    )
+    .map_err(|e| format!("PayPal cannot be reached: {e}"))?;
     let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
     let Some(t) = answer["access_token"].as_str() else {
         return Err(format!("PayPal refused the credentials: {}", answer["error_description"].as_str().unwrap_or("no reason given")));
@@ -69,21 +79,26 @@ fn token(req: &Request) -> Result<String, String> {
     Ok(t.to_string())
 }
 
-/// A call to PayPal's REST API → its answer on success, its message otherwise.
-fn api(req: &Request, method: &str, path: &str, body: Value, request_id: Option<&str>) -> Result<Value, String> {
-    let mut headers = json!({"authorization": format!("Bearer {}", token(req)?), "accept": "application/json", "prefer": "return=representation"});
+/// A call to PayPal's REST API → its answer on success, its HTTP status and message otherwise.
+fn call(req: &Request, method: &str, path: &str, body: Value, request_id: Option<&str>) -> Result<Value, (u64, String)> {
+    let mut headers =
+        json!({"authorization": format!("Bearer {}", token(req).map_err(|e| (0, e))?), "accept": "application/json", "prefer": "return=representation"});
     if let Some(id) = request_id {
         headers["paypal-request-id"] = json!(id);
     }
-    let r = fetch(method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| format!("PayPal cannot be reached: {e}"))?;
+    let r = fetch(method, &format!("{}{path}", api_base(req)), headers, body).map_err(|e| (0, format!("PayPal cannot be reached: {e}")))?;
     let status = r["status"].as_u64().unwrap_or(0);
     let answer: Value = serde_json::from_str(r["body"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
     if (200..300).contains(&status) {
         Ok(answer)
     } else {
         let issue = answer["details"][0]["issue"].as_str().unwrap_or_default();
-        Err(format!("PayPal answered HTTP {status}: {} {issue}", answer["message"].as_str().unwrap_or("no reason given")))
+        Err((status, format!("PayPal answered HTTP {status}: {} {issue}", answer["message"].as_str().unwrap_or("no reason given"))))
     }
+}
+
+fn api(req: &Request, method: &str, path: &str, body: Value, request_id: Option<&str>) -> Result<Value, String> {
+    call(req, method, path, body, request_id).map_err(|(_, e)| e)
 }
 
 /// A new payment request: its PayPal order, handed to the storefront.
@@ -146,17 +161,21 @@ fn request_of(resource: &Value) -> &str {
     [text(resource, "custom_id"), text(unit, "custom_id"), text(unit, "reference_id")].into_iter().find(|s| !s.is_empty()).unwrap_or_default()
 }
 
-/// Books a completed capture; a refusal (request closed, amount changed) is final: the payment is
-/// to be refunded in PayPal.
+/// Books a completed capture; a refusal (request closed, amount changed) is final, and the money is
+/// reported for a person to decide on.
 fn settle(id: &str, capture: &Value) -> Result<(), String> {
     let params =
         json!({"amount": text(&capture["amount"], "value"), "currency": text(&capture["amount"], "currency_code"), "gateway_reference": text(capture, "id")});
     match data::action("PaymentRequest", id, "mark_paid", params) {
         Ok(_) => {}
-        Err(e) if refused(&e) => warn(&format!("paypal: capture {} for request {id} was not booked ({e}); refund it in PayPal", text(capture, "id"))),
+        Err(e) if refused(&e) => report(id, capture, &format!("it could not be booked: {}", e.message))?,
         Err(e) => return Err(format!("booking capture {} for request {id}: {e}", text(capture, "id"))),
     }
     kv::delete(&open_key(id)).map_err(|e| e.to_string())
+}
+
+fn report(id: &str, capture: &Value, reason: &str) -> Result<(), String> {
+    report_exception(NAME, id, text(capture, "id"), text(&capture["amount"], "value"), text(&capture["amount"], "currency_code"), reason)
 }
 
 fn fail(id: &str, reference: &str, reason: &str) -> Result<(), String> {
@@ -228,7 +247,7 @@ fn webhook(req: &Request) -> Value {
     }
 }
 
-/// Every few minutes: asks PayPal about the orders still open.
+/// Every few minutes: asks PayPal about the orders still open, and carries out approved refunds.
 fn reconcile(req: &Request) -> Result<(), String> {
     if token(req).is_err() {
         return Ok(());
@@ -239,7 +258,17 @@ fn reconcile(req: &Request) -> Result<(), String> {
             log(&format!("paypal: checking payment request {id}: {e}"));
         }
     }
-    Ok(())
+    run_refunds(NAME, |exception| refund(req, exception))
+}
+
+/// Refunds a capture in full. The exception's id is PayPal's request id, so repeating it refunds once.
+fn refund(req: &Request, exception: &Value) -> Refund {
+    let (id, capture) = (text(exception, "id"), text(exception, "gateway_reference"));
+    match call(req, "POST", &format!("/v2/payments/captures/{capture}/refund"), json!({}), Some(&format!("ferrum-refund-{id}"))) {
+        Ok(r) => Refund::Done(text(&r, "id").to_string()),
+        Err((status, e)) if final_status(status) => Refund::Refused(e),
+        Err((_, e)) => Refund::Later(e),
+    }
 }
 
 fn check(req: &Request, id: &str, order_id: &str) -> Result<(), String> {
@@ -264,7 +293,11 @@ fn check(req: &Request, id: &str, order_id: &str) -> Result<(), String> {
         // refund); one already completed is.
         (false, order_status) => {
             if order_status == "COMPLETED" && status != "Paid" {
-                warn(&format!("paypal: order {order_id} was paid after request {id} closed ({status}); refund it in PayPal"));
+                let captures = order["purchase_units"][0]["payments"]["captures"].as_array();
+                match captures.and_then(|c| c.iter().find(|c| text(c, "status") == "COMPLETED")) {
+                    Some(c) => report(id, c, &format!("it was paid after the request closed ({status})"))?,
+                    None => warn(&format!("paypal: order {order_id} was paid after request {id} closed ({status}), and shows no capture to refund")),
+                }
             }
             kv::delete(&open_key(id)).map_err(|e| e.to_string())
         }
@@ -302,7 +335,7 @@ mod tests {
     }
 
     fn config() -> Value {
-        json!({"client_id": "client-1", "client_secret": "secret", "webhook_id": "8PT597110X687430LKGECATA", "environment": "sandbox"})
+        json!({"client_id": "client-1", "webhook_id": "8PT597110X687430LKGECATA", "environment": "sandbox"})
     }
 
     fn url(a: &Value) -> &str {
@@ -414,6 +447,51 @@ mod tests {
         assert_eq!(c.iter().filter(|(op, _)| op == "kv.delete").count(), 2, "booked, and forgotten for the request that is gone");
     }
 
+    #[test]
+    fn a_fresh_token_is_bought_with_a_secret_this_plugin_never_holds() {
+        let calls: Calls = Rc::default();
+        let seen = calls.clone();
+        testing::host(move |op, args| {
+            seen.borrow_mut().push((op.to_string(), args.clone()));
+            match op {
+                "time.now" => Ok(json!("2026-10-30T10:15:00.000Z")),
+                "http.fetch" => http(200, json!({"access_token": "A21.fresh", "expires_in": 3600})),
+                _ => Ok(Value::Null),
+            }
+        });
+        let req = Request(json!({"kind": "schedule", "config": config()}));
+        assert_eq!(token(&req).unwrap(), "A21.fresh");
+        let c = calls.borrow();
+        let bought = c.iter().find(|(op, _)| op == "http.fetch").unwrap();
+        assert_eq!(bought.1["auth"], json!("client_secret"), "the host signs the call in");
+        assert_eq!(bought.1["headers"].get("authorization"), None);
+    }
+
+    #[test]
+    fn money_that_cannot_be_booked_is_reported_and_an_approved_refund_goes_out_once() {
+        let calls = host(|op, a| match op {
+            "data.action" if a["action"] == "mark_paid" => Err(("invalid".into(), "this payment request has expired".into())),
+            _ => Ok(Value::Null),
+        });
+        settle(ID, &json!({"id": "CAP-9", "amount": {"currency_code": "USD", "value": "49.90"}})).unwrap();
+        let c = calls.borrow();
+        let report = c.iter().find(|(op, a)| op == "data.action" && a["action"] == "report_exception").expect("a person is told");
+        assert_eq!((&report.1["params"]["gateway_reference"], &report.1["params"]["amount"]), (&json!("CAP-9"), &json!("49.90")));
+        drop(c);
+
+        let calls = host(|op, a| match op {
+            "http.fetch" if url(a).ends_with("/captures/CAP-9/refund") => http(201, json!({"id": "RF-1"})),
+            "http.fetch" if url(a).ends_with("/captures/CAP-0/refund") => http(422, json!({"message": "already refunded"})),
+            "http.fetch" => http(500, json!({})),
+            _ => Ok(Value::Null),
+        });
+        let req = Request(json!({"kind": "schedule", "config": config()}));
+        assert_eq!(refund(&req, &json!({"id": "x-1", "gateway_reference": "CAP-9"})), Refund::Done("RF-1".into()));
+        assert!(matches!(refund(&req, &json!({"id": "x-2", "gateway_reference": "CAP-0"})), Refund::Refused(_)));
+        assert!(matches!(refund(&req, &json!({"id": "x-3", "gateway_reference": "CAP-5"})), Refund::Later(_)));
+        assert_eq!(calls.borrow().iter().find(|(op, _)| op == "http.fetch").unwrap().1["headers"]["paypal-request-id"], json!("ferrum-refund-x-1"));
+    }
+
     /// Against PayPal's sandbox when PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET are
     /// set: a real access token and order with its approval link (unapproved orders lapse).
     #[test]
@@ -423,9 +501,10 @@ mod tests {
             return eprintln!("skipped: set PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET to test against PayPal's sandbox");
         };
         let calls = sandbox::host();
+        sandbox::sign_in_as("client_secret", gateway_kit::basic(&client, &secret));
         let id = sandbox::fresh_id();
         let req = Request(json!({"kind": "event", "topic": "PaymentRequest.submitted",
-            "config": {"client_id": client, "client_secret": secret, "webhook_id": "", "environment": "sandbox"},
+            "config": {"client_id": client, "webhook_id": "", "environment": "sandbox"},
             "event": {"id": id, "doc": {"id": id, "gateway": "paypal", "status": "Initiated", "amount": "49.90", "currency_code": "USD",
                                         "order_number": "SO-SANDBOX", "return_url": "https://example.com/orders/done"}}}));
         assert_eq!(handle(req), json!({}));

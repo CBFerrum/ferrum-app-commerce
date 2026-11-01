@@ -297,6 +297,113 @@ async fn set_gateway_details(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) ->
 
 pub struct PaymentRequestHook;
 
+/// A gateway says it holds money it could not book on this request. Told twice (a repeated webhook,
+/// then the schedule), that is one exception.
+async fn report_exception(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Value> {
+    let gateway = s(doc, "gateway").unwrap_or_default().to_string();
+    if !hc.ctx.email.ends_with(PLUGIN_DOMAIN) {
+        return Err(Error::Forbidden("this is reported by the gateway".into()));
+    }
+    caller_may_settle(hc.ctx, &gateway)?;
+    let reference = param_text(params, "gateway_reference", 200)?.ok_or_else(|| Error::field("gateway_reference", "is required"))?;
+    let reason = param_text(params, "reason", 2000)?.ok_or_else(|| Error::field("reason", "is required"))?;
+    let known: Option<Uuid> = sqlx::query_scalar("select id from e_payment_exception where tenant_id = $1 and gateway = $2 and gateway_reference = $3")
+        .bind(hc.ctx.tenant)
+        .bind(&gateway)
+        .bind(&reference)
+        .fetch_optional(&mut **hc.tx)
+        .await?;
+    if let Some(known) = known {
+        return Ok(json!({"exception": known}));
+    }
+    let amount = param_text(params, "amount", 40)?.filter(|a| Decimal::from_str(a).is_ok());
+    let currency = param_text(params, "currency", 3)?;
+    let mut x = Doc::new();
+    set(&mut x, "gateway", gateway.clone());
+    set(&mut x, "gateway_reference", reference.clone());
+    set(&mut x, "payment_request", json!(id(doc, "id")));
+    set(&mut x, "amount", json!(amount));
+    set(&mut x, "currency_code", json!(currency));
+    set(&mut x, "reason", reason);
+    let made = hc.kernel.insert_tx(&sys(hc.ctx), hc.tx, "PaymentException", x).await?;
+    let made = id(&made, "id").ok_or_else(|| Error::internal("exception without id"))?;
+    let body = format!("{gateway} holds {} {} that could not be booked", amount.as_deref().unwrap_or("money"), currency.as_deref().unwrap_or(""));
+    notify_managers(hc.tx, hc.ctx.tenant, "A payment needs a decision", Some(body.trim_end()), "PaymentException", made).await?;
+    Ok(json!({"exception": made}))
+}
+
+/// Money a gateway took and could not book. A person decides what happens to it: a gateway may
+/// report one and carry out the refund it was told to, but it never approves one, so a gateway that
+/// goes wrong cannot send money out by itself.
+pub struct PaymentExceptionHook;
+
+fn exception_gateway(ctx: &Ctx, doc: &Doc) -> Result<()> {
+    let gateway = s(doc, "gateway").unwrap_or_default();
+    match ctx.email.strip_suffix(PLUGIN_DOMAIN) {
+        Some(plugin) if plugin == gateway => Ok(()),
+        Some(plugin) => Err(Error::Forbidden(format!("plugin '{plugin}' cannot act on exceptions of '{gateway}'"))),
+        None => Err(Error::Forbidden("this is reported by the gateway".into())),
+    }
+}
+
+async fn set_exception(hc: &mut HookCtx<'_>, doc: &Doc, values: Doc) -> Result<Value> {
+    let exception = id(doc, "id").ok_or_else(|| Error::internal("exception without id"))?;
+    hc.kernel.set_values_tx(&sys(hc.ctx), hc.tx, "PaymentException", exception, values).await?;
+    Ok(json!({}))
+}
+
+#[async_trait]
+impl DocHook for PaymentExceptionHook {
+    async fn action(&self, hc: &mut HookCtx<'_>, name: &str, doc: &Doc, params: &Value) -> Result<Option<Value>> {
+        let status = s(doc, "status").unwrap_or_default();
+        let open = matches!(status, "Open" | "Refund Failed");
+        Ok(Some(match name {
+            "approve_refund" | "resolve" => {
+                if hc.ctx.email.ends_with(PLUGIN_DOMAIN) {
+                    return Err(Error::Forbidden("a person decides this, not a plugin".into()));
+                }
+                if !open {
+                    return Err(Error::Conflict(format!("this exception is {status}")));
+                }
+                let mut v = Doc::new();
+                if name == "resolve" {
+                    let note = params.get("note").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
+                    let note = note.ok_or_else(|| Error::field("note", "say how it was settled"))?;
+                    set(&mut v, "status", "Resolved");
+                    set(&mut v, "note", note);
+                } else {
+                    set(&mut v, "status", "Refund Approved");
+                    set(&mut v, "refund_error", Value::Null);
+                }
+                set(&mut v, "approved_by", hc.ctx.email.clone());
+                set(&mut v, "approved_at", crate::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                set_exception(hc, doc, v).await?
+            }
+            "refund_done" | "refund_failed" => {
+                exception_gateway(hc.ctx, doc)?;
+                // Repeated by a gateway that did not hear the first answer: no change.
+                if (status == "Refunded" && name == "refund_done") || (status == "Refund Failed" && name == "refund_failed") {
+                    return Ok(Some(json!({})));
+                }
+                if status != "Refund Approved" {
+                    return Err(Error::Conflict(format!("this exception is {status}")));
+                }
+                let mut v = Doc::new();
+                if name == "refund_done" {
+                    let reference = params.get("refund_reference").and_then(Value::as_str).filter(|r| !r.is_empty());
+                    set(&mut v, "refund_reference", reference.ok_or_else(|| Error::field("refund_reference", "is required"))?);
+                    set(&mut v, "status", "Refunded");
+                } else {
+                    set(&mut v, "refund_error", params.get("error").and_then(Value::as_str).unwrap_or("the gateway refused"));
+                    set(&mut v, "status", "Refund Failed");
+                }
+                set_exception(hc, doc, v).await?
+            }
+            _ => return Ok(None),
+        }))
+    }
+}
+
 #[async_trait]
 impl DocHook for PaymentRequestHook {
     async fn validate(&self, hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
@@ -340,6 +447,7 @@ impl DocHook for PaymentRequestHook {
         Ok(Some(match name {
             "mark_paid" => mark_paid(hc, doc, params).await?,
             "mark_failed" => mark_failed(hc, doc, params).await?,
+            "report_exception" => report_exception(hc, doc, params).await?,
             "set_gateway_details" => set_gateway_details(hc, doc, params).await?,
             _ => return Ok(None),
         }))
