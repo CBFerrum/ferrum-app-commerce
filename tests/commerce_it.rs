@@ -1672,7 +1672,7 @@ async fn subscriptions() {
     t.insert("WebsiteItem", json!({"item": club.to_string(), "published": true, "csub_plan": plan.to_string()})).await;
     let fakepay = {
         let role = "plugin:fakepay".to_string();
-        for entity in ["PaymentRequest", "PaymentException"] {
+        for entity in ["PaymentRequest", "PaymentException", "OrderRefund"] {
             let p = PermissionDef { entity: entity.into(), read: true, write: true, ..Default::default() };
             t.k.set_role_permission(&t.ctx, &role, &p).await.unwrap();
         }
@@ -1739,6 +1739,30 @@ async fn subscriptions() {
         let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
         assert!(ferrum_app_commerce::entitled(&mut tx, tenant, customer, plan).await.unwrap(), "an active subscription gives the club");
     }
+
+    // ───────────── part of a payment goes back, as the app that took it decides ─────────────
+    let refund = {
+        let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
+        let r = ferrum_app_commerce::refund_payment(&t.k, &t.ctx, &mut tx, uid(&renewal), n("100"), None, "A goodwill gesture").await.expect("asked for");
+        let too_much = ferrum_app_commerce::refund_payment(&t.k, &t.ctx, &mut tx, uid(&renewal), total, None, "Everything").await;
+        assert!(too_much.is_err(), "no more than the payment holds: {too_much:?}");
+        tx.commit().await.unwrap();
+        uid(&r)
+    };
+    let asked = t.get("OrderRefund", refund).await;
+    assert_eq!(
+        (asked["kind"].clone(), asked["status"].clone(), dec(&asked["amount"]), asked["gateway"].clone()),
+        (json!("Payment"), json!("Requested"), n("100"), json!("fakepay"))
+    );
+    let by_hand = t.k.insert(&t.ctx, "OrderRefund", obj(json!({"kind": "Payment", "sales_order": so.to_string()}))).await;
+    assert!(by_hand.is_err(), "a payment's refund is asked for by the app: {by_hand:?}");
+    t.k.run_action(&t.ctx, "OrderRefund", refund, "approve_refund", json!({})).await.expect("approved");
+    t.k.run_action(&fakepay, "OrderRefund", refund, "refund_done", json!({"refund_reference": "re_1"})).await.expect("refunded");
+    let done = t.get("OrderRefund", refund).await;
+    assert_eq!((done["status"].clone(), done["booked"].clone()), (json!("Refunded"), json!(true)), "{}", done["booking_error"]);
+    assert!(!done["journal_entry"].is_null(), "the money out is in the books");
+    assert_eq!(dec(&t.get("PaymentRequest", uid(&renewal)).await["refunded_amount"]), n("100"));
+    assert_eq!(events(&t, "commerce.payment_refunded").await.len(), 1);
 
     // ───────────── the customer cancels: it runs to the end of the month paid for ─────────────
     let cancelled = t.ok(Some(&mira), "POST", &format!("/subscriptions/{}/cancel", sub["number"].as_str().unwrap()), &[], None).await;

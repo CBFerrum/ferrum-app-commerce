@@ -116,7 +116,7 @@ impl DocHook for RenewalHook {
         let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
         // A method the store no longer offers leaves the invoice to be paid from the portal.
         let Some(method) = store.method(&gateway).cloned() else { return Ok(()) };
-        payment::invoice_request(hc.kernel, &sctx, hc.tx, &store, doc, &method, email, None).await?;
+        payment::invoice_request(hc.kernel, &sctx, hc.tx, &store, doc, &method, None, email, None).await?;
         Ok(())
     }
 }
@@ -241,7 +241,7 @@ pub async fn pay(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, user: &Ctx, 
     }
     let inv = get(k, ctx, tx, "SalesInvoice", si).await?;
     let (_, email) = renewal_terms(k, ctx, tx, &sub).await?;
-    let pr = payment::invoice_request(k, ctx, tx, store, &inv, &method, email.or_else(|| Some(user.email.clone())), None)
+    let pr = payment::invoice_request(k, ctx, tx, store, &inv, &method, None, email.or_else(|| Some(user.email.clone())), None)
         .await?
         .ok_or_else(|| Error::invalid("nothing is due on this invoice"))?;
     Ok(json!({"payment_request": request_view(&pr, store)}))
