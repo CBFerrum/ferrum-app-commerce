@@ -25,6 +25,40 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+/// What refunds hold of one payment request (a payment's refunds have no order).
+async fn held_payment(tx: &mut Tx, tenant: Uuid, pr: Uuid, except: Option<Uuid>) -> Result<Decimal> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "select coalesce(sum(amount), 0) from e_order_refund where tenant_id = $1 and payment_request = $2 and status in {HOLDING} and id is distinct from $3"
+    )))
+    .bind(tenant)
+    .bind(pr)
+    .bind(except)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// Asks for `amount` of a paid payment request to go back, as the app that took it decides (a
+/// booking's deposit by its cancellation terms), against `credit_note` when the app credited the
+/// invoice. A person still approves it and the gateway carries it out, as for an order's refund.
+pub async fn refund_payment(k: &Kernel, ctx: &Ctx, tx: &mut Tx, pr: Uuid, amount: Decimal, credit_note: Option<Uuid>, note: &str) -> Result<Doc> {
+    let sctx = sys(ctx);
+    let request = k.get_tx(&sctx, tx, "PaymentRequest", pr, true).await?;
+    if s(&request, "status") != Some("Paid") {
+        return Err(Error::invalid("only a paid request's money goes back"));
+    }
+    let invoice = id(&request, "sales_invoice").ok_or_else(|| Error::invalid("an order's payment is refunded with a return or a cancellation of the order"))?;
+    let code = s(&request, "currency_code").unwrap_or_default().to_string();
+    check_cap(d(&request, "amount"), held_payment(tx, ctx.tenant, pr, None).await?, amount, &code)?;
+    let refund = json!({
+        "company": s(&request, "company"), "sales_invoice": invoice.to_string(), "order_number": s(&request, "order_number"),
+        "customer": s(&request, "customer"), "kind": "Payment", "note": note, "notify_customer": true,
+        "payment_request": pr.to_string(), "gateway": s(&request, "gateway"), "payment_reference": s(&request, "gateway_reference"),
+        "currency": s(&request, "currency"), "currency_code": code, "amount": money(amount), "requested_by": ctx.email.clone(), "booked": false,
+        "credit_note": credit_note.map(|c| c.to_string()),
+    });
+    k.insert_tx(&sctx, tx, "OrderRefund", refund.as_object().cloned().unwrap_or_default()).await
+}
+
 /// The refunds that hold part of an order's payment: asked for, approved, failed or done.
 const HOLDING: &str = "('Requested', 'Approved', 'Refund Failed', 'Refunded')";
 
@@ -544,6 +578,9 @@ impl DocHook for OrderRefundHook {
         if id(doc, "payment_request").is_some() {
             return Ok(());
         }
+        if s(doc, "kind") == Some("Payment") {
+            return Err(Error::field("kind", "a payment's refund is asked for by the app that took the payment"));
+        }
         work_out(hc, doc).await
     }
 
@@ -565,7 +602,11 @@ impl DocHook for OrderRefundHook {
         if old.is_none()
             && let Some(refund) = id(doc, "id")
         {
-            let what = if s(doc, "kind") == Some("Cancellation") { "cancelled order" } else { "return" };
+            let what = match s(doc, "kind") {
+                Some("Cancellation") => "cancelled order",
+                Some("Payment") => "payment",
+                _ => "return",
+            };
             let body = format!(
                 "{} · {what} · {} {}",
                 s(doc, "order_number").unwrap_or_default(),
@@ -588,15 +629,13 @@ impl DocHook for OrderRefundHook {
                     return Err(Error::Conflict(format!("this refund is {status}")));
                 }
                 // Another refund may have been asked for since: the payment must still hold this one.
-                let so = id(doc, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
-                let pr = get(hc.kernel, hc.ctx, hc.tx, "PaymentRequest", id(doc, "payment_request").ok_or_else(|| Error::internal("refund without payment"))?)
-                    .await?;
-                check_cap(
-                    d(&pr, "amount"),
-                    held(hc.tx, hc.ctx.tenant, so, Some(refund)).await?,
-                    d(doc, "amount"),
-                    s(doc, "currency_code").unwrap_or_default(),
-                )?;
+                let pr_id = id(doc, "payment_request").ok_or_else(|| Error::internal("refund without payment"))?;
+                let pr = get(hc.kernel, hc.ctx, hc.tx, "PaymentRequest", pr_id).await?;
+                let already = match id(doc, "sales_order") {
+                    Some(so) => held(hc.tx, hc.ctx.tenant, so, Some(refund)).await?,
+                    None => held_payment(hc.tx, hc.ctx.tenant, pr_id, Some(refund)).await?,
+                };
+                check_cap(d(&pr, "amount"), already, d(doc, "amount"), s(doc, "currency_code").unwrap_or_default())?;
                 let mut v = Doc::new();
                 set(&mut v, "status", "Approved");
                 set(&mut v, "approved_by", hc.ctx.email.clone());
@@ -653,7 +692,9 @@ impl DocHook for OrderRefundHook {
                     return Err(Error::Conflict("there is nothing left to post for this refund".into()));
                 }
                 let failed = try_books(hc, doc).await?;
-                refresh_order(hc.kernel, &sctx, hc.tx, id(doc, "sales_order").unwrap_or_default()).await?;
+                if let Some(so) = id(doc, "sales_order") {
+                    refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
+                }
                 json!({"booked": failed.is_none(), "error": failed})
             }
             _ => return Ok(None),
@@ -685,7 +726,6 @@ fn the_gateway(ctx: &Ctx, doc: &Doc) -> Result<()> {
 async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note: Option<String>) -> Result<Value> {
     let sctx = sys(hc.ctx);
     let refund = id(doc, "id").ok_or_else(|| Error::internal("refund without id"))?;
-    let so = id(doc, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
     let amount = d(doc, "amount");
     let mut v = Doc::new();
     set(&mut v, "status", "Refunded");
@@ -712,13 +752,26 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
     }
     let fresh = get(hc.kernel, hc.ctx, hc.tx, "OrderRefund", refund).await?;
     let failed = try_books(hc, &fresh).await?;
-    refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
-    let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
-    let event = json!({
-        "sales_order": so, "number": s(doc, "order_number"), "refund": refund, "kind": s(doc, "kind"), "amount": money(amount), "currency": s(doc, "currency_code"),
-        "gateway": s(doc, "gateway"), "email": s(&order, "commerce_contact_email"), "notify": b(doc, "notify_customer"),
-    });
-    outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_refunded", Some("SalesOrder"), Some(so), event).await?;
+    match id(doc, "sales_order") {
+        Some(so) => {
+            refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
+            let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
+            let event = json!({
+                "sales_order": so, "number": s(doc, "order_number"), "refund": refund, "kind": s(doc, "kind"), "amount": money(amount), "currency": s(doc, "currency_code"),
+                "gateway": s(doc, "gateway"), "email": s(&order, "commerce_contact_email"), "notify": b(doc, "notify_customer"),
+            });
+            outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_refunded", Some("SalesOrder"), Some(so), event).await?;
+        }
+        None => {
+            let (pr, _) = paid_payment_of(hc, doc).await?;
+            let invoice = id(doc, "sales_invoice");
+            let event = json!({
+                "sales_invoice": invoice, "number": s(doc, "order_number"), "refund": refund, "amount": money(amount), "currency": s(doc, "currency_code"),
+                "gateway": s(doc, "gateway"), "email": s(&pr, "payer_email"), "notify": b(doc, "notify_customer"),
+            });
+            outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.payment_refunded", Some("SalesInvoice"), invoice, event).await?;
+        }
+    }
     Ok(json!({"status": "Refunded", "booked": failed.is_none(), "booking_error": failed}))
 }
 
@@ -758,10 +811,17 @@ async fn try_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Option<String>>
 /// before it shipped, its payment reversed and the order cancelled. Returns the fields to set.
 async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     let actor = elevated(hc.ctx);
-    let so_id = id(refund, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
     let (_, pe) = paid_payment_of(hc, refund).await?;
     let pe_id = id(&pe, "id").ok_or_else(|| Error::internal("payment without id"))?;
     let mut out = Doc::new();
+    // Part of a payment: only the money moves, against the credit note the app made (if any).
+    if s(refund, "kind") == Some("Payment") {
+        let credits: Vec<Uuid> = id(refund, "credit_note").into_iter().collect();
+        let entry = money_out(hc, &actor, refund, &pe, &credits).await?;
+        set(&mut out, "journal_entry", entry.to_string());
+        return Ok(out);
+    }
+    let so_id = id(refund, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
     if s(refund, "kind") == Some("Cancellation") {
         hc.kernel.cancel_tx(&actor, hc.tx, "PaymentEntry", pe_id, None).await?;
         hc.kernel.cancel_tx(&actor, hc.tx, "SalesOrder", so_id, None).await?;
@@ -842,7 +902,8 @@ async fn money_out(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let (Some(receivable), Some(bank), Some(customer)) = (id(pe, "party_account"), id(pe, "bank_account"), id(pe, "customer")) else {
         return Err(Error::invalid("the payment names no bank account or receivable account to post the refund against"));
     };
-    let remark = format!("Refund {} of web order {}", s(refund, "number").unwrap_or_default(), s(refund, "order_number").unwrap_or_default());
+    let of = if id(refund, "sales_order").is_some() { "web order" } else { "the payment of" };
+    let remark = format!("Refund {} of {of} {}", s(refund, "number").unwrap_or_default(), s(refund, "order_number").unwrap_or_default());
     let entry = json!({
         "company": co.id, "posting_date": crate::today().to_string(), "remark": remark,
         "accounts": [

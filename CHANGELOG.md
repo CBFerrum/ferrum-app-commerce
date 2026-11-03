@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+For apps that take payments through the store (Bookings' deposits first):
+
+- A payment request can ask for part of an invoice, a deposit, rather than all of it.
+- A refund can be of part of a payment, not only of an order (kind Payment). The app that took the
+  money works out how much goes back (a booking's cancellation terms), against the credit note it made;
+  a person still approves it, the gateway carries it out, and the money out is posted as for an
+  order's refund. `commerce.payment_refunded` goes out.
+- `ferrum_app_commerce::request_invoice_payment` and `refund_payment` are what other apps call.
+
 ## 0.6.0, and Store Subscriptions 0.1.0
 
 Subscriptions sold in the store (FERRUM-COMMERCE-002), in a connector app with Finance, Store
