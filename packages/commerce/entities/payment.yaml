@@ -6,11 +6,12 @@
   company_scoped: true
   title_field: order_number
   numbering: {template: "PAYREQ-{YYYY}-{seq:5}"}
-  description: "A request to pay a web order. Gateway plugins subscribe to PaymentRequest.submitted, write payment_url with set_gateway_details and confirm with mark_paid or mark_failed."
+  description: "A request to pay a web order (or an invoice). Gateway plugins subscribe to PaymentRequest.submitted, write payment_url with set_gateway_details and confirm with mark_paid or mark_failed."
   search_fields: [gateway_reference]
   fields:
     - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
-    - {name: sales_order, type: link, to: SalesOrder, required: true, read_only: true, in_filter: true}
+    - {name: sales_order, type: link, to: SalesOrder, read_only: true, in_filter: true}
+    - {name: sales_invoice, type: link, to: SalesInvoice, read_only: true, in_filter: true, description: "Without an order: the invoice it pays (a subscription's renewal)"}
     - {name: order_number, type: data, read_only: true, in_list: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
     - {name: payer_name, type: data, read_only: true}
@@ -30,6 +31,8 @@
     - {name: refunded_amount, type: currency, currency: currency, read_only: true, no_copy: true, description: "Sent back to the shopper so far (refunds of this payment)"}
     - {name: failure_reason, type: text, read_only: true, max_length: 2000}
   indexes: [[status, expires_at]]
+  rules:
+    - {name: pays_something, check: "doc.sales_order != null || doc.sales_invoice != null", message: "A payment request pays an order or an invoice"}
   actions:
     - {name: set_gateway_details, label: Set Gateway Details, docstatus: [1], permission: write}
     - {name: mark_paid, label: Mark Paid, docstatus: [1], permission: write, confirm: "Record the payment of this request and book it?"}
