@@ -36,10 +36,6 @@ fn uid(doc: &Doc) -> Uuid {
     doc["id"].as_str().unwrap().parse().unwrap()
 }
 
-fn sid(doc: &Doc) -> String {
-    doc["id"].as_str().unwrap().to_string()
-}
-
 async fn fresh_kernel() -> Arc<Kernel> {
     let url = std::env::var("FERRUM_COMMERCE_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://ferrum:ferrum@localhost:5432/ferrum_commerce_test".into());
     let db = Db::connect(DbConfig { url, max_connections: 12, ..Default::default() }).await.expect("connect");
@@ -48,6 +44,7 @@ async fn fresh_kernel() -> Arc<Kernel> {
     packages.extend(ferrum_app_erp::packages().expect("ERP's packages"));
     packages.extend(ferrum_app_commerce::packages().expect("app packages"));
     packages.extend(ferrum_app_crm::packages().expect("crm packages"));
+    packages.extend(ferrum_finance::packages().expect("finance packages"));
     let catalog = Catalog::from_packages(packages).expect("catalog");
     let mut hooks = HookRegistry::default();
     ferrum_domain::register(&mut hooks);
@@ -57,6 +54,7 @@ async fn fresh_kernel() -> Arc<Kernel> {
     }
     ferrum_app_commerce::register(&mut hooks);
     ferrum_app_crm::register(&mut hooks);
+    ferrum_finance::register(&mut hooks);
     for source in ferrum_app_commerce::reports() {
         ferrum_domain::reports::add_source(source);
     }
@@ -1046,6 +1044,10 @@ struct Shop {
 }
 
 async fn small_shop(slug: &str) -> Shop {
+    shop_with(slug, &["commerce"]).await
+}
+
+async fn shop_with(slug: &str, packages: &[&str]) -> Shop {
     let k = fresh_kernel().await;
     let tenant = k
         .create_tenant(NewTenant {
@@ -1054,7 +1056,7 @@ async fn small_shop(slug: &str) -> Shop {
             admin_email: "admin@shop.test".into(),
             admin_password: "Correct-Horse-9".into(),
             admin_name: None,
-            packages: vec!["commerce".into()],
+            packages: packages.iter().map(|p| p.to_string()).collect(),
             settings: Some(json!({"fiscal_year_start_month": 4})),
         })
         .await
@@ -1644,4 +1646,115 @@ async fn variants() {
     let stranger =
         t.insert("ItemReview", json!({"website_item": parent.to_string(), "rating": 4, "reviewer_name": "Zed", "reviewer_email": "zed@example.com"})).await;
     assert_eq!(stranger["verified_purchase"], json!(false));
+}
+
+#[test]
+fn subscriptions_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(subscriptions()).await.unwrap() });
+}
+
+async fn subscriptions() {
+    let Shop { t, tenant, cid, products, nos, selling, .. } = shop_with("subs", &["commerce", "finance", "commerce_subscriptions"]).await;
+    let inr = t.find_one("Currency", json!({"code": "INR"})).await;
+    // ───────────── a coffee club sold as a monthly plan ─────────────
+    let club = uid(&t
+        .insert("Item", json!({"item_code": "CLUB", "item_name": "Coffee Club", "item_group": products["id"], "stock_uom": nos["id"], "is_stock_item": false}))
+        .await);
+    t.insert("ItemPrice", json!({"item": club.to_string(), "price_list": selling["id"], "rate": "300"})).await;
+    let plan = uid(&t
+        .insert(
+            "SubscriptionPlan",
+            json!({"plan_name": "Coffee Monthly", "item": club.to_string(), "currency": inr["id"], "price": "300", "billing_interval": "Month"}),
+        )
+        .await);
+    t.insert("WebsiteItem", json!({"item": club.to_string(), "published": true, "csub_plan": plan.to_string()})).await;
+    let fakepay = {
+        let role = "plugin:fakepay".to_string();
+        for entity in ["PaymentRequest", "PaymentException"] {
+            let p = PermissionDef { entity: entity.into(), read: true, write: true, ..Default::default() };
+            t.k.set_role_permission(&t.ctx, &role, &p).await.unwrap();
+        }
+        let u = t.k.create_user(&t.ctx, "fakepay@plugins.ferrum.invalid", "Plugin: fakepay", None, &[role], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "plugin-fakepay".into()).await.unwrap()
+    };
+    let mira = {
+        let u = t.k.create_user(&t.ctx, "mira@example.com", "Customer", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "portal".into()).await.unwrap()
+    };
+
+    // ───────────── the web order pays the first month; Finance bills from the second ─────────────
+    let (cart, _) = t.new_cart(Some(&mira), json!([{"item": "coffee-club", "qty": "1"}])).await;
+    t.ok(Some(&mira), "PUT", "/cart/details", &[("x-cart-token", cart.as_str())], Some(details("mira@example.com", "Mira Shah", "IN"))).await;
+    let done = t.checkout(Some(&mira), &cart, "sub-order-0001", json!({"payment_method": "fakepay", "accept_terms": true})).await.expect("checkout");
+    let request: Uuid = done["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    pay(&t, &fakepay, request, dec(&done["order"]["totals"]["rounded_total"]), "pi_order").await;
+    let so = uid(&t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await);
+    let sub = t.get("Subscription", uid(&t.find_one("Subscription", json!({"csub_sales_order": so.to_string()})).await)).await;
+    let today = chrono::Utc::now().date_naive();
+    let next_month = today.checked_add_months(chrono::Months::new(1)).unwrap();
+    assert_eq!(sub["start_date"], json!(next_month.to_string()), "billing starts after the month the order paid for");
+    assert_eq!((sub["plans"][0]["plan"].clone(), dec(&sub["plans"][0]["qty"])), (json!(plan.to_string()), n("1")));
+    let customer: Uuid = sub["customer"].as_str().unwrap().parse().unwrap();
+
+    // ───────────── a renewal: Finance's invoice is asked for through the order's method ─────────────
+    // A month on, as far as the subscription knows: its billing starts today.
+    let sub_id = uid(&sub);
+    t.k.update(&t.ctx, "Subscription", sub_id, obj(json!({"start_date": today.to_string()})), None).await.expect("billing from today");
+    t.k.run_action(&t.ctx, "Subscription", sub_id, "generate_invoices", json!({})).await.expect("renewal invoiced");
+    let invoice = t.get("SalesInvoice", uid(&t.find_one("SalesInvoice", json!({"fin_subscription": sub_id.to_string()})).await)).await;
+    let renewal = t.get("PaymentRequest", uid(&t.find_one("PaymentRequest", json!({"sales_invoice": sid(&invoice)})).await)).await;
+    assert_eq!(
+        (renewal["gateway"].clone(), dec(&renewal["amount"]), renewal["payer_email"].clone(), renewal["status"].clone()),
+        (json!("fakepay"), dec(&invoice["outstanding_amount"]), json!("mira@example.com"), json!("Initiated"))
+    );
+    assert!(dec(&renewal["amount"]) > Decimal::ZERO);
+    let mine = t.ok(Some(&mira), "GET", "/subscriptions", &[], None).await;
+    let mine = &mine["subscriptions"][0];
+    assert_eq!(
+        (mine["number"].clone(), mine["plans"][0]["plan"].clone(), mine["entitled"].clone()),
+        (sub["number"].clone(), json!("Coffee Monthly"), json!(true))
+    );
+    assert_eq!(mine["to_pay"][0]["invoice"], invoice["number"]);
+    assert_eq!(mine["to_pay"][0]["payment_request"]["id"], json!(sid(&renewal)));
+    // Asking to pay it the same way gives the same request.
+    let again = t
+        .ok(
+            Some(&mira),
+            "POST",
+            &format!("/subscriptions/{}/pay", sub["number"].as_str().unwrap()),
+            &[],
+            Some(json!({"invoice": invoice["number"], "payment_method": "fakepay"})),
+        )
+        .await;
+    assert_eq!(again["payment_request"]["id"], json!(sid(&renewal)));
+    let total = dec(&renewal["amount"]);
+    pay(&t, &fakepay, uid(&renewal), total, "pi_renewal").await;
+    let paid = t.get("SalesInvoice", uid(&invoice)).await;
+    assert_eq!(dec(&paid["outstanding_amount"]), Decimal::ZERO, "the renewal's payment is the invoice's");
+    assert_eq!(events(&t, "commerce.invoice_paid").await.len(), 1);
+    assert_eq!(t.ok(Some(&mira), "GET", "/subscriptions", &[], None).await["subscriptions"][0]["to_pay"], json!([]));
+    {
+        let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
+        assert!(ferrum_app_commerce::entitled(&mut tx, tenant, customer, plan).await.unwrap(), "an active subscription gives the club");
+    }
+
+    // ───────────── the customer cancels: it runs to the end of the month paid for ─────────────
+    let cancelled = t.ok(Some(&mira), "POST", &format!("/subscriptions/{}/cancel", sub["number"].as_str().unwrap()), &[], None).await;
+    assert_eq!(cancelled["cancellation_date"], json!((next_month - chrono::Duration::days(1)).to_string()));
+    let others = t.call(None, "GET", "/subscriptions", &[], None).await;
+    assert!(matches!(others, Err(Error::Unauthorized(_))), "{others:?}");
+
+    // ───────────── an order cancelled before it is paid cancels what it started ─────────────
+    let unpaid = place(&t, json!([{"item": "coffee-club", "qty": "2"}]), "omar@example.com", "Cash on Delivery", "sub-order-0002").await;
+    let second = t.get("Subscription", uid(&t.find_one("Subscription", json!({"csub_sales_order": unpaid.so.to_string()})).await)).await;
+    assert_eq!(dec(&second["plans"][0]["qty"]), n("2"));
+    t.k.cancel(&t.ctx, "SalesOrder", unpaid.so, None).await.expect("order cancelled");
+    assert!(!t.get("Subscription", uid(&second)).await["cancellation_date"].is_null(), "the subscription went with its order");
+    let _ = cid;
+}
+
+fn sid(doc: &Doc) -> String {
+    doc["id"].as_str().unwrap().to_string()
 }

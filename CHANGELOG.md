@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0, and Store Subscriptions 0.1.0
+
+Subscriptions sold in the store (FERRUM-COMMERCE-002), in a connector app with Finance, Store
+Subscriptions, offered where both are installed. Finance bills them; the store sells them and asks for
+each renewal.
+
+- A website item can be sold as a Finance subscription plan. Its web order pays the first period, and
+  the subscription it starts is billed by Finance from the second, one subscription per plan line.
+  Price the item at the plan's price.
+- Each renewal invoice Finance makes gets a payment request through the order's payment method, to
+  the order's email: a gateway plugin collects it as it does an order's. Payment requests can now pay
+  an invoice as well as an order (Commerce 0.6.0): the payment is allocated to the invoice, and
+  `commerce.invoice_paid` goes out.
+- Signed-in customers see their subscriptions in the portal (`GET subscriptions`): the plans, the status
+  and whether it gives what it sells, the period, and the renewals still to pay with the request that
+  pays each. They pay a renewal through any of the store's methods and cancel, the subscription then
+  running to the end of the period paid for.
+- Cancelling the web order cancels the subscriptions it started.
+- Other apps ask whether a customer has an active subscription to a plan with
+  `ferrum_app_commerce::entitled`.
+
+Not yet: an email of its own for a renewal (the payment request and the `commerce.invoice_paid` event
+are there for a mail or gateway plugin to tell the customer), cards kept on file for charging renewals
+without the customer, and changing plans from the portal.
+
 ## 0.5.0
 
 - The store's admin has a web-order desk (Orders). It sorts the web orders into what waits for money,

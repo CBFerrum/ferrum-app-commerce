@@ -63,6 +63,49 @@ pub async fn create_request(
     Ok(Some(submitted))
 }
 
+/// Creates and submits a request to pay what is outstanding on a submitted sales invoice (a
+/// subscription's renewal, say) through `method`; `None` when nothing is outstanding.
+pub async fn invoice_request(
+    k: &Kernel,
+    ctx: &Ctx,
+    tx: &mut Tx,
+    store: &Store,
+    invoice: &Doc,
+    method: &PaymentMethod,
+    email: Option<String>,
+    return_url: Option<String>,
+) -> Result<Option<Doc>> {
+    let si = id(invoice, "id").ok_or_else(|| Error::internal("invoice without id"))?;
+    let amount = d(invoice, "outstanding_amount");
+    if amount <= Decimal::ZERO {
+        return Ok(None);
+    }
+    let cur = id(invoice, "currency").ok_or_else(|| Error::internal("invoice without currency"))?;
+    let (code, _) = currency(k, ctx, tx, cur).await?;
+    let number = s(invoice, "number").unwrap_or_default().to_string();
+    let mut pr = Doc::new();
+    set(&mut pr, "company", s(invoice, "company").unwrap_or_default());
+    set(&mut pr, "sales_invoice", si.to_string());
+    set(&mut pr, "order_number", number.clone());
+    set(&mut pr, "customer", json!(s(invoice, "customer")));
+    set(&mut pr, "payer_name", json!(s(invoice, "customer_name")));
+    set(&mut pr, "payer_email", json!(email));
+    set(&mut pr, "gateway", method.gateway.clone());
+    set(&mut pr, "currency", cur.to_string());
+    set(&mut pr, "currency_code", code);
+    set(&mut pr, "amount", money(amount));
+    set(&mut pr, "status", "Initiated");
+    if method.expiry_minutes > 0 {
+        let at = crate::now() + chrono::Duration::minutes(method.expiry_minutes);
+        set(&mut pr, "expires_at", at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
+    set(&mut pr, "return_url", json!(return_url));
+    set(&mut pr, "description", format!("Invoice {number} at {}", store.name).chars().take(200).collect::<String>());
+    let draft = k.insert_tx(ctx, tx, "PaymentRequest", pr).await?;
+    let pr_id = id(&draft, "id").ok_or_else(|| Error::internal("payment request without id"))?;
+    Ok(Some(k.submit_tx(ctx, tx, "PaymentRequest", pr_id, None).await?))
+}
+
 /// Sets the order's web payment status, and the method it is paid with when a request is made.
 async fn set_order_status(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid, status: &str, method: Option<&str>) -> Result<()> {
     let mut v = Doc::new();
@@ -201,13 +244,19 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     }
     let sctx = sys(hc.ctx);
     let pr_id = id(doc, "id").ok_or_else(|| Error::internal("payment request without id"))?;
-    let so_id = id(doc, "sales_order").ok_or_else(|| Error::internal("payment request without order"))?;
-    // Locked: a cancellation of the order and this payment cannot cross.
-    let so = hc.kernel.get_tx(&sctx, hc.tx, "SalesOrder", so_id, true).await?;
-    if d(&so, "docstatus") != Decimal::ONE {
-        return Err(Error::invalid("the order was cancelled; refund the payment"));
+    // What it pays, locked so that cancelling it and this payment cannot cross: a web order, or an
+    // invoice (a subscription's renewal).
+    let (paid_for, paid_id) = match (id(doc, "sales_order"), id(doc, "sales_invoice")) {
+        (Some(so), _) => ("SalesOrder", so),
+        (None, Some(si)) => ("SalesInvoice", si),
+        _ => return Err(Error::internal("payment request without order or invoice")),
+    };
+    let paying = hc.kernel.get_tx(&sctx, hc.tx, paid_for, paid_id, true).await?;
+    if d(&paying, "docstatus") != Decimal::ONE {
+        let what = if paid_for == "SalesOrder" { "order" } else { "invoice" };
+        return Err(Error::invalid(format!("the {what} was cancelled; refund the payment")));
     }
-    let customer = id(&so, "customer").ok_or_else(|| Error::internal("order without customer"))?;
+    let customer = id(&paying, "customer").ok_or_else(|| Error::internal("payment without customer"))?;
     let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
     let co = company(hc.kernel, &sctx, hc.tx, id(doc, "company").unwrap_or_default()).await?;
     let bank = store
@@ -217,7 +266,11 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
         .ok_or_else(|| Error::invalid("set a payment account on this payment method or the company's default bank account"))?;
     let mut budget = amount;
     let mut references = Vec::new();
-    for (invoice, outstanding) in open_invoices(hc.tx, hc.ctx.tenant, customer, so_id).await? {
+    let open = match paid_for {
+        "SalesOrder" => open_invoices(hc.tx, hc.ctx.tenant, customer, paid_id).await?,
+        _ => vec![(paid_id, d(&paying, "outstanding_amount"))],
+    };
+    for (invoice, outstanding) in open {
         let take = outstanding.min(budget);
         if take <= Decimal::ZERO {
             break;
@@ -237,8 +290,11 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     set(&mut pe, "reference_no", reference.clone().unwrap_or_else(|| number.to_string()));
     set(&mut pe, "reference_date", crate::today().to_string());
     set(&mut pe, "references", Value::Array(references));
-    set(&mut pe, "remarks", format!("Web order {} paid via {gateway} ({number})", s(&so, "number").unwrap_or_default()));
-    set(&mut pe, "commerce_sales_order", so_id.to_string());
+    let what = format!("{} {}", if paid_for == "SalesOrder" { "Web order" } else { "Invoice" }, s(&paying, "number").unwrap_or_default());
+    set(&mut pe, "remarks", format!("{what} paid via {gateway} ({number})"));
+    if paid_for == "SalesOrder" {
+        set(&mut pe, "commerce_sales_order", paid_id.to_string());
+    }
     set(&mut pe, "commerce_payment_request", pr_id.to_string());
     // Booked on behalf of the caller (gateway service user or staff): it shows in the audit trail.
     let actor = elevated(hc.ctx);
@@ -253,20 +309,23 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
         set(&mut v, "gateway_reference", r.clone());
     }
     hc.kernel.set_values_tx(&sctx, hc.tx, "PaymentRequest", pr_id, v).await?;
-    refresh_order(hc.kernel, &sctx, hc.tx, so_id).await?;
-    let order_number = s(&so, "number").unwrap_or_default().to_string();
+    if paid_for == "SalesOrder" {
+        refresh_order(hc.kernel, &sctx, hc.tx, paid_id).await?;
+    }
+    let paid_number = s(&paying, "number").unwrap_or_default().to_string();
     notify_managers(
         hc.tx,
         hc.ctx.tenant,
-        &format!("Payment received for web order {order_number}"),
+        &format!("Payment received for {}", what.to_lowercase()),
         Some(&format!("{} {} via {gateway}", s(doc, "currency_code").unwrap_or_default(), amount.normalize())),
-        "SalesOrder",
-        so_id,
+        paid_for,
+        paid_id,
     )
     .await?;
-    let event = json!({"sales_order": so_id, "number": order_number, "payment_request": pr_id, "payment_entry": pe_id, "amount": money(amount),
+    let (topic, key) = if paid_for == "SalesOrder" { ("commerce.order_paid", "sales_order") } else { ("commerce.invoice_paid", "sales_invoice") };
+    let event = json!({key: paid_id, "number": paid_number, "payment_request": pr_id, "payment_entry": pe_id, "amount": money(amount),
                        "currency": s(doc, "currency_code"), "gateway": gateway, "email": s(doc, "payer_email")});
-    outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_paid", Some("SalesOrder"), Some(so_id), event).await?;
+    outbox::enqueue(hc.tx, hc.ctx.tenant, topic, Some(paid_for), Some(paid_id), event).await?;
     Ok(json!({"status": "Paid", "payment_entry": pe_id, "payment_entry_number": s(&posted, "number"), "replayed": false}))
 }
 
@@ -442,12 +501,14 @@ impl DocHook for PaymentRequestHook {
         if !s(doc, "gateway").is_some_and(valid_gateway) {
             return Err(Error::field("gateway", "use a gateway plugin's name, Manual or Cash on Delivery"));
         }
-        let so = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", id(doc, "sales_order").ok_or_else(|| Error::field("sales_order", "is required"))?).await?;
-        if d(&so, "docstatus") != Decimal::ONE {
-            return Err(Error::field("sales_order", "must be a submitted order"));
+        // A request pays a web order or, without one, an invoice.
+        let (entity, field) = if id(doc, "sales_order").is_some() { ("SalesOrder", "sales_order") } else { ("SalesInvoice", "sales_invoice") };
+        let paid = get(hc.kernel, hc.ctx, hc.tx, entity, id(doc, field).ok_or_else(|| Error::field("sales_order", "is required"))?).await?;
+        if d(&paid, "docstatus") != Decimal::ONE {
+            return Err(Error::field(field, "must be submitted"));
         }
-        if id(&so, "currency") != id(doc, "currency") || id(doc, "customer").is_some_and(|c| Some(c) != id(&so, "customer")) {
-            return Err(Error::field("sales_order", "the request's currency and customer must be the order's"));
+        if id(&paid, "currency") != id(doc, "currency") || id(doc, "customer").is_some_and(|c| Some(c) != id(&paid, "customer")) {
+            return Err(Error::field(field, "the request's currency and customer must be the order's or the invoice's"));
         }
         Ok(())
     }

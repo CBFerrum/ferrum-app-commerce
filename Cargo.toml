@@ -31,6 +31,8 @@ base64 = "0.22"
 ferrum-apps = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }
 # Checkout creates contacts and addresses when the CRM app is installed: tested with the real app.
 ferrum-app-crm = { git = "https://github.com/CBFerrum/ferrum-app-crm", branch = "main" }
+# Store Subscriptions are Finance's subscriptions: tested with the real add-on.
+ferrum-finance = { git = "https://github.com/CBFerrum/ferrum-app-erp", branch = "main" }
 tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 
 [lints.clippy]

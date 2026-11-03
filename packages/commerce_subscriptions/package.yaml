@@ -1,0 +1,18 @@
+package: commerce_subscriptions
+version: 0.1.0
+label: Store Subscriptions
+description: Subscriptions sold in the online store - a website item sold as a Finance plan, the web order paying the first period, each renewal invoice paid through the store's payment methods, and the customer's own subscriptions in the portal.
+depends: [commerce, finance]
+field_prefix: csub_
+
+overlays:
+  - entity: WebsiteItem
+    ops:
+      - {op: add_field, column: true, field: {name: csub_plan, type: link, to: SubscriptionPlan, label: Subscription Plan, in_filter: true,
+          description: "Sold as a subscription to this plan: the web order pays the first period and Finance bills the next ones. Price the item at the plan's price"}}
+  - entity: Subscription
+    ops:
+      - {op: add_field, column: true, field: {name: csub_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true, description: The web order that started it}}
+      - {op: add_field, column: true, field: {name: csub_payment_method, type: data, label: Renewal Payment Method, read_only: true, max_length: 40,
+          description: "Each renewal invoice gets a payment request through this store payment method"}}
+      - {op: add_field, column: true, field: {name: csub_email, type: email, label: Renewal Email, read_only: true, description: Where the store sends what renewals ask}}
