@@ -64,7 +64,9 @@ pub async fn create_request(
 }
 
 /// Creates and submits a request to pay what is outstanding on a submitted sales invoice (a
-/// subscription's renewal, say) through `method`; `None` when nothing is outstanding.
+/// subscription's renewal, say), or `part` of it (a booking's deposit), through `method`; `None`
+/// when nothing is outstanding.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoice_request(
     k: &Kernel,
     ctx: &Ctx,
@@ -72,14 +74,22 @@ pub async fn invoice_request(
     store: &Store,
     invoice: &Doc,
     method: &PaymentMethod,
+    part: Option<Decimal>,
     email: Option<String>,
     return_url: Option<String>,
 ) -> Result<Option<Doc>> {
     let si = id(invoice, "id").ok_or_else(|| Error::internal("invoice without id"))?;
-    let amount = d(invoice, "outstanding_amount");
-    if amount <= Decimal::ZERO {
+    let outstanding = d(invoice, "outstanding_amount");
+    if outstanding <= Decimal::ZERO {
         return Ok(None);
     }
+    let amount = match part {
+        Some(p) if p <= Decimal::ZERO || p > outstanding => {
+            return Err(Error::invalid(format!("a part of {} outstanding must be more than nothing and no more than that", outstanding.normalize())));
+        }
+        Some(p) => p,
+        None => outstanding,
+    };
     let cur = id(invoice, "currency").ok_or_else(|| Error::internal("invoice without currency"))?;
     let (code, _) = currency(k, ctx, tx, cur).await?;
     let number = s(invoice, "number").unwrap_or_default().to_string();
