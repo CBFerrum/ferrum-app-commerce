@@ -7,7 +7,7 @@
 use crate::catalog::{self, Listing, Sort, decimal_param};
 use crate::checkout::{self, Checkout};
 use crate::store::Store;
-use crate::{cart, orders, refund};
+use crate::{cart, orders, refund, subscriptions};
 use async_trait::async_trait;
 use ferrum_domain::util::{id, s};
 use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
@@ -253,6 +253,42 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
             let user = r.signed_in()?;
             ok(orders::own_documents(k, &r.ctx, user, "SalesInvoice", r.query("cursor").map(str::to_string)).await?)
         }
+        // Store subscriptions (Store Subscriptions installed): the customer's own, cancelled at the
+        // end of the period paid for, and a renewal paid.
+        ("GET", ["subscriptions"]) => {
+            let user = r.signed_in()?;
+            subscribed(&r.ctx)?;
+            let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+            let store = Store::load(k, &r.ctx, &mut tx).await?;
+            let out = subscriptions::own(k, &r.ctx, &mut tx, &store, user).await?;
+            tx.commit().await?;
+            ok(out)
+        }
+        ("POST", ["subscriptions", number, "cancel"]) => {
+            let user = r.signed_in()?;
+            subscribed(&r.ctx)?;
+            ok(with_retry(|| async {
+                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+                let out = subscriptions::cancel(k, &r.ctx, &mut tx, user, number).await?;
+                tx.commit().await?;
+                Ok(out)
+            })
+            .await?)
+        }
+        ("POST", ["subscriptions", number, "pay"]) => {
+            let user = r.signed_in()?;
+            subscribed(&r.ctx)?;
+            let body = r.body()?;
+            let (invoice, gateway) = (text(&body, "invoice")?.to_string(), text(&body, "payment_method")?.to_string());
+            ok(with_retry(|| async {
+                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+                let store = Store::load(k, &r.ctx, &mut tx).await?;
+                let out = subscriptions::pay(k, &r.ctx, &mut tx, &store, user, number, &invoice, &gateway).await?;
+                tx.commit().await?;
+                Ok(out)
+            })
+            .await?)
+        }
         ("POST", ["orders", number, "pay"]) => {
             r.signed_in()?;
             let body = r.body()?;
@@ -322,6 +358,15 @@ async fn read_route(k: &Kernel, r: &Req<'_>, segs: &[&str]) -> Result<Value> {
     };
     tx.commit().await?;
     Ok(out)
+}
+
+/// Subscriptions are answered where Store Subscriptions is installed.
+fn subscribed(ctx: &Ctx) -> Result<()> {
+    if ctx.schema.packages.iter().any(|p| p == subscriptions::PACKAGE) {
+        Ok(())
+    } else {
+        Err(Error::NotFound("store subscriptions (install Store Subscriptions)".into()))
+    }
 }
 
 /// Pays an unpaid order again: guests identify it like a lookup, signed-in customers by number.
