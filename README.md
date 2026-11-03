@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.6.0** | Subscriptions sold in the store with Store Subscriptions (a connector with Finance): the web order pays the first period, Finance bills the rest, each renewal is asked for through the store's payment methods, and customers see, pay and cancel their own in the portal. Payment requests can pay an invoice. |
 | **0.5.0** | A desk for web orders, orders whole, money that needs a person in one place, returns and refunds through the gateway, order tracking from a link, variants, and a storefront finished for phones … |
 | **0.4.0** | A payment that cannot be booked is a Payment Exception a manager sees; gateways no longer hold their keys … |
 | **0.3.2** | The interface starts faster: its first download holds the frame and the app's own pages, and lists, forms, reports and other apps' screens load … |

@@ -25,6 +25,14 @@ Sell online from the same items, prices, stock and books as the rest of Ferrum. 
   which books a `PaymentEntry` (allocated to the order's open invoices, otherwise an advance that
   is applied automatically when the order's invoice is submitted).
 
+* **Subscriptions** (the connector app Store Subscriptions, package `commerce_subscriptions`, with
+  Finance) — a `WebsiteItem` with `csub_plan` is sold as a Finance `SubscriptionPlan`. Its web order
+  pays the first period; the `Subscription` it starts (`csub_sales_order`) is billed by Finance from
+  the second. Each renewal invoice gets a `PaymentRequest` with `sales_invoice` through the order's
+  payment method. Portal: `GET subscriptions`, `POST subscriptions/{number}/pay` (`invoice`,
+  `payment_method`) and `POST subscriptions/{number}/cancel` (at the end of the period paid for).
+  `ferrum_app_commerce::entitled(tx, tenant, customer, plan)` says whether a customer has it.
+
 ## Setting up a store
 
 1. **Store Settings** (one per tenant): company, currency, selling price list, tax template

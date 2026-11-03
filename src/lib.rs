@@ -24,6 +24,7 @@ mod ship;
 mod shipping;
 mod site;
 mod store;
+mod subscriptions;
 mod token;
 mod upkeep;
 
@@ -51,7 +52,21 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))
         .register("PaymentEntry", Arc::new(payment::PaymentEntryHook));
+    // The connector with Finance: only where Store Subscriptions is installed.
+    hooks.scoped(&[subscriptions::PACKAGE.to_string()], |h| {
+        h.register("SalesOrder", Arc::new(subscriptions::OrderHook)).register("SalesInvoice", Arc::new(subscriptions::RenewalHook));
+    });
     hooks.add_site("commerce", Arc::new(site::Storefront));
+}
+
+/// The manifest of the connector app with Finance (`connectors/subscriptions/app.yaml`): its package
+/// is `commerce_subscriptions`, its code this crate's. It ships with Commerce.
+pub const CONNECTOR_MANIFEST: &str = include_str!("../connectors/subscriptions/app.yaml");
+
+/// Whether `customer` has a store subscription to `plan` that gives them what it sells (trialling or
+/// active), for apps that sell access through the store.
+pub async fn entitled(tx: &mut ferrum_kernel::Tx, tenant: uuid::Uuid, customer: uuid::Uuid, plan: uuid::Uuid) -> Result<bool> {
+    subscriptions::entitled(tx, tenant, customer, plan).await
 }
 
 /// This package's reports.
