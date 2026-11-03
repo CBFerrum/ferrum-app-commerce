@@ -28,14 +28,16 @@
   title_field: order_number
   numbering: {template: "REFUND-{YYYY}-{seq:5}"}
   search_fields: [order_number, refund_reference]
-  description: "Money sent back for a web order: goods that came back (a return: the goods go back into stock and the invoice is credited) or an order cancelled before it shipped. A person approves it, the gateway the order was paid with carries it out, and the books follow."
+  description: "Money sent back for a web order: goods that came back (a return: the goods go back into stock and the invoice is credited) or an order cancelled before it shipped; or part of a payment of an invoice, as another app decides (a booking's deposit). A person approves it, the gateway the money came through carries it out, and the books follow."
   fields:
     - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
-    - {name: sales_order, type: link, to: SalesOrder, required: true, in_list: true, in_filter: true}
+    - {name: sales_order, type: link, to: SalesOrder, in_list: true, in_filter: true}
+    - {name: sales_invoice, type: link, to: SalesInvoice, read_only: true, in_filter: true, description: "A payment's refund: the invoice the payment paid"}
     - {name: order_number, type: data, read_only: true, in_list: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
-    - {name: kind, type: select, options: [Return, Cancellation], default: Return, required: true, in_list: true, in_filter: true}
-    - {name: reason, type: link, to: ReturnReason, required: true, in_filter: true}
+    - {name: kind, type: select, options: [Return, Cancellation, Payment], default: Return, required: true, in_list: true, in_filter: true,
+       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms)"}
+    - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind != 'Payment'", in_filter: true}
     - {name: note, type: text, max_length: 2000}
     - {name: lines, type: table, of: OrderRefundLine, visible_if: "doc.kind == 'Return'"}
     - {name: include_shipping, type: check, label: Refund the Delivery Charge Too, visible_if: "doc.kind == 'Return'"}
@@ -60,6 +62,8 @@
     - {name: credit_note, type: link, to: SalesInvoice, read_only: true, no_copy: true}
     - {name: journal_entry, type: link, to: JournalEntry, read_only: true, no_copy: true}
   indexes: [[sales_order, status]]
+  rules:
+    - {name: refunds_something, check: "doc.sales_order != null || doc.sales_invoice != null", message: "A refund is of an order or of an invoice's payment"}
   form:
     - {label: Refund, fields: [sales_order, order_number, customer, kind, reason, note, status, amount, currency_code]}
     - {label: Goods, fields: [lines, include_shipping, notify_customer]}

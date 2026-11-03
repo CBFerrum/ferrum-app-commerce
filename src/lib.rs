@@ -63,6 +63,25 @@ pub fn register(hooks: &mut HookRegistry) {
 /// is `commerce_subscriptions`, its code this crate's. It ships with Commerce.
 pub const CONNECTOR_MANIFEST: &str = include_str!("../connectors/subscriptions/app.yaml");
 
+/// Asks for `part` of a submitted invoice (a booking's deposit) or all of it through the store's
+/// payment method `gateway`, for apps that take payments through the store; `None` when nothing is
+/// outstanding. A gateway plugin collects it as it collects an order's.
+pub async fn request_invoice_payment(
+    k: &Kernel,
+    ctx: &Ctx,
+    tx: &mut ferrum_kernel::Tx,
+    invoice: &ferrum_kernel::Doc,
+    gateway: &str,
+    part: Option<rust_decimal::Decimal>,
+    email: Option<String>,
+) -> Result<Option<ferrum_kernel::Doc>> {
+    let store = store::Store::load(k, ctx, tx).await?;
+    let method = store.method(gateway).cloned().ok_or_else(|| ferrum_kernel::Error::field("payment_method", "is not one of the store's payment methods"))?;
+    payment::invoice_request(k, ctx, tx, &store, invoice, &method, part, email, None).await
+}
+
+pub use refund::refund_payment;
+
 /// Whether `customer` has a store subscription to `plan` that gives them what it sells (trialling or
 /// active), for apps that sell access through the store.
 pub async fn entitled(tx: &mut ferrum_kernel::Tx, tenant: uuid::Uuid, customer: uuid::Uuid, plan: uuid::Uuid) -> Result<bool> {

@@ -1,5 +1,5 @@
 package: commerce
-version: 0.2.0
+version: 0.3.0
 label: Commerce
 description: Online store on the same items, prices, stock and books - catalog with categories and reviews, carts, guest and customer checkout into sales orders, payment requests for gateway plugins, shipping rules and coupon codes.
 depends: [core, selling, inventory, accounting]
