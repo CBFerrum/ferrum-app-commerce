@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.1** | Rebuilt with Ferrum-Frontend 80ff179: labels name their fields, and linked titles show their titles. |
 | **0.7.0** | Deposits and their refunds for other apps: a payment request for part of an invoice, and a refund of part of a payment that the app works out, a person approves and the gateway carries out. |
 | **0.6.0** | Subscriptions sold in the store with Store Subscriptions (a connector with Finance): the web order pays the first period, Finance bills the rest, each renewal is asked for through the store's payment methods, and customers see, pay and cancel their own in the portal. Payment requests can pay an invoice. |
 | **0.5.0** | A desk for web orders, orders whole, money that needs a person in one place, returns and refunds through the gateway, order tracking from a link, variants, and a storefront finished for phones … |
