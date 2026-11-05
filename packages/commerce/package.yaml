@@ -52,7 +52,7 @@ modules:
 # What a personal-data request exports and erases for a shopper (their email): their carts'
 # contact and address details, and their name on reviews (the review itself stays, unsigned).
 personal_data:
-  - {entity: ShoppingCart, match: email, erase: [email, user_email, phone, contact_name, ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, notes]}
+  - {entity: ShoppingCart, match: email, phone: phone, erase: [email, user_email, phone, contact_name, ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, notes]}
   - {entity: ItemReview, match: reviewer_email, erase: [reviewer_name, reviewer_email]}
   - {entity: PaymentRequest, match: payer_email, retain: "Payment records"}
 roles:
