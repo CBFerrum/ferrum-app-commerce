@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3
+
+Personal-data requests find shopping cart records by the person's phone number as well as their email (Ferrum's FERRUM-PRIVACY-002).
+
 ## 0.7.2
 
 Rebuilt with Ferrum-Frontend daeadda: after an action runs, a record page shows what the action said it did rather than only that it is done.
