@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9
+
+Rebuilt with Ferrum-Frontend a76295e: its pages show times on a person's own clock when they chose one on their Account page, while today and due dates stay on the workspace's day. Its pages count today on the workspace's day, not UTC's, so the day's figures are right in the evening west of Greenwich and the early morning east of it.
+
 ## 0.7.8
 
 Its storefront says it serves pages at the root of a `site:commerce` host, so Ferrum's Domains offers the storefront, and only apps that serve a site (Ferrum PR 85). A shipped order reads "Shipped" to the shopper, not "Delivered": nothing tells the store a parcel arrived, and an order shipped and invoiced at once was called delivered as it left. The shopper is e-mailed through the server's mailer: the order with its link and how to pay, that it has shipped when the desk says to tell them (carrier, parcel and link), and money sent back when the refund says so. Before, only events went out, and nothing in a workspace sent them (both found walking an order through the storefront).
