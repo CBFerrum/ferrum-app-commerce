@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { api, errorMessage } from "@ferrum/client";
+import { api, errorMessage, todayIso } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
@@ -15,7 +15,7 @@ import { f, list, soft, useWaiting, workingOrders } from "./data";
 import { Tabs } from "./Tabs";
 import { type DayRow, daysBefore, money, totals } from "./store";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayIso();
 
 function Sales() {
   const end = today();
