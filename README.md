@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.11** | Rebuilt with Ferrum-Frontend 63280d3: right to left, pages mirror; the records pages' words in Arabic and Hindi. |
 | **0.7.10** | Rebuilt with Ferrum-Frontend a64416a: a box whose default is 1 shows ticked; action dialogs say every refusal and ask once. |
 | **0.7.9** | Rebuilt with Ferrum-Frontend a76295e: times on a person's own clock when they chose one. Today is the workspace's day, not UTC's. |
 | **0.7.8** | Domains offers the storefront; a shipped order reads Shipped, not Delivered; the shopper is e-mailed the order, its shipping and refunds. |
