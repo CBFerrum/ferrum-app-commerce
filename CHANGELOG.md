@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.6
+
+Rebuilt with Ferrum-Frontend bb60115: a record page reads an empty number or check as the server does, so an action whose condition needs one shows, and a workspace's settings open as their one record.
+
 ## 0.7.5
 
 A payment request's page asks for what its actions read: Mark Paid needs the amount and currency received and never asked, so from the request's page it always failed (the order page sends them); it now asks, filled with the request's own amount and currency, and takes the currency as the page names it. Mark Failed asks for its reason and reference, and Set Gateway Details for the payment link and reference.
