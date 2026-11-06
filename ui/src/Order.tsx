@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
-import { ApiError, api, docPath, formatDate, relativeTime } from "@ferrum/client";
+import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, PageLoading, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units, withMethods } from "./queues";
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
@@ -527,7 +527,7 @@ function OrderPage({ id }: { id: string }) {
                       <div>
                         <div className="cm-story-line">
                           <strong>{e.title}</strong>
-                          <time className="faint" dateTime={e.at} title={new Date(e.at).toLocaleString()}>
+                          <time className="faint" dateTime={e.at} title={formatDateTime(e.at)}>
                             {relativeTime(e.at)}
                           </time>
                         </div>
