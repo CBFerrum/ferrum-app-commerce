@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it } from "vitest";
+import { todayIso } from "@ferrum/client";
 import { RefundRow } from "./Decisions";
 import { Desk } from "./Desk";
 import { CommerceHome } from "./Home";
@@ -196,7 +197,8 @@ describe("the return and refund dialog", () => {
 
 describe("the home", () => {
   it("puts what needs a decision first, then the day", () => {
-    const day = new Date().toISOString().slice(0, 10);
+    // The page counts today on the workspace's day, so the test does too.
+    const day = todayIso();
     const entity = (name: string, read = "all") => ({ name, label: name, label_plural: name, permissions: perms(read === "all" ? "all" : "none") });
     const qc = client([
       [["meta"], { version: 1, packages: [], modules: [], entities: ["SalesOrder", "WebsiteItem", "PaymentRequest", "ItemReview"].map((n) => entity(n)), warnings: [] }],
