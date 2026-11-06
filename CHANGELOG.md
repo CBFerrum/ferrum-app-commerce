@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.8
+
+Its storefront says it serves pages at the root of a `site:commerce` host, so Ferrum's Domains offers the storefront, and only apps that serve a site (Ferrum PR 85). A shipped order reads "Shipped" to the shopper, not "Delivered": nothing tells the store a parcel arrived, and an order shipped and invoiced at once was called delivered as it left. The shopper is e-mailed through the server's mailer: the order with its link and how to pay, that it has shipped when the desk says to tell them (carrier, parcel and link), and money sent back when the refund says so. Before, only events went out, and nothing in a workspace sent them (both found walking an order through the storefront).
+
 ## 0.7.7
 
 An order's story gives each step's full time on the workspace's clock. Rebuilt with Ferrum-Frontend 24c3951, so its records' pages show times on the workspace's clock too, a draft numbered on submit is headed as a draft, and a record of an app that is not installed says so.

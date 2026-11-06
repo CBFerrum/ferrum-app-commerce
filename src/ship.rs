@@ -144,6 +144,20 @@ impl DocHook for DeliveryHook {
                 "notify": b(doc, "commerce_notify"), "order_link": link, "ship_to": s(&so, "commerce_shipping_address"),
             });
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_shipped", Some("SalesOrder"), Some(so_id), event).await?;
+            if b(doc, "commerce_notify") {
+                let mut lines = vec![format!("Your order {number} has left us.")];
+                match (s(doc, "transporter"), s(doc, "commerce_tracking_number")) {
+                    (Some(c), Some(t)) => lines.push(format!("{c} has it, parcel {t}.")),
+                    (Some(c), None) => lines.push(format!("{c} has it.")),
+                    (None, Some(t)) => lines.push(format!("Its parcel is {t}.")),
+                    (None, None) => {}
+                }
+                if let Some(u) = s(doc, "commerce_tracking_url") {
+                    lines.push(format!("Where the carrier shows it: {u}"));
+                }
+                let to = s(&so, "commerce_contact_email");
+                crate::tell::shopper(hc.kernel, hc.tx, hc.ctx.tenant, to, &format!("Your order {number} has shipped"), &lines, link.as_deref()).await?;
+            }
         }
         Ok(())
     }
