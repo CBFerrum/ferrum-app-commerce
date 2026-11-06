@@ -248,8 +248,9 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     if amount != d(doc, "amount") {
         return Err(Error::invalid(format!("paid amount {} does not match the requested {}", amount.normalize(), d(doc, "amount").normalize())));
     }
-    let paid_currency = param_text(params, "currency", 3)?.ok_or_else(|| Error::field("currency", "the currency paid is required"))?;
-    if !paid_currency.eq_ignore_ascii_case(s(doc, "currency_code").unwrap_or_default()) {
+    // A gateway names the currency by its code; a record page by the currency record it shows.
+    let paid_currency = param_text(params, "currency", 36)?.ok_or_else(|| Error::field("currency", "the currency paid is required"))?;
+    if !paid_currency.eq_ignore_ascii_case(s(doc, "currency_code").unwrap_or_default()) && s(doc, "currency") != Some(paid_currency.as_str()) {
         return Err(Error::invalid(format!("paid currency {paid_currency} does not match the requested {}", s(doc, "currency_code").unwrap_or_default())));
     }
     let sctx = sys(hc.ctx);
