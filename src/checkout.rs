@@ -357,6 +357,10 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         "payment_request": request.as_ref().and_then(|r| s(r, "id")), "order_token": order_token, "order_link": order_link,
     });
     outbox::enqueue(tx, ctx.tenant, "commerce.order_placed", Some("SalesOrder"), Some(so_id), event).await?;
+    let amount = crate::pages::money(&store.currency_code, &d(&so, "rounded_total").to_string(), store.precision);
+    let mut lines = vec![format!("Thank you for your order {number} at {}: {amount}, paid by {}.", store.name, method.label)];
+    lines.extend(method.instructions.clone());
+    crate::tell::shopper(k, tx, ctx.tenant, s(&cart, "email"), &format!("Your order {number} at {}", store.name), &lines, order_link.as_deref()).await?;
     response(k, ctx, tx, &store, so_id).await
 }
 
