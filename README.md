@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.8** | Domains offers the storefront; a shipped order reads Shipped, not Delivered; the shopper is e-mailed the order, its shipping and refunds. |
 | **0.7.7** | Times on the workspace's clock; rebuilt with Ferrum-Frontend 24c3951. |
 | **0.7.6** | Rebuilt with Ferrum-Frontend bb60115: empty numbers read as the server reads them; settings open as their record. |
 | **0.7.5** | A payment request's page asks Mark Paid, Mark Failed and Set Gateway Details for what they read. |

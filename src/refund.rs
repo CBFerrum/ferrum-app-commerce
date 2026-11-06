@@ -761,6 +761,13 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
                 "gateway": s(doc, "gateway"), "email": s(&order, "commerce_contact_email"), "notify": b(doc, "notify_customer"),
             });
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_refunded", Some("SalesOrder"), Some(so), event).await?;
+            if b(doc, "notify_customer") {
+                let number = s(doc, "order_number").unwrap_or_default();
+                let sent = crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), 2);
+                let lines = [format!("{sent} is on its way back to you for order {number}.")];
+                let to = s(&order, "commerce_contact_email");
+                crate::tell::shopper(hc.kernel, hc.tx, hc.ctx.tenant, to, &format!("{sent} refunded for order {number}"), &lines, None).await?;
+            }
         }
         None => {
             let (pr, _) = paid_payment_of(hc, doc).await?;

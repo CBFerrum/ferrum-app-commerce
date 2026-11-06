@@ -536,7 +536,9 @@ function wanted() {
 function orderWords(o) {
   if (o.status === "Cancelled") return "Cancelled";
   if (o.payment_status === "Refunded") return "Refunded";
-  if (o.shipments?.length) return o.status === "Completed" || o.status === "Closed" ? "Delivered" : "Shipped";
+  // Shipped, never "Delivered": nothing tells the store a parcel arrived, and an order shipped and
+  // invoiced at once is Completed the moment it leaves.
+  if (o.shipments?.length) return "Shipped";
   if (["Paid", "Not Required"].includes(o.payment_status) || o.payment_method === "Cash on Delivery") return "Being prepared";
   return "Waiting for payment";
 }

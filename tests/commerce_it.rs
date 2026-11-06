@@ -997,6 +997,15 @@ async fn outstanding(t: &T, item: Uuid) -> Decimal {
     v.expect("an open item")
 }
 
+/// The subjects and bodies of the mails queued to one address, oldest first.
+async fn mails(t: &T, to: &str) -> Vec<(String, String)> {
+    let all = events(t, "ferrum.mail").await;
+    all.iter()
+        .filter(|m| m["to"] == json!(to))
+        .map(|m| (m["subject"].as_str().unwrap_or_default().to_string(), m["html"].as_str().unwrap_or_default().to_string()))
+        .collect()
+}
+
 /// The events a topic put in the outbox, oldest first.
 async fn events(t: &T, topic: &str) -> Vec<Value> {
     let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
@@ -1167,6 +1176,11 @@ async fn refunds() {
 
     let b = place(&t, json!([{"item": "blue-mug", "qty": 2}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "refund-b-0001").await;
     assert_eq!(b.total, n("1121"), "950 of goods and delivery, 171 of VAT");
+    let thanked = mails(&t, GUEST).await;
+    assert!(
+        thanked.iter().any(|(subject, html)| subject.starts_with(&format!("Your order {}", b.number)) && html.contains(&format!("n={}", b.number))),
+        "the shopper is told of the order, with its link: {thanked:?}"
+    );
     assert_eq!(t.get("SalesOrder", b.so).await["commerce_payment_method"], json!("fakepay"), "the order remembers how it is paid");
     pay(&t, &fakepay, b.request.unwrap(), b.total, "pi_b").await;
     assert_eq!(t.get("SalesOrder", b.so).await["commerce_payment_status"], json!("Paid"));
@@ -1200,6 +1214,9 @@ async fn refunds() {
     let mine = told.iter().find(|e| e["number"] == json!(b.number)).expect("the shipment is announced");
     assert_eq!((mine["tracking_number"].clone(), mine["notify"].clone()), (json!("BD123"), json!(true)));
     assert_eq!(mine["order_link"], json!(format!("https://shop.example.com/order#n={}&t={}", b.number, b.token)), "the link a mailer sends");
+    let sent = mails(&t, GUEST).await;
+    let shipped_mail = sent.iter().find(|(subject, _)| *subject == format!("Your order {} has shipped", b.number)).expect("the shopper is told it has shipped");
+    assert!(shipped_mail.1.contains("BlueDart has it, parcel BD123") && shipped_mail.1.contains(&format!("t={}", b.token)), "{shipped_mail:?}");
 
     // ───────────── a shopper follows the order from a link, with no sign-in ─────────────
     let tracked = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
@@ -1346,6 +1363,8 @@ async fn refunds() {
     );
     let told = events(&t, "commerce.order_refunded").await;
     assert_eq!((told[0]["amount"].clone(), told[0]["email"].clone(), told[0]["notify"].clone()), (json!("354"), json!(GUEST), json!(true)));
+    let refund_mails = |all: Vec<(String, String)>| all.into_iter().filter(|(subject, _)| subject.contains("refunded for order")).count();
+    assert_eq!(refund_mails(mails(&t, GUEST).await), 1, "the shopper is told the money is on its way back");
     let seen = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
     assert_eq!(
         (seen["order"]["refunds"][0]["status"].clone(), dec(&seen["order"]["refunds"][0]["amount"])),
@@ -1459,6 +1478,7 @@ async fn refunds() {
     );
     assert_eq!(t.available("logo-tee").await, n("4"), "the tee is back (it went out with the order, and came back)");
     assert_eq!(events(&t, "commerce.order_refunded").await.last().unwrap()["notify"], json!(false), "the shopper was not to be told");
+    assert_eq!(refund_mails(mails(&t, "meera@example.com").await), 0, "and is not mailed");
 }
 
 // ───────────────────────────── variants: sizes and colours ─────────────────────────────

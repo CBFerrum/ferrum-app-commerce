@@ -389,6 +389,11 @@ async fn pay(k: &Kernel, r: &Req<'_>, body: &Map<String, Value>, own: Option<&st
 
 #[async_trait]
 impl Site for Storefront {
+    /// The storefront's pages at the root of its `site:commerce` host, so a domain can be given to it.
+    fn serves_pages(&self) -> bool {
+        true
+    }
+
     async fn handle(&self, k: &Kernel, req: SiteRequest) -> Result<SiteResponse> {
         let schema = match &req.user {
             Some(u) => u.schema.clone(),
