@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.6** | Rebuilt with Ferrum-Frontend bb60115: empty numbers read as the server reads them; settings open as their record. |
 | **0.7.5** | A payment request's page asks Mark Paid, Mark Failed and Set Gateway Details for what they read. |
 | **0.7.4** | Rebuilt with Ferrum-Frontend 00dea07: a workflow state's kept fields are read-only, its needed ones required. |
 | **0.7.3** | Personal-data requests find shopping cart records by the person's phone number as well as their email (Ferrum's FERRUM-PRIVACY-002). |
