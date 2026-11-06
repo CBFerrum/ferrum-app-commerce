@@ -837,7 +837,17 @@ async fn scenario() {
     let plugin_cod =
         t.k.run_action(&fakepay, "PaymentRequest", pr_cod, "mark_paid", json!({"amount": retry["payment_request"]["amount"], "currency": "INR"})).await;
     assert!(matches!(plugin_cod, Err(Error::Forbidden(_))), "plugins never settle cash on delivery");
-    t.k.run_action(&t.ctx, "PaymentRequest", pr_cod, "mark_paid", json!({"amount": retry["payment_request"]["amount"], "currency": "INR"}))
+    // From the request's page: the dialog asks for what Mark Paid reads, its currency the request's
+    // own currency record.
+    let asks = |name: &str| -> Vec<String> {
+        let actions = &t.ctx.schema.entity("PaymentRequest").unwrap().def.actions;
+        actions.iter().find(|a| a.name == name).unwrap().params.iter().map(|p| p.name.clone()).collect()
+    };
+    assert_eq!(asks("mark_paid"), ["amount", "currency", "gateway_reference"]);
+    assert_eq!(asks("mark_failed"), ["reason", "gateway_reference"]);
+    assert_eq!(asks("set_gateway_details"), ["payment_url", "gateway_reference"]);
+    let cod_currency = t.get("PaymentRequest", pr_cod).await["currency"].clone();
+    t.k.run_action(&t.ctx, "PaymentRequest", pr_cod, "mark_paid", json!({"amount": retry["payment_request"]["amount"], "currency": cod_currency}))
         .await
         .expect("cash");
     assert_eq!(t.get("SalesOrder", uid(&so_f)).await["commerce_payment_status"], json!("Paid"));

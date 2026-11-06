@@ -34,9 +34,29 @@
   rules:
     - {name: pays_something, check: "doc.sales_order != null || doc.sales_invoice != null", message: "A payment request pays an order or an invoice"}
   actions:
-    - {name: set_gateway_details, label: Set Gateway Details, docstatus: [1], permission: write}
-    - {name: mark_paid, label: Mark Paid, docstatus: [1], permission: write, confirm: "Record the payment of this request and book it?"}
-    - {name: mark_failed, label: Mark Failed, docstatus: [1], permission: write}
+    - name: set_gateway_details
+      label: Set Gateway Details
+      docstatus: [1]
+      permission: write
+      params:
+        - {name: payment_url, type: data, label: Payment Link, description: "Where the payer pays: an https:// address"}
+        - {name: gateway_reference, type: data, label: Gateway Reference}
+    - name: mark_paid
+      label: Mark Paid
+      docstatus: [1]
+      permission: write
+      confirm: "Record the payment of this request and book it?"
+      params:
+        - {name: amount, type: data, label: Amount Received, required: true, description: "The amount requested: another amount is refunded, not booked"}
+        - {name: currency, type: link, to: Currency, label: Currency, required: true}
+        - {name: gateway_reference, type: data, label: Gateway Reference, description: "The payment's reference at the gateway or bank"}
+    - name: mark_failed
+      label: Mark Failed
+      docstatus: [1]
+      permission: write
+      params:
+        - {name: reason, type: text, label: Reason}
+        - {name: gateway_reference, type: data, label: Gateway Reference}
     - {name: report_exception, label: Report Exception, docstatus: [1, 2], permission: write, hidden: true}
   list: {columns: [number, order_number, gateway, amount, status], sort: created_at desc}
 

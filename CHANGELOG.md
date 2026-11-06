@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5
+
+A payment request's page asks for what its actions read: Mark Paid needs the amount and currency received and never asked, so from the request's page it always failed (the order page sends them); it now asks, filled with the request's own amount and currency, and takes the currency as the page names it. Mark Failed asks for its reason and reference, and Set Gateway Details for the payment link and reference.
+
 ## 0.7.4
 
 Rebuilt with Ferrum-Frontend 00dea07: in a workflow state that names what may change, the other fields show read-only, and the fields the state needs show required.

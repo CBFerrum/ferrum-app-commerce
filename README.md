@@ -5,7 +5,7 @@
   <img alt="Ferrum Commerce" src="docs/assets/banner-light.svg" width="100%">
 </picture>
 
-[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.5.0-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.1%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
+[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.7.5-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.1%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
 
 **A native app for [Ferrum](https://github.com/CBFerrum/Ferrum), the open-source, AI-first business platform.**
 
@@ -25,7 +25,7 @@ plugins mark payment requests paid, which books an advance applied when the orde
 
 | At a glance | |
 |---|---|
-| 📦 Version | `0.5.0` |
+| 📦 Version | `0.7.5` |
 | 🧱 Platform | Ferrum `>=0.3.1, <0.4` |
 | 🔗 Requires | erp `>=0.1` |
 | 🖥️ Interface | its own, at `/commerce/` |
@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.5** | A payment request's page asks Mark Paid, Mark Failed and Set Gateway Details for what they read. |
 | **0.7.4** | Rebuilt with Ferrum-Frontend 00dea07: a workflow state's kept fields are read-only, its needed ones required. |
 | **0.7.3** | Personal-data requests find shopping cart records by the person's phone number as well as their email (Ferrum's FERRUM-PRIVACY-002). |
 | **0.7.2** | Rebuilt with Ferrum-Frontend daeadda: actions say what they did. |
