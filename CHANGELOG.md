@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.15
+
+The assistant knows what its records mean in its pages (contributes.shell.assistant): their states, what counts and where figures come from, with questions it suggests asking there.
+
 ## 0.7.14
 
 Rebuilt with Ferrum-Frontend 5b22e7b: its own words carry built-in Arabic and Hindi (276 words each, ui/src/locales, translated by the model and to be reviewed by native speakers), fetched for the page's language only. The labels it keeps in objects, its dialogs, its page titles and the words it keeps in variables go through t() as well, and the names and sizes it shows as they are keep their order right to left. Its pages are drawn once their words are in, and its entry carries only the parts of the kit it uses.
