@@ -1,6 +1,6 @@
 id: commerce
 name: Commerce
-version: 0.7.14
+version: 0.7.15
 publisher: cbferrum
 summary: "Online store: catalog with variants, carts, coupons, shipping, guest and portal checkout, a web-order desk, refunds and returns, order tracking, payment requests for gateway plugins"
 description: README.md
@@ -31,3 +31,18 @@ contributes:
   shell.create:
     - {id: website_item, label: Store item, path: commerce/e/WebsiteItem/new, entity: WebsiteItem}
     - {id: coupon, label: Coupon, path: commerce/e/CouponCode/new, entity: CouponCode}
+  # What the assistant should know in Commerce's pages, and what it suggests asking there.
+  shell.assistant:
+    - id: store
+      title: "Commerce"
+      instructions: >-
+        A web order is an ERP Sales Order placed from a ShoppingCart (Open, Abandoned, Ordered, Expired), in the
+        store's currency. Its payment is a PaymentRequest (Initiated, Paid, Failed, Cancelled, Expired); a payment the
+        gateway took but could not book is a PaymentException to resolve. Refunds are OrderRefund: Requested,
+        Approved, Refunded, Refund Failed or Declined. A WebsiteItem is what the store shows of an ERP item; an
+        ItemReview waits as Pending until it is approved.
+      suggestions:
+        - "How many web orders did we take this week?"
+        - "Which carts were abandoned today?"
+        - "Are there payments that need attention?"
+        - "Which refunds are still waiting?"
