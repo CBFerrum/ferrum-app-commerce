@@ -3,7 +3,7 @@
 // (mark its payment received, invoice it) with the words they ask for confirmation in.
 
 import { useQuery } from "@tanstack/react-query";
-import { ApiError, api, docPath, errorMessage } from "@ferrum/client";
+import { ApiError, api, docPath, errorMessage, t } from "@ferrum/client";
 import { confirmDialog, toast } from "@ferrum/kit";
 import { can, useEntityMeta, useMe } from "@ferrum/records";
 import { amountText, type Order, withMethods } from "./queues";
@@ -108,17 +108,17 @@ export async function markPaid(order: { id: string; number?: string | null }): P
     const found = await list<Request>("PaymentRequest", { filters: f([["sales_order", "=", order.id], ["status", "in", ["Initiated", "Failed"]]]), fields: "amount,currency_code,gateway", sort: "created_at desc", limit: 1 });
     const request = found.rows[0];
     if (!request) {
-      toast("There is no open payment request on this order.", "error");
+      toast(t("There is no open payment request on this order."), "error");
       return false;
     }
     const ok = await confirmDialog({
-      title: `Mark ${order.number ?? "this order"} as paid?`,
-      message: `${amountText(request.amount, request.currency_code)} received${request.gateway ? ` by ${request.gateway}` : ""}. The payment goes into the books.`,
-      confirmLabel: "Mark paid",
+      title: t("Mark {value} as paid?", { value: order.number ?? "this order" }),
+      message: t("{value} received{value2}. The payment goes into the books.", { value: amountText(request.amount, request.currency_code), value2: request.gateway ? ` by ${request.gateway}` : "" }),
+      confirmLabel: t("Mark paid"),
     });
     if (!ok) return false;
     await api.post(docPath("PaymentRequest", request.id, "actions", "mark_paid"), { amount: request.amount, currency: request.currency_code });
-    toast("Payment recorded");
+    toast(t("Payment recorded"));
     return true;
   } catch (e) {
     toast(errorMessage(e), "error");
@@ -128,11 +128,11 @@ export async function markPaid(order: { id: string; number?: string | null }): P
 
 /** Invoices a delivered order, after asking. */
 export async function invoiceOrder(order: { id: string; number?: string | null }): Promise<boolean> {
-  const ok = await confirmDialog({ title: `Invoice ${order.number ?? "this order"}?`, message: "The invoice is made and posted. A payment already received is applied to it.", confirmLabel: "Create invoice" });
+  const ok = await confirmDialog({ title: t("Invoice {value}?", { value: order.number ?? "this order" }), message: t("The invoice is made and posted. A payment already received is applied to it."), confirmLabel: t("Create invoice") });
   if (!ok) return false;
   try {
     await api.post(docPath("SalesOrder", order.id, "actions", "web_invoice"), {});
-    toast("Invoice created");
+    toast(t("Invoice created"));
     return true;
   } catch (e) {
     toast(errorMessage(e), "error");
@@ -144,9 +144,9 @@ export async function invoiceOrder(order: { id: string; number?: string | null }
 export async function copy(text: string, what: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`${what} copied`);
+    toast(t("{what} copied", { what }));
   } catch {
-    toast(`Your browser would not copy ${what.toLowerCase()}. Select it and copy it by hand.`, "error");
+    toast(t("Your browser would not copy {what}. Select it and copy it by hand.", { what: what.toLowerCase() }), "error");
   }
 }
 

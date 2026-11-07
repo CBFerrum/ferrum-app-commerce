@@ -6,7 +6,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { api, docPath, t } from "@ferrum/client";
+import { api, docPath, t, isolate } from "@ferrum/client";
 import { Badge, Button, EmptyState, ErrorState, Icon, Spinner, statusTone, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, counts, nextStep, type Order, type PickOrder, pickList, queue, STAGES, type Stage, stage, statusWords, units, waitedDays } from "./queues";
 import { f, invoiceOrder, list, markPaid, ORDER_FIELDS, useRights, WEB, workingOrders } from "./data";
@@ -35,36 +35,36 @@ function Row({ o, onShip, onPaid, onInvoiced, busy }: { o: Order; onShip: (o: Or
     ) : next.step === "invoice" ? (
       rights.ships ? (
         <Button variant="primary" size="sm" icon="doc" loading={busy} onClick={() => onInvoiced(o)}>
-          {next.label}
+          {isolate(next.label)}
         </Button>
       ) : null
     ) : next.step === "mark_paid" ? (
       rights.takesPayment ? (
         <Button variant="primary" size="sm" icon="check" loading={busy} onClick={() => onPaid(o)}>
-          {next.label}
+          {isolate(next.label)}
         </Button>
       ) : null
     ) : null;
   const cannot =
-    !rights.ready ? null : (next.step === "ship" || next.step === "invoice") && !rights.ships ? "A sales user ships and invoices this." : next.step === "mark_paid" && !rights.takesPayment ? "Someone who takes payments marks this paid." : null;
+    !rights.ready ? null : (next.step === "ship" || next.step === "invoice") && !rights.ships ? t("A sales user ships and invoices this.") : next.step === "mark_paid" && !rights.takesPayment ? t("Someone who takes payments marks this paid.") : null;
   return (
     <li className="cm-order">
       <div className="cm-order-main">
         <div className="cm-order-line">
           <Link className="cm-order-no" to={`/o/${o.id}`}>
-            {o.number}
+            {isolate(o.number ?? "")}
           </Link>
-          <span className="cm-order-who">{o.customer_name}</span>
+          <span className="cm-order-who">{isolate(o.customer_name ?? "")}</span>
         </div>
         <div className="cm-order-why">{cannot ?? next.why}</div>
         <div className="cm-order-badges">
-          <span className={late ? "cm-late" : "faint"}>{late ? `Waiting since ${waitText(o)}` : `Placed ${waitText(o)}`}</span>
-          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{o.commerce_payment_status}</Badge>}
-          {stage(o) !== "done" && <Badge tone="neutral">{statusWords(o)}</Badge>}
+          <span className={late ? "cm-late" : "faint"}>{late ? t("Waiting since {o}", { o: waitText(o) }) : t("Placed {o}", { o: waitText(o) })}</span>
+          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{isolate(o.commerce_payment_status)}</Badge>}
+          {stage(o) !== "done" && <Badge tone="neutral">{isolate(statusWords(o))}</Badge>}
         </div>
       </div>
       <div className="cm-order-side">
-        <strong className="cm-order-total">{amountText(o.rounded_total, currency(o))}</strong>
+        <strong className="cm-order-total">{isolate(amountText(o.rounded_total, currency(o)))}</strong>
         {act}
       </div>
     </li>
@@ -100,8 +100,8 @@ function PickList({ orders }: { orders: Order[] }) {
     <section className="cm-pick" aria-label={t("Pick list")}>
       <div className="cm-pick-head">
         <p className="muted">
-          {picks.length} {picks.length === 1 ? "item" : "items"} for {orders.length} {orders.length === 1 ? "order" : "orders"}
-          {orders.length > ids.length ? ` (the first ${ids.length})` : ""}.
+          {picks.length} {picks.length === 1 ? t("item") : t("items")} {t("for {length}", { length: orders.length })} {orders.length === 1 ? t("order") : t("orders")}
+          {orders.length > ids.length ? t(" (the first {length})", { length: ids.length }) : ""}.
         </p>
         <Button icon="printer" onClick={() => window.print()}>
           {t("Print")}
@@ -120,12 +120,12 @@ function PickList({ orders }: { orders: Order[] }) {
           <tbody>
             {picks.map((p) => (
               <tr key={p.key}>
-                <td data-label="Item">{p.item}</td>
+                <td data-label="Item">{isolate(p.item)}</td>
                 <td data-label="Shelf">{p.warehouse || "—"}</td>
                 <td className="num" data-label="Take">
-                  <strong>{units(p.qty)}</strong>
+                  <strong>{isolate(units(p.qty))}</strong>
                 </td>
-                <td data-label="For">{p.orders.join(", ")}</td>
+                <td data-label="For">{isolate(p.orders.join(", "))}</td>
               </tr>
             ))}
           </tbody>
@@ -151,7 +151,7 @@ function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string
   });
   if (q.error) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
   if (!q.data) return <Spinner label={t("Loading finished orders")} />;
-  if (!q.data.rows.length) return <EmptyState title={search ? "No finished order matches" : NOTHING.done[0]} icon="file">{search ? "Try another number or name." : NOTHING.done[1]}</EmptyState>;
+  if (!q.data.rows.length) return <EmptyState title={search ? t("No finished order matches") : NOTHING.done[0]} icon="file">{search ? t("Try another number or name.") : NOTHING.done[1]}</EmptyState>;
   return (
     <>
       <ul className="cm-orders">
@@ -171,7 +171,7 @@ function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string
 }
 
 export function Desk() {
-  useShellTitle("Orders");
+  useShellTitle(t("Orders"));
   const qc = useQueryClient();
   const [sp, setSp] = useSearchParams();
   const which = (STAGES.find((s) => s.id === sp.get("stage"))?.id ?? "ship") as Stage;
@@ -220,14 +220,14 @@ export function Desk() {
     </ul>
   ) : search ? (
     <EmptyState title={t("No order matches")} icon="search">
-      {t("Nothing in this queue matches “{search}”.", { search })}{" "}
+      {t("Nothing in this queue matches “{search}”.", { search })}{isolate(" ")}
       <button type="button" className="link-btn" onClick={() => set({ q: null })}>
         {t("Clear the search")}
       </button>
     </EmptyState>
   ) : (
     <EmptyState title={NOTHING[which][0]} icon="check">
-      {NOTHING[which][1]}
+      {isolate(NOTHING[which][1])}
     </EmptyState>
   );
 
@@ -237,7 +237,7 @@ export function Desk() {
         <div>
           <Tabs />
           <p className="page-sub" aria-live="polite">
-            {q.data ? `${tally.pay + tally.ship + tally.invoice} open ${tally.pay + tally.ship + tally.invoice === 1 ? "order" : "orders"}${q.data.length >= 200 ? " (the oldest 200)" : ""}` : " "}
+            {q.data ? t("{value} open {value2}{value3}", { value: tally.pay + tally.ship + tally.invoice, value2: tally.pay + tally.ship + tally.invoice === 1 ? "order" : "orders", value3: q.data.length >= 200 ? " (the oldest 200)" : "" }) : " "}
           </p>
         </div>
         <div className="cm-tools">
@@ -256,7 +256,7 @@ export function Desk() {
         <div className="cm-stages" role="tablist" aria-label={t("Queues")}>
           {STAGES.map((s) => (
             <button key={s.id} type="button" role="tab" aria-selected={which === s.id} title={s.hint} onClick={() => set({ stage: s.id === "ship" ? null : s.id })}>
-              {s.label}
+              {isolate(s.label)}
               {s.id !== "done" && q.data && <span className="cm-stage-n">{tally[s.id]}</span>}
             </button>
           ))}

@@ -1,3 +1,4 @@
+import { t as tr } from "@ferrum/client";
 // One order's story: when it was placed, what was asked of the shopper's payment and what came of it,
 // what shipped and was invoiced, what was sent back, and what the audit trail says about the order
 // itself, newest first, from the records that hold each. Old entries fold. Pure, so it is tested
@@ -107,20 +108,20 @@ const when = (at?: string | null, fallback?: string | null) => {
 export function timeline(i: Input, say: Say): Entry[] {
   const out: Entry[] = [];
   const add = (e: Entry) => e.at && out.push(e);
-  add({ key: "order", at: when(i.order.created_at, i.order.posting_date), kind: "order", title: "Order placed", detail: [i.order.customer_name, i.order.rounded_total != null ? say.money(i.order.rounded_total, i.order.currency_code) : null].filter(Boolean).join(" · ") });
+  add({ key: "order", at: when(i.order.created_at, i.order.posting_date), kind: "order", title: tr("Order placed"), detail: [i.order.customer_name, i.order.rounded_total != null ? say.money(i.order.rounded_total, i.order.currency_code) : null].filter(Boolean).join(" · ") });
   for (const p of i.payments) {
     const how = say.gateway(p.gateway);
-    add({ key: `p-${p.id}-ask`, at: when(p.created_at), kind: "payment", title: `Payment of ${say.money(p.amount, p.currency_code)} asked via ${how}` });
-    if (p.paid_at) add({ key: `p-${p.id}-paid`, at: when(p.paid_at), kind: "payment", title: `Paid via ${how}`, detail: p.gateway_reference });
-    else if (p.status === "Failed") add({ key: `p-${p.id}-end`, at: when(p.updated_at, p.created_at), kind: "payment", title: "Payment failed", detail: p.failure_reason });
-    else if (p.status === "Expired") add({ key: `p-${p.id}-end`, at: when(p.expires_at, p.updated_at), kind: "payment", title: "Payment ran out of time" });
-    else if (p.status === "Cancelled") add({ key: `p-${p.id}-end`, at: when(p.updated_at, p.created_at), kind: "payment", title: "Payment request cancelled" });
+    add({ key: `p-${p.id}-ask`, at: when(p.created_at), kind: "payment", title: tr("Payment of {say} asked via {how}", { say: say.money(p.amount, p.currency_code), how }) });
+    if (p.paid_at) add({ key: `p-${p.id}-paid`, at: when(p.paid_at), kind: "payment", title: tr("Paid via {how}", { how }), detail: p.gateway_reference });
+    else if (p.status === "Failed") add({ key: `p-${p.id}-end`, at: when(p.updated_at, p.created_at), kind: "payment", title: tr("Payment failed"), detail: p.failure_reason });
+    else if (p.status === "Expired") add({ key: `p-${p.id}-end`, at: when(p.expires_at, p.updated_at), kind: "payment", title: tr("Payment ran out of time") });
+    else if (p.status === "Cancelled") add({ key: `p-${p.id}-end`, at: when(p.updated_at, p.created_at), kind: "payment", title: tr("Payment request cancelled") });
   }
   for (const n of i.deliveries) {
     add(
       n.is_return
-        ? { key: `n-${n.id}`, at: when(n.created_at, n.posting_date), kind: "delivery", title: "Goods back in stock", detail: n.number }
-        : { key: `n-${n.id}`, at: when(n.created_at, n.posting_date), kind: "delivery", title: "Shipped", detail: [n.transporter, n.commerce_tracking_number].filter(Boolean).join(" · ") || n.number, to: n.commerce_tracking_url },
+        ? { key: `n-${n.id}`, at: when(n.created_at, n.posting_date), kind: "delivery", title: tr("Goods back in stock"), detail: n.number }
+        : { key: `n-${n.id}`, at: when(n.created_at, n.posting_date), kind: "delivery", title: tr("Shipped"), detail: [n.transporter, n.commerce_tracking_number].filter(Boolean).join(" · ") || n.number, to: n.commerce_tracking_url },
     );
   }
   for (const v of i.invoices) {
@@ -128,18 +129,18 @@ export function timeline(i: Input, say: Say): Entry[] {
   }
   for (const r of i.refunds) {
     const sum = say.money(r.amount, r.currency_code);
-    add({ key: `r-${r.id}-ask`, at: when(r.created_at), kind: "refund", title: `Refund of ${sum} asked for${r.kind === "Cancellation" ? " (order cancelled)" : ""}`, who: r.requested_by });
-    if (r.approved_at) add({ key: `r-${r.id}-ok`, at: when(r.approved_at), kind: "refund", title: "Refund approved", who: r.approved_by });
-    if (r.refunded_at) add({ key: `r-${r.id}-sent`, at: when(r.refunded_at), kind: "refund", title: `${sum} sent back` });
-    else if (r.status === "Refund Failed") add({ key: `r-${r.id}-end`, at: when(r.updated_at, r.approved_at), kind: "refund", title: "The gateway could not send the refund", detail: r.refund_error });
-    else if (r.status === "Declined") add({ key: `r-${r.id}-end`, at: when(r.updated_at, r.created_at), kind: "refund", title: "Refund declined", detail: r.decision_note });
+    add({ key: `r-${r.id}-ask`, at: when(r.created_at), kind: "refund", title: tr("Refund of {sum} asked for{value}", { sum, value: r.kind === "Cancellation" ? " (order cancelled)" : "" }), who: r.requested_by });
+    if (r.approved_at) add({ key: `r-${r.id}-ok`, at: when(r.approved_at), kind: "refund", title: tr("Refund approved"), who: r.approved_by });
+    if (r.refunded_at) add({ key: `r-${r.id}-sent`, at: when(r.refunded_at), kind: "refund", title: tr("{sum} sent back", { sum }) });
+    else if (r.status === "Refund Failed") add({ key: `r-${r.id}-end`, at: when(r.updated_at, r.approved_at), kind: "refund", title: tr("The gateway could not send the refund"), detail: r.refund_error });
+    else if (r.status === "Declined") add({ key: `r-${r.id}-end`, at: when(r.updated_at, r.created_at), kind: "refund", title: tr("Refund declined"), detail: r.decision_note });
   }
   for (const x of i.exceptions) {
-    add({ key: `x-${x.id}`, at: when(x.created_at), kind: "exception", title: `${say.money(x.amount, x.currency_code)} reached ${say.gateway(x.gateway)} and could not be booked`, detail: x.reason });
+    add({ key: `x-${x.id}`, at: when(x.created_at), kind: "exception", title: tr("{say} reached {say2} and could not be booked", { say: say.money(x.amount, x.currency_code), say2: say.gateway(x.gateway) }), detail: x.reason });
   }
   for (const e of i.audit) {
-    if (e.action === "cancel") add({ key: `e-${e.id ?? e.at}`, at: when(e.at), kind: "change", title: "Order cancelled", who: e.actor_name ?? e.actor });
-    else if (e.action === "action:close") add({ key: `e-${e.id ?? e.at}`, at: when(e.at), kind: "change", title: "Order closed", who: e.actor_name ?? e.actor });
+    if (e.action === "cancel") add({ key: `e-${e.id ?? e.at}`, at: when(e.at), kind: "change", title: tr("Order cancelled"), who: e.actor_name ?? e.actor });
+    else if (e.action === "action:close") add({ key: `e-${e.id ?? e.at}`, at: when(e.at), kind: "change", title: tr("Order closed"), who: e.actor_name ?? e.actor });
   }
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }

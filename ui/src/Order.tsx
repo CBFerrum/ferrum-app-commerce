@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
-import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime, t as tr } from "@ferrum/client";
+import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime, t as tr, isolate } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, PageLoading, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units, withMethods } from "./queues";
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
@@ -86,7 +86,7 @@ function Section({ id, title, children, action }: { id: string; title: string; c
   return (
     <section className="card" aria-labelledby={id}>
       <div className="card-head">
-        <h2 id={id}>{title}</h2>
+        <h2 id={id}>{isolate(title)}</h2>
         <span className="spacer" />
         {action}
       </div>
@@ -118,18 +118,18 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
           const sent = Number(l.delivered_qty ?? 0);
           return (
             <tr key={l.id}>
-              <td data-label="Item">{l.item_name}</td>
+              <td data-label="Item">{isolate(l.item_name ?? "")}</td>
               <td className="num" data-label="Qty">
-                {units(qty)}
+                {isolate(units(qty))}
               </td>
               <td className="num" data-label="Price">
-                {say(l.rate)}
+                {isolate(say(l.rate))}
               </td>
               <td className="num" data-label="Amount">
-                {say(l.amount)}
+                {isolate(say(l.amount))}
               </td>
               <td data-label="Sent">
-                {sent >= qty ? <Badge tone="green">{tr("Sent")}</Badge> : held ? <Badge tone="neutral" title={tr("This order holds these in the warehouse until they are sent")}>{sent > 0 ? `${units(sent)} of ${units(qty)} sent` : "In stock for this order"}</Badge> : <span className="faint">{sent > 0 ? `${units(sent)} of ${units(qty)}` : "Not sent"}</span>}
+                {sent >= qty ? <Badge tone="green">{tr("Sent")}</Badge> : held ? <Badge tone="neutral" title={tr("This order holds these in the warehouse until they are sent")}>{sent > 0 ? tr("{sent} of {qty} sent", { sent: units(sent), qty: units(qty) }) : tr("In stock for this order")}</Badge> : <span className="faint">{sent > 0 ? tr("{sent} of {qty}", { sent: units(sent), qty: units(qty) }) : tr("Not sent")}</span>}
               </td>
             </tr>
           );
@@ -141,7 +141,7 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
             <td colSpan={3} data-label="">
               {tr("Items")}
             </td>
-            <td className="num">{say(o.total)}</td>
+            <td className="num">{isolate(say(o.total))}</td>
             <td />
           </tr>
         )}
@@ -149,14 +149,14 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
           .filter((t) => Number(t.tax_amount ?? 0) !== 0)
           .map((t, i) => (
             <tr key={i}>
-              <td colSpan={3}>{t.description ?? "Tax"}</td>
-              <td className="num">{say(t.deduct ? -Number(t.tax_amount) : t.tax_amount)}</td>
+              <td colSpan={3}>{t.description ?? tr("Tax")}</td>
+              <td className="num">{isolate(say(t.deduct ? -Number(t.tax_amount) : t.tax_amount))}</td>
               <td />
             </tr>
           ))}
         <tr className="bold">
           <td colSpan={3}>{tr("Total")}</td>
-          <td className="num">{say(o.rounded_total ?? o.grand_total)}</td>
+          <td className="num">{isolate(say(o.rounded_total ?? o.grand_total))}</td>
           <td />
         </tr>
       </tfoot>
@@ -170,23 +170,23 @@ function Payment({ p, order, mayAsk, mayTake, onPaid, onRefund }: { p: Request; 
   return (
     <li className="cm-payment" data-status={p.status}>
       <div className="cm-payment-head">
-        <strong>{sum(p.amount)}</strong>
-        <span>via {isOffline(p.gateway) ? p.gateway : gateway}</span>
-        <Badge tone={statusTone(p.status)}>{p.status}</Badge>
+        <strong>{isolate(sum(p.amount))}</strong>
+        <span>{tr("via")} {isOffline(p.gateway) ? p.gateway : gateway}</span>
+        <Badge tone={statusTone(p.status)}>{isolate(p.status ?? "")}</Badge>
       </div>
       <p className="faint cm-payment-line">
-        {p.status === "Paid" && p.paid_at ? `Paid ${relativeTime(p.paid_at)}` : p.status === "Initiated" ? (p.expires_at ? `Open until ${relativeTime(p.expires_at)}` : "Open until it is paid") : p.status === "Expired" ? "Ran out of time" : p.status === "Failed" ? p.failure_reason ?? "The payment failed" : "Cancelled"}
+        {p.status === "Paid" && p.paid_at ? tr("Paid {value}", { value: relativeTime(p.paid_at) }) : p.status === "Initiated" ? (p.expires_at ? tr("Open until {value}", { value: relativeTime(p.expires_at) }) : tr("Open until it is paid")) : p.status === "Expired" ? tr("Ran out of time") : p.status === "Failed" ? p.failure_reason ?? tr("The payment failed") : tr("Cancelled")}
         {p.gateway_reference && (
           <>
-            {" · "}
-            <code className="mono">{p.gateway_reference}</code>{" "}
+            {isolate(" · ")}
+            <code className="mono">{isolate(p.gateway_reference)}</code>{isolate(" ")}
             <button type="button" className="icon-btn icon-btn-sm" aria-label={tr("Copy payment reference")} title={tr("Copy payment reference")} onClick={() => void copy(p.gateway_reference ?? "", "Payment reference")}>
               <Icon name="copy" size={13} />
             </button>
           </>
         )}
       </p>
-      {Number(p.refunded_amount ?? 0) > 0 && <p className="cm-payment-line">{sum(p.refunded_amount)} {tr("sent back so far.")}</p>}
+      {Number(p.refunded_amount ?? 0) > 0 && <p className="cm-payment-line">{isolate(sum(p.refunded_amount))} {tr("sent back so far.")}</p>}
       <div className="row">
         {p.status === "Initiated" && p.payment_url && (
           <Button size="sm" icon="copy" onClick={() => void copy(p.payment_url ?? "", "Payment link")}>
@@ -226,7 +226,7 @@ function OrderPage({ id }: { id: string }) {
   useLiveEntity("SalesInvoice", refresh);
   useLiveEntity("PaymentException", refresh);
   const o = order.data;
-  useShellTitle(o?.number ? `Order ${o.number}` : null);
+  useShellTitle(o?.number ? tr("Order {number}", { number: o.number }) : null);
 
   if (order.error) return <ErrorState error={order.error} onRetry={() => void order.refetch()} />;
   if (!o) return <PageLoading label={tr("Loading the order")} />;
@@ -246,10 +246,10 @@ function OrderPage({ id }: { id: string }) {
   const delivered = Number(o.per_delivered ?? 0) >= 100;
   const billed = Number(o.per_billed ?? 0) >= 100;
   const steps = [
-    { id: "placed", label: "Placed", done: true },
-    { id: "paid", label: o.commerce_payment_status === "Not Required" ? "Nothing to pay" : "Paid", done: isPaid(o) },
-    { id: "sent", label: "Shipped", done: delivered },
-    { id: "invoiced", label: "Invoiced", done: billed },
+    { id: "placed", label: tr("Placed"), done: true },
+    { id: "paid", label: o.commerce_payment_status === "Not Required" ? tr("Nothing to pay") : tr("Paid"), done: isPaid(o) },
+    { id: "sent", label: tr("Shipped"), done: delivered },
+    { id: "invoiced", label: tr("Invoiced"), done: billed },
   ];
   const current = steps.findIndex((s) => !s.done);
   const done = async (job: () => Promise<boolean>) => {
@@ -267,11 +267,11 @@ function OrderPage({ id }: { id: string }) {
       </Button>
     ) : next.step === "invoice" && rights.ships ? (
       <Button variant="primary" icon="doc" loading={busy} onClick={() => void done(() => invoiceOrder(o))}>
-        {next.label}
+        {isolate(next.label)}
       </Button>
     ) : next.step === "mark_paid" && rights.takesPayment ? (
       <Button variant="primary" icon="check" loading={busy} onClick={() => void done(() => markPaid(o))}>
-        {next.label}
+        {isolate(next.label)}
       </Button>
     ) : null;
   const story = more.data
@@ -299,12 +299,12 @@ function OrderPage({ id }: { id: string }) {
       </div>
       <header className="cm-order-top">
         <div className="cm-order-title">
-          <h1 className="page-title">{o.number}</h1>
-          <p className="page-sub">{[o.customer_name, o.posting_date ? formatDate(o.posting_date) : null, say(o.rounded_total)].filter(Boolean).join(" · ")}</p>
+          <h1 className="page-title">{isolate(o.number ?? "")}</h1>
+          <p className="page-sub">{isolate([o.customer_name, o.posting_date ? formatDate(o.posting_date) : null, say(o.rounded_total)].filter(Boolean).join(" · "))}</p>
         </div>
         <div className="page-actions">
-          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{o.commerce_payment_status}</Badge>}
-          <Badge tone={statusTone(statusWords(o))}>{statusWords(o)}</Badge>
+          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{isolate(o.commerce_payment_status)}</Badge>}
+          <Badge tone={statusTone(statusWords(o))}>{isolate(statusWords(o))}</Badge>
           {primary}
           {paidRequest && rights.asks && !cancelled && (
             <Button icon="refresh" onClick={() => setRefunding(true)}>
@@ -353,12 +353,12 @@ function OrderPage({ id }: { id: string }) {
           <ol className="cm-strip" aria-label={tr("Where the order is")}>
             {steps.map((s, i) => (
               <li key={s.id} data-state={s.done ? "past" : i === current ? "current" : undefined}>
-                <span aria-current={i === current ? "step" : undefined}>{s.label}</span>
+                <span aria-current={i === current ? "step" : undefined}>{isolate(s.label)}</span>
               </li>
             ))}
           </ol>
           <p className="cm-next">
-            <strong>{next.step === "none" || next.step === "wait" ? "Now:" : "Next:"}</strong> {next.step === "ship" && !rights.ships ? "A sales user ships this order." : next.why}
+            <strong>{next.step === "none" || next.step === "wait" ? tr("Now:") : tr("Next:")}</strong> {next.step === "ship" && !rights.ships ? tr("A sales user ships this order.") : next.why}
           </p>
         </>
       )}
@@ -381,7 +381,7 @@ function OrderPage({ id }: { id: string }) {
                 ))}
               </ul>
             ) : (
-              <p className="muted">{o.commerce_payment_status === "Not Required" ? "Nothing was due on this order." : "No payment was asked for, or you cannot see the payments."}</p>
+              <p className="muted">{o.commerce_payment_status === "Not Required" ? tr("Nothing was due on this order.") : tr("No payment was asked for, or you cannot see the payments.")}</p>
             )}
           </Section>
 
@@ -396,13 +396,13 @@ function OrderPage({ id }: { id: string }) {
                   <li key={n.id}>
                     <Icon name={n.is_return ? "left" : "upload"} size={15} />
                     <div>
-                      <a href={open("DeliveryNote", n.id)}>{n.number}</a> <span className="faint">{n.is_return ? "goods came back" : "shipped"} {n.posting_date ? formatDate(n.posting_date) : ""}</span>
+                      <a href={open("DeliveryNote", n.id)}>{isolate(n.number ?? "")}</a> <span className="faint">{n.is_return ? tr("goods came back") : tr("shipped")} {n.posting_date ? formatDate(n.posting_date) : ""}</span>
                       {(n.transporter || n.commerce_tracking_number) && (
                         <div className="faint">
-                          {[n.transporter, n.commerce_tracking_number].filter(Boolean).join(" · ")}
+                          {isolate([n.transporter, n.commerce_tracking_number].filter(Boolean).join(" · "))}
                           {n.commerce_tracking_url && /^https:\/\//.test(n.commerce_tracking_url) && (
                             <>
-                              {" "}
+                              {isolate(" ")}
                               <a href={n.commerce_tracking_url} target="_blank" rel="noopener noreferrer">
                                 {tr("Track it")}
                               </a>
@@ -417,16 +417,16 @@ function OrderPage({ id }: { id: string }) {
                   <li key={v.id}>
                     <Icon name="doc" size={15} />
                     <div>
-                      <a href={open("SalesInvoice", v.id)}>{v.number}</a> <span className="faint">{v.is_return ? "credit note" : "invoice"} {v.posting_date ? formatDate(v.posting_date) : ""}</span>
+                      <a href={open("SalesInvoice", v.id)}>{isolate(v.number ?? "")}</a> <span className="faint">{v.is_return ? tr("credit note") : tr("invoice")} {v.posting_date ? formatDate(v.posting_date) : ""}</span>
                       <div>
-                        {say(v.rounded_total)} {v.status && <Badge tone={statusTone(v.status)}>{v.status}</Badge>}
+                        {isolate(say(v.rounded_total))} {v.status && <Badge tone={statusTone(v.status)}>{isolate(v.status)}</Badge>}
                       </div>
                     </div>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="muted">{cancelled ? "Nothing shipped." : "Nothing has shipped yet."}</p>
+              <p className="muted">{cancelled ? tr("Nothing shipped.") : tr("Nothing has shipped yet.")}</p>
             )}
           </Section>
 
@@ -449,13 +449,13 @@ function OrderPage({ id }: { id: string }) {
             <dl className="kv">
               <div>
                 <dt>{tr("Name")}</dt>
-                <dd>{o.customer_name}</dd>
+                <dd>{isolate(o.customer_name ?? "")}</dd>
               </div>
               {o.commerce_contact_email && (
                 <div>
                   <dt>{tr("Email")}</dt>
                   <dd>
-                    <a href={`mailto:${o.commerce_contact_email}`}>{o.commerce_contact_email}</a>
+                    <a href={`mailto:${o.commerce_contact_email}`}>{isolate(o.commerce_contact_email)}</a>
                   </dd>
                 </div>
               )}
@@ -463,26 +463,26 @@ function OrderPage({ id }: { id: string }) {
                 <div>
                   <dt>{tr("Phone")}</dt>
                   <dd>
-                    <a href={`tel:${o.commerce_contact_phone}`}>{o.commerce_contact_phone}</a>
+                    <a href={`tel:${o.commerce_contact_phone}`}>{isolate(o.commerce_contact_phone)}</a>
                   </dd>
                 </div>
               )}
               {o.commerce_payment_method && (
                 <div>
                   <dt>{tr("Pays with")}</dt>
-                  <dd>{o.commerce_payment_method}</dd>
+                  <dd>{isolate(o.commerce_payment_method)}</dd>
                 </div>
               )}
               {o._titles?.commerce_shipping_rule && (
                 <div>
                   <dt>{tr("Delivery")}</dt>
-                  <dd>{o._titles.commerce_shipping_rule}</dd>
+                  <dd>{isolate(o._titles.commerce_shipping_rule)}</dd>
                 </div>
               )}
               {o._titles?.commerce_coupon && (
                 <div>
                   <dt>{tr("Coupon")}</dt>
-                  <dd>{o._titles.commerce_coupon}</dd>
+                  <dd>{isolate(o._titles.commerce_coupon)}</dd>
                 </div>
               )}
             </dl>
@@ -495,11 +495,11 @@ function OrderPage({ id }: { id: string }) {
 
           {o.commerce_shipping_address && (
             <Section id="o-ship" title={tr("Goes to")}>
-              <address className="cm-address">{o.commerce_shipping_address}</address>
+              <address className="cm-address">{isolate(o.commerce_shipping_address)}</address>
               {o.commerce_billing_address && o.commerce_billing_address !== o.commerce_shipping_address && (
                 <>
                   <h3 className="cm-minor">{tr("Bill to")}</h3>
-                  <address className="cm-address">{o.commerce_billing_address}</address>
+                  <address className="cm-address">{isolate(o.commerce_billing_address)}</address>
                 </>
               )}
             </Section>
@@ -507,7 +507,7 @@ function OrderPage({ id }: { id: string }) {
 
           {o.commerce_notes && (
             <Section id="o-notes" title={tr("Customer's note")}>
-              <p className="cm-note">{o.commerce_notes}</p>
+              <p className="cm-note">{isolate(o.commerce_notes)}</p>
             </Section>
           )}
 
@@ -526,13 +526,13 @@ function OrderPage({ id }: { id: string }) {
                       </span>
                       <div>
                         <div className="cm-story-line">
-                          <strong>{e.title}</strong>
+                          <strong>{isolate(e.title)}</strong>
                           <time className="faint" dateTime={e.at} title={formatDateTime(e.at)}>
-                            {relativeTime(e.at)}
+                            {isolate(relativeTime(e.at))}
                           </time>
                         </div>
-                        {e.detail && <div className="faint cm-story-detail">{e.detail}</div>}
-                        {e.who && <div className="faint cm-story-detail">{e.who}</div>}
+                        {e.detail && <div className="faint cm-story-detail">{isolate(e.detail)}</div>}
+                        {e.who && <div className="faint cm-story-detail">{isolate(e.who)}</div>}
                         {e.to && /^https:\/\//.test(e.to) && (
                           <a href={e.to} target="_blank" rel="noopener noreferrer">
                             {tr("Track it")}
@@ -544,7 +544,7 @@ function OrderPage({ id }: { id: string }) {
                 </ol>
                 {hidden > 0 && (
                   <button type="button" className="link-btn" onClick={() => setShowAll(true)}>
-                    {tr("Show {hidden} older", { hidden })} {hidden === 1 ? "entry" : "entries"}
+                    {tr("Show {hidden} older", { hidden })} {hidden === 1 ? tr("entry") : tr("entries")}
                   </button>
                 )}
               </>

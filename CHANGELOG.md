@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.14
+
+Rebuilt with Ferrum-Frontend 5b22e7b: its own words carry built-in Arabic and Hindi (276 words each, ui/src/locales, translated by the model and to be reviewed by native speakers), fetched for the page's language only. The labels it keeps in objects, its dialogs, its page titles and the words it keeps in variables go through t() as well, and the names and sizes it shows as they are keep their order right to left. Its pages are drawn once their words are in, and its entry carries only the parts of the kit it uses.
+
 ## 0.7.13
 
 Rebuilt with Ferrum-Frontend 6537d65: an action's link, code or token shown once is kept in a dialog to copy, and on a page that reads right to left, English left untranslated keeps its own order. Its own words go through the kit's t() (176 places), so a workspace's own words for its language reach them, and Admin, Interface words lists them under it (dist/words.json).

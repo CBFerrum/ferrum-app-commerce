@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { api, errorMessage, todayIso, t as tr } from "@ferrum/client";
+import { api, errorMessage, todayIso, t as tr, isolate } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
@@ -23,21 +23,21 @@ function Sales() {
     queryKey: ["commerce", "sales", end],
     queryFn: ({ signal }) => api.get<{ rows: DayRow[] }>("/api/reports/web_sales", { from_date: daysBefore(end, 29), to_date: end, group_by: "Day" }, signal).then((r) => r.rows),
   });
-  if (q.error) return <p className="muted">{tr("Sales cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (q.error) return <p className="muted">{tr("Sales cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
   if (!q.data) return <Spinner label={tr("Loading sales")} />;
   const tiles = [
-    { label: "Today", t: totals(q.data, end, end) },
-    { label: "Last 7 days", t: totals(q.data, daysBefore(end, 6), end) },
-    { label: "Last 30 days", t: totals(q.data, daysBefore(end, 29), end) },
+    { label: tr("Today"), t: totals(q.data, end, end) },
+    { label: tr("Last 7 days"), t: totals(q.data, daysBefore(end, 6), end) },
+    { label: tr("Last 30 days"), t: totals(q.data, daysBefore(end, 29), end) },
   ];
   return (
     <div className="cm-tiles">
       {tiles.map(({ label, t }) => (
         <Link key={label} className="cm-tile" to={`/r/web_sales?from_date=${label === "Today" ? end : daysBefore(end, label === "Last 7 days" ? 6 : 29)}&to_date=${end}`}>
-          <span className="faint">{label}</span>
-          <strong>{money(t.revenue)}</strong>
+          <span className="faint">{isolate(label)}</span>
+          <strong>{isolate(money(t.revenue))}</strong>
           <span>
-            {t.orders} {t.orders === 1 ? "order" : "orders"}
+            {t.orders} {t.orders === 1 ? tr("order") : tr("orders")}
           </span>
         </Link>
       ))}
@@ -48,7 +48,7 @@ function Sales() {
 function AtTheDesk() {
   const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
   const tally = useMemo(() => counts(q.data ?? []), [q.data]);
-  if (q.error) return <p className="muted">{tr("Orders cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (q.error) return <p className="muted">{tr("Orders cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
   if (!q.data) return <Spinner small label={tr("Loading orders")} />;
   const oldest = queue(q.data, "ship").slice(0, 5);
   return (
@@ -56,7 +56,7 @@ function AtTheDesk() {
       <div className="cm-tiles cm-tiles-small">
         {STAGES.filter((s) => s.id !== "done").map((s) => (
           <Link key={s.id} className="cm-tile" to={s.id === "ship" ? "/orders" : `/orders?stage=${s.id}`} title={s.hint}>
-            <span className="faint">{s.label}</span>
+            <span className="faint">{isolate(s.label)}</span>
             <strong>{tally[s.id as "pay" | "ship" | "invoice"]}</strong>
           </Link>
         ))}
@@ -67,16 +67,16 @@ function AtTheDesk() {
           <ul className="cm-rows" data-ferrum-nocard>
             {oldest.map((o) => (
               <li key={o.id}>
-                <Link to={`/o/${o.id}`}>{o.number}</Link> <span className="faint">{[o.customer_name, waitedDays(o) ? `${waitedDays(o)} days` : "today"].filter(Boolean).join(" · ")}</span>
+                <Link to={`/o/${o.id}`}>{isolate(o.number ?? "")}</Link> <span className="faint">{isolate([o.customer_name, waitedDays(o) ? `${waitedDays(o)} days` : "today"].filter(Boolean).join(" · "))}</span>
                 <span className="cm-end">
-                  <strong>{amountText(o.rounded_total, o._titles?.currency)}</strong>
+                  <strong>{isolate(amountText(o.rounded_total, o._titles?.currency))}</strong>
                 </span>
               </li>
             ))}
           </ul>
         </>
       ) : (
-        <p className="muted">{tally.pay + tally.invoice ? "Nothing is ready to send." : "Every web order is sent and settled."}</p>
+        <p className="muted">{tally.pay + tally.invoice ? tr("Nothing is ready to send.") : tr("Every web order is sent and settled.")}</p>
       )}
       <p className="cm-tight">
         <Link to="/orders">{tr("Go to the orders")}</Link>
@@ -101,17 +101,17 @@ function Payments() {
     queryKey: ["commerce", "payments"],
     queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
-  if (q.error) return <p className="muted">{tr("Payments cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (q.error) return <p className="muted">{tr("Payments cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
   if (!q.data) return <Spinner small label={tr("Loading payments")} />;
   if (!q.data.length) return <p className="muted">{tr("No failed or expired payments.")}</p>;
   return (
     <ul className="cm-rows" data-ferrum-nocard>
       {q.data.map((p) => (
         <li key={p.id}>
-          {p.sales_order ? <Link to={`/o/${p.sales_order}`}>{p.order_number ?? "Payment"}</Link> : <span>{p.order_number ?? "Payment"}</span>} <span className="faint">{[p.payer_name, p.gateway].filter(Boolean).join(" · ")}</span>
+          {p.sales_order ? <Link to={`/o/${p.sales_order}`}>{p.order_number ?? tr("Payment")}</Link> : <span>{p.order_number ?? tr("Payment")}</span>} <span className="faint">{isolate([p.payer_name, p.gateway].filter(Boolean).join(" · "))}</span>
           <span className="cm-end">
-            <Badge tone={statusTone(p.status)}>{p.status}</Badge>
-            <strong>{amountText(p.amount, p.currency_code)}</strong>
+            <Badge tone={statusTone(p.status)}>{isolate(p.status ?? "")}</Badge>
+            <strong>{isolate(amountText(p.amount, p.currency_code))}</strong>
           </span>
         </li>
       ))}
@@ -140,7 +140,7 @@ function Reviews() {
     setBusy(r.id);
     try {
       await api.patch(`/api/v1/ItemReview/${r.id}`, { status }, { ifMatch: r.version });
-      toast(`${status === "Approved" ? "Published" : "Rejected"}: ${r.reviewer_name}'s review`);
+      toast(tr("{value}: {reviewer_name}'s review", { value: status === "Approved" ? "Published" : "Rejected", reviewer_name: String(r.reviewer_name) }));
       await qc.invalidateQueries({ queryKey: ["commerce", "reviews"] });
     } catch (err) {
       toast(errorMessage(err), "error");
@@ -148,7 +148,7 @@ function Reviews() {
       setBusy(null);
     }
   };
-  if (q.error) return <p className="muted">{tr("Reviews cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (q.error) return <p className="muted">{tr("Reviews cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
   if (!q.data) return <Spinner small label={tr("Loading reviews")} />;
   if (!q.data.rows.length) return <p className="muted">{tr("No reviews waiting.")}</p>;
   return (
@@ -156,12 +156,12 @@ function Reviews() {
       {q.data.rows.map((r) => (
         <li key={r.id}>
           <div>
-            <span aria-label={`${r.rating} of 5`}>{"★".repeat(r.rating ?? 0)}{"☆".repeat(5 - (r.rating ?? 0))}</span> <strong>{r.title}</strong>{" "}
+            <span aria-label={tr("{rating} of 5", { rating: String(r.rating) })}>{isolate("★".repeat(r.rating ?? 0))}{isolate("☆".repeat(5 - (r.rating ?? 0)))}</span> <strong>{isolate(r.title ?? "")}</strong>{isolate(" ")}
             <span className="faint">
-              {r.reviewer_name} on {r._titles?.website_item ?? "an item"}
+              {tr("{reviewer_name} on", { reviewer_name: r.reviewer_name ?? "" })} {r._titles?.website_item ?? tr("an item")}
             </span>
           </div>
-          {r.review && <p className="cm-review-text">{r.review}</p>}
+          {r.review && <p className="cm-review-text">{isolate(r.review)}</p>}
           <div className="row">
             <Button size="sm" variant="primary" loading={busy === r.id} onClick={() => void decide(r, "Approved")}>
               {tr("Publish")}
@@ -179,18 +179,18 @@ function Reviews() {
 function Catalog() {
   const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
-  if (q.error) return <p className="muted">{tr("The catalog cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (q.error) return <p className="muted">{tr("The catalog cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
   if (!q.data) return <Spinner small label={tr("Loading the catalog")} />;
   const [shown, hidden, variants] = q.data;
   const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
   return (
     <>
       <p>
-        <Link to={open(["published", "=", true], ["variant_of", "is", "not set"])}>{shown} published</Link>,{" "}
+        <Link to={open(["published", "=", true], ["variant_of", "is", "not set"])}>{tr("{shown} published", { shown })}</Link>,{isolate(" ")}
         <Link to={open(["published", "=", false], ["variant_of", "is", "not set"])}>{tr("{hidden} not published", { hidden })}</Link>
         {variants > 0 && (
           <>
-            {tr(", and")} <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? "variant" : "variants"}</Link> {tr("of them")}
+            {tr(", and")} <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? tr("variant") : tr("variants")}</Link> {tr("of them")}
           </>
         )}
         . <Link to="/e/WebsiteItem/new">{tr("Add an item to the store")}</Link>
@@ -201,7 +201,7 @@ function Catalog() {
 }
 
 export function CommerceHome() {
-  useShellTitle("Store");
+  useShellTitle(tr("Store"));
   const meta = useMetaIndex().data;
   const readable = (e: string) => !!meta?.entities.find((x) => x.name === e && can(x.permissions, "read"));
   const qc = useQueryClient();
@@ -222,7 +222,7 @@ export function CommerceHome() {
   const card = (id: string, title: string, body: ReactNode) => (
     <section className="card" aria-labelledby={id}>
       <div className="card-head">
-        <h2 id={id}>{title}</h2>
+        <h2 id={id}>{isolate(title)}</h2>
       </div>
       <div className="card-body">{body}</div>
     </section>
@@ -244,15 +244,15 @@ export function CommerceHome() {
             </Link>
           }
         >
-          {waiting} {waiting === 1 ? "refund or payment needs" : "refunds and payments need"} {tr("a decision.")}
+          {waiting} {waiting === 1 ? tr("refund or payment needs") : tr("refunds and payments need")} {tr("a decision.")}
         </Alert>
       )}
       {readable("SalesOrder") && <Sales />}
       <div className="cm-columns">
-        {readable("SalesOrder") && card("cm-deliver", "Orders at the desk", <AtTheDesk />)}
-        {readable("ItemReview") && card("cm-reviews", "Reviews waiting", <Reviews />)}
-        {readable("PaymentRequest") && card("cm-payments", "Payments that did not go through", <Payments />)}
-        {readable("WebsiteItem") && card("cm-catalog", "Catalog", <Catalog />)}
+        {readable("SalesOrder") && card("cm-deliver", tr("Orders at the desk"), <AtTheDesk />)}
+        {readable("ItemReview") && card("cm-reviews", tr("Reviews waiting"), <Reviews />)}
+        {readable("PaymentRequest") && card("cm-payments", tr("Payments that did not go through"), <Payments />)}
+        {readable("WebsiteItem") && card("cm-catalog", tr("Catalog"), <Catalog />)}
       </div>
     </div>
   );

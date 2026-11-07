@@ -11,7 +11,7 @@ import { f, list, soft, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { BUCKETS, type Bucket, exceptionBucket, type Exception, type Refund, refundBucket } from "./standing";
 import { Tabs } from "./Tabs";
-import { t } from "@ferrum/client";
+import { t, isolate } from "@ferrum/client";
 
 interface Request {
   id: string;
@@ -31,7 +31,7 @@ const NOTHING: Record<Bucket, [string, string]> = {
 };
 
 export function Money() {
-  useShellTitle("Money");
+  useShellTitle(t("Money"));
   const rights = useRights();
   const qc = useQueryClient();
   const [sp, setSp] = useSearchParams();
@@ -77,7 +77,7 @@ export function Money() {
     <Spinner label={t("Loading refunds and payments")} />
   ) : size(tab) === 0 ? (
     <EmptyState title={NOTHING[tab][0]} icon="check">
-      {NOTHING[tab][1]}
+      {isolate(NOTHING[tab][1])}
     </EmptyState>
   ) : (
     <>
@@ -116,14 +116,14 @@ export function Money() {
         <div>
           <Tabs />
           <p className="page-sub" aria-live="polite">
-            {q.data ? (size("decide") ? `${size("decide")} waiting for a decision` : "Nothing is waiting for a decision") : " "}
+            {q.data ? (size("decide") ? t("{value} waiting for a decision", { value: size("decide") }) : t("Nothing is waiting for a decision")) : " "}
           </p>
         </div>
       </header>
       <div className="cm-stages" role="tablist" aria-label={t("Money")}>
         {BUCKETS.map((b) => (
           <button key={b.id} type="button" role="tab" aria-selected={tab === b.id} onClick={() => setSp(b.id === "decide" ? {} : { tab: b.id }, { replace: true })}>
-            {b.label}
+            {isolate(b.label)}
             {q.data && b.id !== "done" && <span className="cm-stage-n">{size(b.id)}</span>}
           </button>
         ))}

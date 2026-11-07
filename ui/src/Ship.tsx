@@ -3,7 +3,7 @@
 // server says so and nothing is left half done.
 
 import { type FormEvent, useState } from "react";
-import { api, docPath, errorMessage, t } from "@ferrum/client";
+import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
 import { isOffline, type Order } from "./queues";
 
@@ -47,7 +47,7 @@ export function ShipDialog({ order, onClose, onDone }: { order: Pick<Order, "id"
       } catch {
         // Remembering the carrier is a convenience.
       }
-      toast(`${order.number ?? "Order"} shipped`);
+      toast(t("{value} shipped", { value: order.number ?? "Order" }));
       onDone();
     } catch (err) {
       setError(errorMessage(err));
@@ -56,13 +56,13 @@ export function ShipDialog({ order, onClose, onDone }: { order: Pick<Order, "id"
   };
 
   return (
-    <Dialog open onClose={busy ? () => {} : onClose} title={`Ship ${order.number ?? "order"}`}>
+    <Dialog open onClose={busy ? () => {} : onClose} title={t("Ship {value}", { value: order.number ?? "order" })}>
       <form className="stack" onSubmit={submit}>
-        {error && <Alert tone="error">{error}</Alert>}
+        {error && <Alert tone="error">{isolate(error)}</Alert>}
         <p className="muted cm-tight">
-          {t("Everything still to deliver on this order leaves the warehouse")}{order.customer_name ? ` for ${order.customer_name}` : ""}.
-          {cash && " Cash on delivery: the courier collects the money, and you record it when it arrives."}
-          {isOffline(order.commerce_payment_method) && !cash && order.commerce_payment_status !== "Paid" && " Its payment is not recorded yet."}
+          {t("Everything still to deliver on this order leaves the warehouse")}{order.customer_name ? t(" for {customer_name}", { customer_name: order.customer_name }) : ""}.
+          {cash && t(" Cash on delivery: the courier collects the money, and you record it when it arrives.")}
+          {isOffline(order.commerce_payment_method) && !cash && order.commerce_payment_status !== "Paid" && t(" Its payment is not recorded yet.")}
         </p>
         <Field label={t("Carrier")} htmlFor="ship-carrier" hint={t("Who takes it, for the shopper to see.")}>
           <input id="ship-carrier" className="input" value={carrier} maxLength={140} autoComplete="off" onChange={(e) => setCarrier(e.target.value)} />
