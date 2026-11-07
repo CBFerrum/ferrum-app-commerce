@@ -18,7 +18,7 @@ const currency = (o: Order) => o._titles?.currency;
 /** "today", "yesterday", "3 days ago": how long the order has waited. */
 function waitText(o: Order): string {
   const days = waitedDays(o);
-  return days === 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+  return days === 0 ? "today" : days === 1 ? "yesterday" : t("{days} days ago", { days });
 }
 
 function Row({ o, onShip, onPaid, onInvoiced, busy }: { o: Order; onShip: (o: Order) => void; onPaid: (o: Order) => void; onInvoiced: (o: Order) => void; busy: boolean }) {
