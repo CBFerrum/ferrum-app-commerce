@@ -6,7 +6,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { api, docPath, errorMessage } from "@ferrum/client";
+import { api, docPath, errorMessage, t } from "@ferrum/client";
 import { Alert, Button, confirmDialog, Dialog, Field, Spinner, toast, useDebounced } from "@ferrum/kit";
 import { amountText, units } from "./queues";
 import { f, list, type Rights } from "./data";
@@ -110,7 +110,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
     }
     try {
       await api.post(docPath("OrderRefund", made.id, "actions", "approve_refund"), {});
-      toast("Approved. The gateway sends it within a few minutes.");
+      toast(t("Approved. The gateway sends it within a few minutes."));
     } catch (err) {
       toast(`Asked for, but not approved: ${errorMessage(err)}`, "error");
     }
@@ -119,16 +119,16 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
 
   const body = plan.error && !p ? (
     <div className="state" role="alert">
-      <p className="state-title">The refund cannot be worked out</p>
+      <p className="state-title">{t("The refund cannot be worked out")}</p>
       <p className="muted">{errorMessage(plan.error)}</p>
       <Button icon="refresh" onClick={() => void plan.refetch()}>
-        Try again
+        {t("Try again")}
       </Button>
     </div>
   ) : !p ? (
     <div className="state">
-      <Spinner label="Looking at the order" />
-      <span className="muted">Looking at the order…</span>
+      <Spinner label={t("Looking at the order")} />
+      <span className="muted">{t("Looking at the order…")}</span>
     </div>
   ) : !p.payable ? (
     <Alert tone="info">{p.why}</Alert>
@@ -136,12 +136,12 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
     <div className="cm-refund">
       <div className="cm-refund-main stack">
         {error && <Alert tone="error">{error}</Alert>}
-        <div className="segmented" role="group" aria-label="What happens">
+        <div className="segmented" role="group" aria-label={t("What happens")}>
           <button type="button" aria-pressed={current === "Return"} onClick={() => setKind("Return")}>
-            Goods come back
+            {t("Goods come back")}
           </button>
           <button type="button" aria-pressed={current === "Cancellation"} disabled={!p.cancel?.allowed} title={p.cancel?.allowed ? undefined : "This order has shipped or is already being refunded"} onClick={() => setKind("Cancellation")}>
-            Cancel the order
+            {t("Cancel the order")}
           </button>
         </div>
         {current === "Return" ? (
@@ -162,7 +162,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
                         <div className="cm-refund-what">
                           <strong>{l.name}</strong>
                           <span className="faint">
-                            {units(Number(l.delivered))} delivered · {max > 0 ? `${units(max)} can come back` : l.invoiced ? "all back already" : "not invoiced yet"}
+                            {units(Number(l.delivered))} {t("delivered ·")} {max > 0 ? `${units(max)} can come back` : l.invoiced ? "all back already" : "not invoiced yet"}
                           </span>
                         </div>
                         {max > 0 ? (
@@ -170,7 +170,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
                             <Stepper line={l} value={qty} onChange={(n) => setChoice({ ...choice, qty: { ...choice.qty, [l.id]: n } })} />
                             <label className="check-field cm-shelf">
                               <input type="checkbox" checked={restocks(choice, l.id, reasonRestocks)} disabled={qty <= 0} onChange={(e) => setChoice({ ...choice, restock: { ...choice.restock, [l.id]: e.target.checked } })} />
-                              <span>Back on the shelf</span>
+                              <span>{t("Back on the shelf")}</span>
                             </label>
                           </>
                         ) : null}
@@ -186,12 +186,12 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
           </>
         ) : (
           <Alert tone="warning">
-            The order has not shipped. Its whole payment goes back and the order is cancelled, which frees its stock.
+            {t("The order has not shipped. Its whole payment goes back and the order is cancelled, which frees its stock.")}
           </Alert>
         )}
-        <Field label="Why" htmlFor="refund-reason" required>
+        <Field label={t("Why")} htmlFor="refund-reason" required>
           <select id="refund-reason" className="select" value={reasonId} required onChange={(e) => setReasonId(e.target.value)}>
-            <option value="">Choose a reason…</option>
+            <option value="">{t("Choose a reason…")}</option>
             {reasons.data?.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.reason}
@@ -199,40 +199,40 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
             ))}
           </select>
         </Field>
-        <Field label="Note" htmlFor="refund-note" hint="For whoever decides, and for your own records.">
+        <Field label={t("Note")} htmlFor="refund-note" hint={t("For whoever decides, and for your own records.")}>
           <textarea id="refund-note" className="textarea" rows={2} maxLength={2000} value={note} onChange={(e) => setNote(e.target.value)} />
         </Field>
       </div>
-      <aside className="cm-refund-side" aria-label="What goes back">
+      <aside className="cm-refund-side" aria-label={t("What goes back")}>
         <div className="cm-refund-sum" aria-live="polite">
-          <span className="muted">Goes back to the shopper</span>
+          <span className="muted">{t("Goes back to the shopper")}</span>
           <strong className="cm-refund-amount">{amount && Number(amount) > 0 ? money(amount) : "—"}</strong>
-          {estimating && <span className="faint">Working it out…</span>}
+          {estimating && <span className="faint">{t("Working it out…")}</span>}
         </div>
         {p.payment && (
           <dl className="kv">
             <div>
-              <dt>Through</dt>
+              <dt>{t("Through")}</dt>
               <dd>{gateway}</dd>
             </div>
             <div>
-              <dt>Paid</dt>
+              <dt>{t("Paid")}</dt>
               <dd>{money(p.payment.paid)}</dd>
             </div>
             <div>
-              <dt>Sent back or asked for</dt>
+              <dt>{t("Sent back or asked for")}</dt>
               <dd>{money(p.payment.held)}</dd>
             </div>
             <div>
-              <dt>Can still go back</dt>
+              <dt>{t("Can still go back")}</dt>
               <dd>{money(p.payment.refundable)}</dd>
             </div>
           </dl>
         )}
-        {p.payment?.offline && <p className="faint cm-tight">{p.payment.label ?? p.payment.gateway} has no gateway to send money: you hand it back yourself, and this records that you did.</p>}
+        {p.payment?.offline && <p className="faint cm-tight">{p.payment.label ?? p.payment.gateway} {t("has no gateway to send money: you hand it back yourself, and this records that you did.")}</p>}
         <label className="check-field">
           <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-          <span>Tell the shopper</span>
+          <span>{t("Tell the shopper")}</span>
         </label>
         {!ready.ok && ready.why && <p className="cm-refund-why" role="status">{ready.why}</p>}
       </aside>
@@ -248,7 +248,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       footer={
         <>
           <Button onClick={onClose} disabled={busy}>
-            Close
+            {t("Close")}
           </Button>
           <Button variant="primary" loading={busy} disabled={!ready.ok} onClick={() => void submit()}>
             {p?.payment?.offline ? "Start the refund" : rights.decides ? (amount && Number(amount) > 0 ? `Send ${money(amount)}` : "Send it back") : "Ask for approval"}

@@ -11,6 +11,7 @@ import { f, list, soft, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { BUCKETS, type Bucket, exceptionBucket, type Exception, type Refund, refundBucket } from "./standing";
 import { Tabs } from "./Tabs";
+import { t } from "@ferrum/client";
 
 interface Request {
   id: string;
@@ -63,8 +64,8 @@ export function Money() {
   if (!rights.ready) return <PageLoading />;
   if (!rights.seesMoney) {
     return (
-      <EmptyState title="Nothing here for you" icon="store">
-        <p className="muted">Refunds and payments that need a decision are for the store's managers. Ask an administrator for the Website Manager role.</p>
+      <EmptyState title={t("Nothing here for you")} icon="store">
+        <p className="muted">{t("Refunds and payments that need a decision are for the store's managers. Ask an administrator for the Website Manager role.")}</p>
       </EmptyState>
     );
   }
@@ -73,7 +74,7 @@ export function Money() {
   const body = q.error ? (
     <ErrorState error={q.error} onRetry={() => void q.refetch()} />
   ) : !q.data ? (
-    <Spinner label="Loading refunds and payments" />
+    <Spinner label={t("Loading refunds and payments")} />
   ) : size(tab) === 0 ? (
     <EmptyState title={NOTHING[tab][0]} icon="check">
       {NOTHING[tab][1]}
@@ -83,7 +84,7 @@ export function Money() {
       {here.refunds.length > 0 && (
         <section aria-labelledby="m-refunds">
           <h2 className="cm-group" id="m-refunds">
-            Refunds
+            {t("Refunds")}
           </h2>
           <ul className="cm-moneys">
             {here.refunds.map((r) => (
@@ -95,7 +96,7 @@ export function Money() {
       {here.exceptions.length > 0 && (
         <section aria-labelledby="m-exceptions">
           <h2 className="cm-group" id="m-exceptions">
-            Payments the gateway took and could not book
+            {t("Payments the gateway took and could not book")}
           </h2>
           <ul className="cm-moneys">
             {here.exceptions.map((x) => {
@@ -105,7 +106,7 @@ export function Money() {
           </ul>
         </section>
       )}
-      {tab === "done" && q.data.refunds.length + q.data.exceptions.length >= LIMIT && <p className="faint">Showing the latest {LIMIT} of each.</p>}
+      {tab === "done" && q.data.refunds.length + q.data.exceptions.length >= LIMIT && <p className="faint">{t("Showing the latest {LIMIT} of each.", { LIMIT })}</p>}
     </>
   );
 
@@ -119,7 +120,7 @@ export function Money() {
           </p>
         </div>
       </header>
-      <div className="cm-stages" role="tablist" aria-label="Money">
+      <div className="cm-stages" role="tablist" aria-label={t("Money")}>
         {BUCKETS.map((b) => (
           <button key={b.id} type="button" role="tab" aria-selected={tab === b.id} onClick={() => setSp(b.id === "decide" ? {} : { tab: b.id }, { replace: true })}>
             {b.label}

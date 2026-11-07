@@ -9,7 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Link, RouterProvider, useRouteError } from "react-router";
-import { routeBase, shell } from "@ferrum/client";
+import { routeBase, shell, t } from "@ferrum/client";
 import { ConfirmHost, EmptyState, ErrorState, Toaster } from "@ferrum/kit";
 import { RequireAuth, setFrameMode } from "@ferrum/records/frame";
 import { CommerceHome } from "./Home";
@@ -32,8 +32,8 @@ function RouteError() {
 
 function NotFound() {
   return (
-    <EmptyState title="Page not found">
-      <Link to="/">Go to the store's home</Link>
+    <EmptyState title={t("Page not found")}>
+      <Link to="/">{t("Go to the store's home")}</Link>
     </EmptyState>
   );
 }
