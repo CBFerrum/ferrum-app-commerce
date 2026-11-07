@@ -82,11 +82,11 @@ export function nextStep(o: Order): Next {
       return { step: "invoice", label: tr("Create invoice"), why: "Sent, but not invoiced yet." };
     case "pay":
       if (o.commerce_payment_status === "Failed" || o.commerce_payment_status === "Expired") {
-        return { step: "wait", label: "", why: `The payment ${o.commerce_payment_status === "Failed" ? "failed" : "ran out of time"}. The shopper can pay again from their order link.` };
+        return { step: "wait", label: "", why: (o.commerce_payment_status === "Failed" ? tr("The payment failed. The shopper can pay again from their order link.") : tr("The payment ran out of time. The shopper can pay again from their order link.")) };
       }
       if (method === "Manual") return { step: "mark_paid", label: tr("Mark paid"), why: "Bank transfer: mark it paid when the money arrives." };
       if (method === "Cash on Delivery") return { step: "mark_paid", label: tr("Mark paid"), why: "Sent. Record the cash the courier brought." };
-      return { step: "wait", label: "", why: method ? `Waiting for ${method} to confirm the shopper's payment.` : "Waiting for the shopper to pay." };
+      return { step: "wait", label: "", why: method ? tr("Waiting for {method} to confirm the shopper's payment.", { method }) : "Waiting for the shopper to pay." };
     default:
       return { step: "none", label: "", why: o.status === "Cancelled" || o.docstatus === 2 ? "Cancelled." : "Nothing left to do." };
   }
@@ -122,11 +122,11 @@ export function ago(at: string | null | undefined, now: Date = new Date()): stri
   if (!Number.isFinite(t)) return "";
   const mins = Math.floor((now.getTime() - t) / 60_000);
   if (mins < 1) return "just now";
-  if (mins < 60) return `${mins} min`;
+  if (mins < 60) return tr("{mins} min", { mins });
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours} h`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "1 day" : `${days} days`;
+  return days === 1 ? "1 day" : tr("{days} days", { days });
 }
 
 /** Whole days an order has waited, for flagging the ones that have waited too long. */

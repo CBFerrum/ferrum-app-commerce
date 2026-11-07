@@ -112,17 +112,17 @@ export function refundWords(r: Refund, money: (v: unknown, code?: string | null)
   const offline = r.gateway === "Manual" || r.gateway === "Cash on Delivery";
   switch (r.status) {
     case "Requested":
-      return { headline: "Waiting for a decision", detail: `${who} asked to send ${money(r.amount, r.currency_code)} back (${KINDS[r.kind ?? ""] ?? "refund"}).`, tone: "amber" };
+      return { headline: "Waiting for a decision", detail: tr("{who} asked to send {value} back ({value2}).", { who, value: money(r.amount, r.currency_code), value2: KINDS[r.kind ?? ""] ?? "refund" }), tone: "amber" };
     case "Approved":
-      if (offline) return { headline: "Approved: waiting for you", detail: `${r.gateway} has no gateway to send it. Refund it yourself, then say you have.`, tone: "amber" };
+      if (offline) return { headline: "Approved: waiting for you", detail: tr("{gateway} has no gateway to send it. Refund it yourself, then say you have.", { gateway: String(r.gateway) }), tone: "amber" };
       return stuck(r.approved_at, now)
-        ? { headline: `Approved: ${gateway} has not sent it`, detail: `It should take a few minutes. If you refunded it from ${gateway}'s own dashboard, say so; otherwise ask whoever set up the gateway.`, tone: "amber" }
-        : { headline: `Approved: ${gateway} is sending it`, detail: `${money(r.amount, r.currency_code)} goes back to the shopper.`, tone: "blue" };
+        ? { headline: tr("Approved: {gateway} has not sent it", { gateway }), detail: `It should take a few minutes. If you refunded it from ${gateway}'s own dashboard, say so; otherwise ask whoever set up the gateway.`, tone: "amber" }
+        : { headline: tr("Approved: {gateway} is sending it", { gateway }), detail: tr("{value} goes back to the shopper.", { value: money(r.amount, r.currency_code) }), tone: "blue" };
     case "Refund Failed":
-      return { headline: `${gateway} could not send it`, detail: r.refund_error ?? "The gateway refused.", tone: "red" };
+      return { headline: tr("{gateway} could not send it", { gateway }), detail: r.refund_error ?? "The gateway refused.", tone: "red" };
     case "Refunded":
       return r.booked
-        ? { headline: "Sent back", detail: `${money(r.amount, r.currency_code)} went back${r.refund_reference ? ` (${r.refund_reference})` : ""}.`, tone: "green" }
+        ? { headline: "Sent back", detail: (r.refund_reference ? tr("{amount} went back ({reference}).", { amount: money(r.amount, r.currency_code), reference: String(r.refund_reference) }) : tr("{amount} went back.", { amount: money(r.amount, r.currency_code) })), tone: "green" }
         : { headline: "Sent back, but not in the books yet", detail: r.booking_error ?? "Posting it to the books failed.", tone: "red" };
     case "Declined":
       return { headline: "Declined", detail: r.decision_note ?? "", tone: "neutral" };
@@ -137,15 +137,15 @@ export function exceptionWords(x: Exception, money: (v: unknown, code?: string |
   const amount = x.amount != null && x.amount !== "" ? money(x.amount, x.currency_code) : "Money";
   switch (x.status) {
     case "Open":
-      return { headline: "Taken, but could not be booked", detail: `${amount} reached ${gateway}. ${x.reason ?? ""}`.trim(), tone: "red" };
+      return { headline: "Taken, but could not be booked", detail: tr("{amount} reached {gateway}. {value}", { amount, gateway, value: x.reason ?? "" }).trim(), tone: "red" };
     case "Refund Approved":
       return stuck(x.approved_at, now)
-        ? { headline: `Approved: ${gateway} has not sent it`, detail: `It should take a few minutes. If you refunded it yourself, say so.`, tone: "amber" }
-        : { headline: `Approved: ${gateway} is sending it`, detail: `${amount} goes back to the payer.`, tone: "blue" };
+        ? { headline: tr("Approved: {gateway} has not sent it", { gateway }), detail: `It should take a few minutes. If you refunded it yourself, say so.`, tone: "amber" }
+        : { headline: tr("Approved: {gateway} is sending it", { gateway }), detail: tr("{amount} goes back to the payer.", { amount }), tone: "blue" };
     case "Refund Failed":
-      return { headline: `${gateway} could not send the refund`, detail: x.refund_error ?? "The gateway refused.", tone: "red" };
+      return { headline: tr("{gateway} could not send the refund", { gateway }), detail: x.refund_error ?? "The gateway refused.", tone: "red" };
     case "Refunded":
-      return { headline: "Sent back", detail: `${amount} went back${x.refund_reference ? ` (${x.refund_reference})` : ""}.`, tone: "green" };
+      return { headline: "Sent back", detail: (x.refund_reference ? tr("{amount} went back ({reference}).", { amount: String(amount), reference: String(x.refund_reference) }) : tr("{amount} went back.", { amount: String(amount) })), tone: "green" };
     case "Resolved":
       return { headline: "Settled another way", detail: x.note ?? "", tone: "neutral" };
     default:
