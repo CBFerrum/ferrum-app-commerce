@@ -5,7 +5,7 @@
 
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router";
-import { api, docPath, errorMessage, relativeTime } from "@ferrum/client";
+import { api, docPath, errorMessage, relativeTime, t } from "@ferrum/client";
 import { Alert, Badge, Button, confirmDialog, Dialog, Field, Icon, Menu, MenuItem, toast } from "@ferrum/kit";
 import { amountText } from "./queues";
 import { copy, type Rights } from "./data";
@@ -85,7 +85,7 @@ function Say({ title, label, hint, required, reference, confirm, danger, onClose
         )}
         <div className="row cm-end-row">
           <Button onClick={onClose} disabled={busy}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button type="submit" variant={danger ? "danger" : "primary"} loading={busy} disabled={required && !note.trim()}>
             {confirm}
@@ -129,7 +129,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       message: (
         <>
           <p>
-            {gatewayName(r.gateway)} sends it to the shopper who paid{r.order_number ? ` for order ${r.order_number}` : ""}. This sends money and cannot be undone.
+            {gatewayName(r.gateway)} {t("sends it to the shopper who paid")}{r.order_number ? ` for order ${r.order_number}` : ""}{t(". This sends money and cannot be undone.")}
           </p>
           {r.note && <p className="muted">“{r.note}”</p>}
         </>
@@ -144,7 +144,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
   const primary = !can ? null : status === "Requested" || status === "Refund Failed" ? (
     cash && status === "Requested" ? (
       <Button variant="primary" size="sm" icon="check" onClick={() => setAsking("settle")}>
-        I refunded it
+        {t("I refunded it")}
       </Button>
     ) : (
       <Button variant="primary" size="sm" icon="check" loading={busy === "approve_refund"} onClick={() => void approve()}>
@@ -153,16 +153,16 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
     )
   ) : status === "Approved" && cash ? (
     <Button variant="primary" size="sm" icon="check" onClick={() => setAsking("settle")}>
-      I refunded it
+      {t("I refunded it")}
     </Button>
   ) : status === "Refunded" && !r.booked ? (
     <Button variant="primary" size="sm" icon="refresh" loading={busy === "post_books"} onClick={() => void attempt("post_books", "Posted to the books")}>
-      Try posting again
+      {t("Try posting again")}
     </Button>
   ) : null;
   const more = can && (status === "Requested" || status === "Refund Failed" || (status === "Approved" && !cash));
   const secondary = more ? (
-    <Menu ariaLabel="More ways to settle this refund" icon="chevronDown" buttonClass="btn btn-default btn-sm" label="More">
+    <Menu ariaLabel="More ways to settle this refund" icon="chevronDown" buttonClass="btn btn-default btn-sm" label={t("More")}>
       {(close) => (
         <>
           {!(cash && status === "Requested") && (
@@ -172,7 +172,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
                 setAsking("settle");
               }}
             >
-              I refunded it another way…
+              {t("I refunded it another way…")}
             </MenuItem>
           )}
           {status !== "Approved" && (
@@ -183,7 +183,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
                 setAsking("decline");
               }}
             >
-              Decline…
+              {t("Decline…")}
             </MenuItem>
           )}
         </>
@@ -222,13 +222,13 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
         }
       >
         {r.note && <p className="cm-money-note">“{r.note}”</p>}
-        {rights.ready && !can && (r.status === "Requested" || r.status === "Refund Failed") && <p className="faint cm-money-note">A manager decides this.</p>}
+        {rights.ready && !can && (r.status === "Requested" || r.status === "Refund Failed") && <p className="faint cm-money-note">{t("A manager decides this.")}</p>}
       </Card>
       {asking === "decline" && (
         <Say
-          title="Decline this refund?"
-          label="Why"
-          hint="The person who asked will see this."
+          title={t("Decline this refund?")}
+          label={t("Why")}
+          hint={t("The person who asked will see this.")}
           confirm="Decline"
           danger
           onClose={() => setAsking(null)}
@@ -240,9 +240,9 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       )}
       {asking === "settle" && (
         <Say
-          title="You refunded it another way?"
-          label="How"
-          hint="For instance: cash handed back at the shop, or refunded from the provider's own dashboard. The money is booked as sent back."
+          title={t("You refunded it another way?")}
+          label={t("How")}
+          hint={t("For instance: cash handed back at the shop, or refunded from the provider's own dashboard. The money is booked as sent back.")}
           required
           reference="Reference (optional)"
           confirm="It is refunded"
@@ -274,7 +274,7 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
     setBusy(true);
     try {
       await run("approve_refund");
-      toast("Approved. The gateway sends it within a few minutes.");
+      toast(t("Approved. The gateway sends it within a few minutes."));
     } catch (e) {
       toast(errorMessage(e), "error");
     } finally {
@@ -290,7 +290,7 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
         title={
           <>
             <strong>{x.amount != null && x.amount !== "" ? amountText(x.amount, x.currency_code) : "An amount the gateway did not say"}</strong>
-            <span className="muted"> · payment not booked</span>
+            <span className="muted"> {t("· payment not booked")}</span>
             {(order || x._titles?.payment_request) && (
               <>
                 {" "}
@@ -313,23 +313,23 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
                 {x.status === "Refund Failed" ? "Approve again" : "Approve refund"}
               </Button>
               <Button size="sm" onClick={() => setAsking(true)}>
-                Settled another way
+                {t("Settled another way")}
               </Button>
             </>
           ) : rights.settles && x.status === "Refund Approved" ? (
             <Button size="sm" onClick={() => setAsking(true)}>
-              Settled another way
+              {t("Settled another way")}
             </Button>
           ) : null
         }
       >
-        {rights.ready && !rights.settles && open && <p className="faint cm-money-note">A manager decides this.</p>}
+        {rights.ready && !rights.settles && open && <p className="faint cm-money-note">{t("A manager decides this.")}</p>}
       </Card>
       {asking && (
         <Say
-          title="Settled another way?"
-          label="How it was settled"
-          hint="For instance: refunded from the provider's own dashboard on 3 May."
+          title={t("Settled another way?")}
+          label={t("How it was settled")}
+          hint={t("For instance: refunded from the provider's own dashboard on 3 May.")}
           required
           confirm="It is settled"
           onClose={() => setAsking(false)}

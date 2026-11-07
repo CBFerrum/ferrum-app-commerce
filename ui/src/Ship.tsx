@@ -3,7 +3,7 @@
 // server says so and nothing is left half done.
 
 import { type FormEvent, useState } from "react";
-import { api, docPath, errorMessage } from "@ferrum/client";
+import { api, docPath, errorMessage, t } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
 import { isOffline, type Order } from "./queues";
 
@@ -60,33 +60,33 @@ export function ShipDialog({ order, onClose, onDone }: { order: Pick<Order, "id"
       <form className="stack" onSubmit={submit}>
         {error && <Alert tone="error">{error}</Alert>}
         <p className="muted cm-tight">
-          Everything still to deliver on this order leaves the warehouse{order.customer_name ? ` for ${order.customer_name}` : ""}.
+          {t("Everything still to deliver on this order leaves the warehouse")}{order.customer_name ? ` for ${order.customer_name}` : ""}.
           {cash && " Cash on delivery: the courier collects the money, and you record it when it arrives."}
           {isOffline(order.commerce_payment_method) && !cash && order.commerce_payment_status !== "Paid" && " Its payment is not recorded yet."}
         </p>
-        <Field label="Carrier" htmlFor="ship-carrier" hint="Who takes it, for the shopper to see.">
+        <Field label={t("Carrier")} htmlFor="ship-carrier" hint={t("Who takes it, for the shopper to see.")}>
           <input id="ship-carrier" className="input" value={carrier} maxLength={140} autoComplete="off" onChange={(e) => setCarrier(e.target.value)} />
         </Field>
-        <Field label="Tracking number" htmlFor="ship-number">
+        <Field label={t("Tracking number")} htmlFor="ship-number">
           <input id="ship-number" className="input" value={number} maxLength={120} autoComplete="off" onChange={(e) => setNumber(e.target.value)} />
         </Field>
-        <Field label="Tracking link" htmlFor="ship-link" error={linkError} hint="Where the carrier shows the parcel.">
+        <Field label={t("Tracking link")} htmlFor="ship-link" error={linkError} hint={t("Where the carrier shows the parcel.")}>
           <input id="ship-link" className="input" type="url" inputMode="url" placeholder="https://" value={link} aria-invalid={!!linkError} onChange={(e) => setLink(e.target.value)} />
         </Field>
         <label className="check-field">
           <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-          <span>Tell the shopper it has shipped</span>
+          <span>{t("Tell the shopper it has shipped")}</span>
         </label>
         <label className="check-field">
           <input type="checkbox" checked={invoice} onChange={(e) => setInvoice(e.target.checked)} />
-          <span>Create the invoice too (a payment already received is applied to it)</span>
+          <span>{t("Create the invoice too (a payment already received is applied to it)")}</span>
         </label>
         <div className="row cm-end-row">
           <Button onClick={onClose} disabled={busy}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button type="submit" variant="primary" icon="check" loading={busy} disabled={!!linkError}>
-            Ship
+            {t("Ship")}
           </Button>
         </div>
       </form>

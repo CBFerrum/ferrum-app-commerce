@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { api, errorMessage, todayIso } from "@ferrum/client";
+import { api, errorMessage, todayIso, t as tr } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
@@ -23,8 +23,8 @@ function Sales() {
     queryKey: ["commerce", "sales", end],
     queryFn: ({ signal }) => api.get<{ rows: DayRow[] }>("/api/reports/web_sales", { from_date: daysBefore(end, 29), to_date: end, group_by: "Day" }, signal).then((r) => r.rows),
   });
-  if (q.error) return <p className="muted">Sales cannot be shown ({errorMessage(q.error)}).</p>;
-  if (!q.data) return <Spinner label="Loading sales" />;
+  if (q.error) return <p className="muted">{tr("Sales cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (!q.data) return <Spinner label={tr("Loading sales")} />;
   const tiles = [
     { label: "Today", t: totals(q.data, end, end) },
     { label: "Last 7 days", t: totals(q.data, daysBefore(end, 6), end) },
@@ -48,8 +48,8 @@ function Sales() {
 function AtTheDesk() {
   const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
   const tally = useMemo(() => counts(q.data ?? []), [q.data]);
-  if (q.error) return <p className="muted">Orders cannot be shown ({errorMessage(q.error)}).</p>;
-  if (!q.data) return <Spinner small label="Loading orders" />;
+  if (q.error) return <p className="muted">{tr("Orders cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (!q.data) return <Spinner small label={tr("Loading orders")} />;
   const oldest = queue(q.data, "ship").slice(0, 5);
   return (
     <>
@@ -63,7 +63,7 @@ function AtTheDesk() {
       </div>
       {oldest.length ? (
         <>
-          <h3 className="cm-minor">Waiting longest to be sent</h3>
+          <h3 className="cm-minor">{tr("Waiting longest to be sent")}</h3>
           <ul className="cm-rows" data-ferrum-nocard>
             {oldest.map((o) => (
               <li key={o.id}>
@@ -79,7 +79,7 @@ function AtTheDesk() {
         <p className="muted">{tally.pay + tally.invoice ? "Nothing is ready to send." : "Every web order is sent and settled."}</p>
       )}
       <p className="cm-tight">
-        <Link to="/orders">Go to the orders</Link>
+        <Link to="/orders">{tr("Go to the orders")}</Link>
       </p>
     </>
   );
@@ -101,9 +101,9 @@ function Payments() {
     queryKey: ["commerce", "payments"],
     queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
-  if (q.error) return <p className="muted">Payments cannot be shown ({errorMessage(q.error)}).</p>;
-  if (!q.data) return <Spinner small label="Loading payments" />;
-  if (!q.data.length) return <p className="muted">No failed or expired payments.</p>;
+  if (q.error) return <p className="muted">{tr("Payments cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (!q.data) return <Spinner small label={tr("Loading payments")} />;
+  if (!q.data.length) return <p className="muted">{tr("No failed or expired payments.")}</p>;
   return (
     <ul className="cm-rows" data-ferrum-nocard>
       {q.data.map((p) => (
@@ -148,9 +148,9 @@ function Reviews() {
       setBusy(null);
     }
   };
-  if (q.error) return <p className="muted">Reviews cannot be shown ({errorMessage(q.error)}).</p>;
-  if (!q.data) return <Spinner small label="Loading reviews" />;
-  if (!q.data.rows.length) return <p className="muted">No reviews waiting.</p>;
+  if (q.error) return <p className="muted">{tr("Reviews cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (!q.data) return <Spinner small label={tr("Loading reviews")} />;
+  if (!q.data.rows.length) return <p className="muted">{tr("No reviews waiting.")}</p>;
   return (
     <ul className="cm-reviews">
       {q.data.rows.map((r) => (
@@ -164,10 +164,10 @@ function Reviews() {
           {r.review && <p className="cm-review-text">{r.review}</p>}
           <div className="row">
             <Button size="sm" variant="primary" loading={busy === r.id} onClick={() => void decide(r, "Approved")}>
-              Publish
+              {tr("Publish")}
             </Button>
             <Button size="sm" disabled={busy === r.id} onClick={() => void decide(r, "Rejected")}>
-              Reject
+              {tr("Reject")}
             </Button>
           </div>
         </li>
@@ -179,23 +179,23 @@ function Reviews() {
 function Catalog() {
   const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
-  if (q.error) return <p className="muted">The catalog cannot be shown ({errorMessage(q.error)}).</p>;
-  if (!q.data) return <Spinner small label="Loading the catalog" />;
+  if (q.error) return <p className="muted">{tr("The catalog cannot be shown (")}{errorMessage(q.error)}).</p>;
+  if (!q.data) return <Spinner small label={tr("Loading the catalog")} />;
   const [shown, hidden, variants] = q.data;
   const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
   return (
     <>
       <p>
         <Link to={open(["published", "=", true], ["variant_of", "is", "not set"])}>{shown} published</Link>,{" "}
-        <Link to={open(["published", "=", false], ["variant_of", "is", "not set"])}>{hidden} not published</Link>
+        <Link to={open(["published", "=", false], ["variant_of", "is", "not set"])}>{tr("{hidden} not published", { hidden })}</Link>
         {variants > 0 && (
           <>
-            , and <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? "variant" : "variants"}</Link> of them
+            {tr(", and")} <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? "variant" : "variants"}</Link> {tr("of them")}
           </>
         )}
-        . <Link to="/e/WebsiteItem/new">Add an item to the store</Link>
+        . <Link to="/e/WebsiteItem/new">{tr("Add an item to the store")}</Link>
       </p>
-      <p className="faint cm-tight">A size or a colour is an item of its own: on its form, say which item it is a variant of.</p>
+      <p className="faint cm-tight">{tr("A size or a colour is an item of its own: on its form, say which item it is a variant of.")}</p>
     </>
   );
 }
@@ -214,8 +214,8 @@ export function CommerceHome() {
   useLiveEntity("PaymentException", refresh);
   if (meta && !readable("WebsiteItem") && !readable("SalesOrder")) {
     return (
-      <EmptyState title="Nothing here for you" icon="store">
-        <p className="muted">Ask an administrator for the Website Manager role.</p>
+      <EmptyState title={tr("Nothing here for you")} icon="store">
+        <p className="muted">{tr("Ask an administrator for the Website Manager role.")}</p>
       </EmptyState>
     );
   }
@@ -232,7 +232,7 @@ export function CommerceHome() {
       <header className="cm-head">
         <div>
           <Tabs />
-          <p className="page-sub">Web sales, the orders at the desk, payments and reviews.</p>
+          <p className="page-sub">{tr("Web sales, the orders at the desk, payments and reviews.")}</p>
         </div>
       </header>
       {!!waiting && (
@@ -240,11 +240,11 @@ export function CommerceHome() {
           tone="warning"
           action={
             <Link className="btn btn-default btn-sm" to="/money">
-              Decide
+              {tr("Decide")}
             </Link>
           }
         >
-          {waiting} {waiting === 1 ? "refund or payment needs" : "refunds and payments need"} a decision.
+          {waiting} {waiting === 1 ? "refund or payment needs" : "refunds and payments need"} {tr("a decision.")}
         </Alert>
       )}
       {readable("SalesOrder") && <Sales />}

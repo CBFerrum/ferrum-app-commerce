@@ -6,7 +6,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { api, docPath } from "@ferrum/client";
+import { api, docPath, t } from "@ferrum/client";
 import { Badge, Button, EmptyState, ErrorState, Icon, Spinner, statusTone, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, counts, nextStep, type Order, type PickOrder, pickList, queue, STAGES, type Stage, stage, statusWords, units, waitedDays } from "./queues";
 import { f, invoiceOrder, list, markPaid, ORDER_FIELDS, useRights, WEB, workingOrders } from "./data";
@@ -29,7 +29,7 @@ function Row({ o, onShip, onPaid, onInvoiced, busy }: { o: Order; onShip: (o: Or
     next.step === "ship" ? (
       rights.ships ? (
         <Button variant="primary" size="sm" icon="check" onClick={() => onShip(o)}>
-          Ship
+          {t("Ship")}
         </Button>
       ) : null
     ) : next.step === "invoice" ? (
@@ -92,29 +92,29 @@ function PickList({ orders }: { orders: Order[] }) {
       return { docs, shipping: settings };
     },
   });
-  if (!ids.length) return <EmptyState title="Nothing to pick" icon="check">No orders are waiting to be sent.</EmptyState>;
+  if (!ids.length) return <EmptyState title={t("Nothing to pick")} icon="check">{t("No orders are waiting to be sent.")}</EmptyState>;
   if (q.error) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  if (!q.data) return <Spinner label="Making the pick list" />;
+  if (!q.data) return <Spinner label={t("Making the pick list")} />;
   const picks = pickList(q.data.docs, (l) => !q.data.shipping || l.item !== q.data.shipping);
   return (
-    <section className="cm-pick" aria-label="Pick list">
+    <section className="cm-pick" aria-label={t("Pick list")}>
       <div className="cm-pick-head">
         <p className="muted">
           {picks.length} {picks.length === 1 ? "item" : "items"} for {orders.length} {orders.length === 1 ? "order" : "orders"}
           {orders.length > ids.length ? ` (the first ${ids.length})` : ""}.
         </p>
         <Button icon="printer" onClick={() => window.print()}>
-          Print
+          {t("Print")}
         </Button>
       </div>
       {picks.length ? (
         <table className="table cm-pick-table">
           <thead>
             <tr>
-              <th>Item</th>
-              <th>Shelf</th>
-              <th className="num">Take</th>
-              <th>For</th>
+              <th>{t("Item")}</th>
+              <th>{t("Shelf")}</th>
+              <th className="num">{t("Take")}</th>
+              <th>{t("For")}</th>
             </tr>
           </thead>
           <tbody>
@@ -131,7 +131,7 @@ function PickList({ orders }: { orders: Order[] }) {
           </tbody>
         </table>
       ) : (
-        <p className="muted">Everything on these orders has been taken already.</p>
+        <p className="muted">{t("Everything on these orders has been taken already.")}</p>
       )}
     </section>
   );
@@ -150,7 +150,7 @@ function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string
       ),
   });
   if (q.error) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  if (!q.data) return <Spinner label="Loading finished orders" />;
+  if (!q.data) return <Spinner label={t("Loading finished orders")} />;
   if (!q.data.rows.length) return <EmptyState title={search ? "No finished order matches" : NOTHING.done[0]} icon="file">{search ? "Try another number or name." : NOTHING.done[1]}</EmptyState>;
   return (
     <>
@@ -162,7 +162,7 @@ function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string
       {(q.data.total ?? 0) > q.data.rows.length && (
         <p className="cm-more">
           <Button onClick={() => setLimit(limit + 30)} loading={q.isFetching}>
-            Show 30 more
+            {t("Show 30 more")}
           </Button>
         </p>
       )}
@@ -207,7 +207,7 @@ export function Desk() {
   const body = q.error ? (
     <ErrorState error={q.error} onRetry={() => void q.refetch()} />
   ) : !q.data ? (
-    <Spinner label="Loading orders" />
+    <Spinner label={t("Loading orders")} />
   ) : view === "pick" ? (
     <PickList orders={queue(orders, "ship")} />
   ) : which === "done" ? (
@@ -219,10 +219,10 @@ export function Desk() {
       ))}
     </ul>
   ) : search ? (
-    <EmptyState title="No order matches" icon="search">
-      Nothing in this queue matches “{search}”.{" "}
+    <EmptyState title={t("No order matches")} icon="search">
+      {t("Nothing in this queue matches “{search}”.", { search })}{" "}
       <button type="button" className="link-btn" onClick={() => set({ q: null })}>
-        Clear the search
+        {t("Clear the search")}
       </button>
     </EmptyState>
   ) : (
@@ -241,19 +241,19 @@ export function Desk() {
           </p>
         </div>
         <div className="cm-tools">
-          <div className="segmented" role="group" aria-label="View">
+          <div className="segmented" role="group" aria-label={t("View")}>
             <button type="button" aria-pressed={view === "queue"} onClick={() => set({ view: null })}>
-              Queue
+              {t("Queue")}
             </button>
             <button type="button" aria-pressed={view === "pick"} onClick={() => set({ view: "pick" })}>
-              <Icon name="list" size={13} /> Pick list
+              <Icon name="list" size={13} /> {t("Pick list")}
             </button>
           </div>
-          {view === "queue" && <input className="input cm-search" type="search" placeholder="Find an order…" aria-label="Find an order by number, customer or email" value={search} onChange={(e) => set({ q: e.target.value || null })} />}
+          {view === "queue" && <input className="input cm-search" type="search" placeholder={t("Find an order…")} aria-label={t("Find an order by number, customer or email")} value={search} onChange={(e) => set({ q: e.target.value || null })} />}
         </div>
       </header>
       {view === "queue" && (
-        <div className="cm-stages" role="tablist" aria-label="Queues">
+        <div className="cm-stages" role="tablist" aria-label={t("Queues")}>
           {STAGES.map((s) => (
             <button key={s.id} type="button" role="tab" aria-selected={which === s.id} title={s.hint} onClick={() => set({ stage: s.id === "ship" ? null : s.id })}>
               {s.label}

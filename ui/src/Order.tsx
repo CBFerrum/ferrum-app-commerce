@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
-import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime } from "@ferrum/client";
+import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime, t as tr } from "@ferrum/client";
 import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, PageLoading, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units, withMethods } from "./queues";
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
@@ -105,11 +105,11 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
     <table className="table cm-table">
       <thead>
         <tr>
-          <th>Item</th>
-          <th className="num">Qty</th>
-          <th className="num">Price</th>
-          <th className="num">Amount</th>
-          <th>Sent</th>
+          <th>{tr("Item")}</th>
+          <th className="num">{tr("Qty")}</th>
+          <th className="num">{tr("Price")}</th>
+          <th className="num">{tr("Amount")}</th>
+          <th>{tr("Sent")}</th>
         </tr>
       </thead>
       <tbody>
@@ -129,7 +129,7 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
                 {say(l.amount)}
               </td>
               <td data-label="Sent">
-                {sent >= qty ? <Badge tone="green">Sent</Badge> : held ? <Badge tone="neutral" title="This order holds these in the warehouse until they are sent">{sent > 0 ? `${units(sent)} of ${units(qty)} sent` : "In stock for this order"}</Badge> : <span className="faint">{sent > 0 ? `${units(sent)} of ${units(qty)}` : "Not sent"}</span>}
+                {sent >= qty ? <Badge tone="green">{tr("Sent")}</Badge> : held ? <Badge tone="neutral" title={tr("This order holds these in the warehouse until they are sent")}>{sent > 0 ? `${units(sent)} of ${units(qty)} sent` : "In stock for this order"}</Badge> : <span className="faint">{sent > 0 ? `${units(sent)} of ${units(qty)}` : "Not sent"}</span>}
               </td>
             </tr>
           );
@@ -139,7 +139,7 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
         {o.total != null && o.total !== o.grand_total && (
           <tr>
             <td colSpan={3} data-label="">
-              Items
+              {tr("Items")}
             </td>
             <td className="num">{say(o.total)}</td>
             <td />
@@ -155,7 +155,7 @@ function Items({ o, code }: { o: Full; code?: string | null }) {
             </tr>
           ))}
         <tr className="bold">
-          <td colSpan={3}>Total</td>
+          <td colSpan={3}>{tr("Total")}</td>
           <td className="num">{say(o.rounded_total ?? o.grand_total)}</td>
           <td />
         </tr>
@@ -180,27 +180,27 @@ function Payment({ p, order, mayAsk, mayTake, onPaid, onRefund }: { p: Request; 
           <>
             {" · "}
             <code className="mono">{p.gateway_reference}</code>{" "}
-            <button type="button" className="icon-btn icon-btn-sm" aria-label="Copy payment reference" title="Copy payment reference" onClick={() => void copy(p.gateway_reference ?? "", "Payment reference")}>
+            <button type="button" className="icon-btn icon-btn-sm" aria-label={tr("Copy payment reference")} title={tr("Copy payment reference")} onClick={() => void copy(p.gateway_reference ?? "", "Payment reference")}>
               <Icon name="copy" size={13} />
             </button>
           </>
         )}
       </p>
-      {Number(p.refunded_amount ?? 0) > 0 && <p className="cm-payment-line">{sum(p.refunded_amount)} sent back so far.</p>}
+      {Number(p.refunded_amount ?? 0) > 0 && <p className="cm-payment-line">{sum(p.refunded_amount)} {tr("sent back so far.")}</p>}
       <div className="row">
         {p.status === "Initiated" && p.payment_url && (
           <Button size="sm" icon="copy" onClick={() => void copy(p.payment_url ?? "", "Payment link")}>
-            Copy payment link
+            {tr("Copy payment link")}
           </Button>
         )}
         {p.status === "Initiated" && isOffline(p.gateway) && mayTake && (
           <Button size="sm" variant="primary" icon="check" onClick={onPaid}>
-            Mark paid
+            {tr("Mark paid")}
           </Button>
         )}
         {p.status === "Paid" && mayAsk && order.docstatus === 1 && (
           <Button size="sm" icon="refresh" onClick={onRefund}>
-            Send money back…
+            {tr("Send money back…")}
           </Button>
         )}
       </div>
@@ -229,11 +229,11 @@ function OrderPage({ id }: { id: string }) {
   useShellTitle(o?.number ? `Order ${o.number}` : null);
 
   if (order.error) return <ErrorState error={order.error} onRetry={() => void order.refetch()} />;
-  if (!o) return <PageLoading label="Loading the order" />;
+  if (!o) return <PageLoading label={tr("Loading the order")} />;
   if (!o.commerce_web_order) {
     return (
-      <EmptyState title="This is not a web order" icon="file">
-        <a href={open("SalesOrder", id)}>Open it in sales</a>
+      <EmptyState title={tr("This is not a web order")} icon="file">
+        <a href={open("SalesOrder", id)}>{tr("Open it in sales")}</a>
       </EmptyState>
     );
   }
@@ -263,7 +263,7 @@ function OrderPage({ id }: { id: string }) {
   const primary =
     next.step === "ship" && rights.ships ? (
       <Button variant="primary" icon="check" onClick={() => setShipping(true)}>
-        Ship
+        {tr("Ship")}
       </Button>
     ) : next.step === "invoice" && rights.ships ? (
       <Button variant="primary" icon="doc" loading={busy} onClick={() => void done(() => invoiceOrder(o))}>
@@ -294,7 +294,7 @@ function OrderPage({ id }: { id: string }) {
   return (
     <div className="cm-page cm-order-page">
       <div className="crumbs">
-        <Link to="/orders">Orders</Link>
+        <Link to="/orders">{tr("Orders")}</Link>
         <Icon name="chevronRight" size={12} />
       </div>
       <header className="cm-order-top">
@@ -308,21 +308,21 @@ function OrderPage({ id }: { id: string }) {
           {primary}
           {paidRequest && rights.asks && !cancelled && (
             <Button icon="refresh" onClick={() => setRefunding(true)}>
-              Send money back…
+              {tr("Send money back…")}
             </Button>
           )}
-          <Menu ariaLabel="More about this order" icon="chevronDown" label="More" buttonClass="btn btn-default btn-md">
+          <Menu ariaLabel="More about this order" icon="chevronDown" label={tr("More")} buttonClass="btn btn-default btn-md">
             {(close) => (
               <>
                 <MenuItem
                   onSelect={() => {
                     close();
                     void trackingLink(id)
-                      .then((link) => (link ? copy(link, "Tracking link") : toast("The store has no web address yet, so there is no tracking link to make.", "error")))
-                      .catch(() => toast("The tracking link could not be made.", "error"));
+                      .then((link) => (link ? copy(link, "Tracking link") : toast(tr("The store has no web address yet, so there is no tracking link to make."), "error")))
+                      .catch(() => toast(tr("The tracking link could not be made."), "error"));
                   }}
                 >
-                  Copy the shopper's tracking link
+                  {tr("Copy the shopper's tracking link")}
                 </MenuItem>
                 <MenuItem
                   onSelect={() => {
@@ -330,7 +330,7 @@ function OrderPage({ id }: { id: string }) {
                     window.location.assign(open("SalesOrder", id));
                   }}
                 >
-                  Open in sales
+                  {tr("Open in sales")}
                 </MenuItem>
                 <MenuItem
                   onSelect={() => {
@@ -338,7 +338,7 @@ function OrderPage({ id }: { id: string }) {
                     window.print();
                   }}
                 >
-                  Print this page
+                  {tr("Print this page")}
                 </MenuItem>
               </>
             )}
@@ -347,10 +347,10 @@ function OrderPage({ id }: { id: string }) {
       </header>
 
       {cancelled ? (
-        <Alert tone="warning">This order was cancelled.</Alert>
+        <Alert tone="warning">{tr("This order was cancelled.")}</Alert>
       ) : (
         <>
-          <ol className="cm-strip" aria-label="Where the order is">
+          <ol className="cm-strip" aria-label={tr("Where the order is")}>
             {steps.map((s, i) => (
               <li key={s.id} data-state={s.done ? "past" : i === current ? "current" : undefined}>
                 <span aria-current={i === current ? "step" : undefined}>{s.label}</span>
@@ -365,15 +365,15 @@ function OrderPage({ id }: { id: string }) {
 
       <div className="cm-body">
         <div className="cm-main">
-          <Section id="o-items" title="Items">
+          <Section id="o-items" title={tr("Items")}>
             <Items o={o} code={code} />
           </Section>
 
-          <Section id="o-pay" title="Payment">
+          <Section id="o-pay" title={tr("Payment")}>
             {more.error ? (
               <ErrorState error={more.error} onRetry={() => void more.refetch()} />
             ) : !more.data ? (
-              <p className="muted">Loading payments…</p>
+              <p className="muted">{tr("Loading payments…")}</p>
             ) : more.data.payments.length ? (
               <ul className="cm-payments">
                 {more.data.payments.map((p) => (
@@ -385,11 +385,11 @@ function OrderPage({ id }: { id: string }) {
             )}
           </Section>
 
-          <Section id="o-send" title="Shipping and invoices">
+          <Section id="o-send" title={tr("Shipping and invoices")}>
             {more.error ? (
-              <p className="muted">Shipping and invoices could not be loaded.</p>
+              <p className="muted">{tr("Shipping and invoices could not be loaded.")}</p>
             ) : !more.data ? (
-              <p className="muted">Loading…</p>
+              <p className="muted">{tr("Loading…")}</p>
             ) : more.data.deliveries.length || more.data.invoices.length ? (
               <ul className="cm-docs">
                 {more.data.deliveries.map((n) => (
@@ -404,7 +404,7 @@ function OrderPage({ id }: { id: string }) {
                             <>
                               {" "}
                               <a href={n.commerce_tracking_url} target="_blank" rel="noopener noreferrer">
-                                Track it
+                                {tr("Track it")}
                               </a>
                             </>
                           )}
@@ -431,7 +431,7 @@ function OrderPage({ id }: { id: string }) {
           </Section>
 
           {(counts.refunds > 0 || counts.exceptions > 0) && more.data && (
-            <Section id="o-refunds" title="Money sent back">
+            <Section id="o-refunds" title={tr("Money sent back")}>
               <ul className="cm-moneys">
                 {more.data.refunds.map((r) => (
                   <RefundRow key={r.id} r={r} rights={rights} showOrder={false} onChange={refresh} />
@@ -444,16 +444,16 @@ function OrderPage({ id }: { id: string }) {
           )}
         </div>
 
-        <aside className="cm-side" aria-label="About this order">
-          <Section id="o-customer" title="Customer">
+        <aside className="cm-side" aria-label={tr("About this order")}>
+          <Section id="o-customer" title={tr("Customer")}>
             <dl className="kv">
               <div>
-                <dt>Name</dt>
+                <dt>{tr("Name")}</dt>
                 <dd>{o.customer_name}</dd>
               </div>
               {o.commerce_contact_email && (
                 <div>
-                  <dt>Email</dt>
+                  <dt>{tr("Email")}</dt>
                   <dd>
                     <a href={`mailto:${o.commerce_contact_email}`}>{o.commerce_contact_email}</a>
                   </dd>
@@ -461,7 +461,7 @@ function OrderPage({ id }: { id: string }) {
               )}
               {o.commerce_contact_phone && (
                 <div>
-                  <dt>Phone</dt>
+                  <dt>{tr("Phone")}</dt>
                   <dd>
                     <a href={`tel:${o.commerce_contact_phone}`}>{o.commerce_contact_phone}</a>
                   </dd>
@@ -469,36 +469,36 @@ function OrderPage({ id }: { id: string }) {
               )}
               {o.commerce_payment_method && (
                 <div>
-                  <dt>Pays with</dt>
+                  <dt>{tr("Pays with")}</dt>
                   <dd>{o.commerce_payment_method}</dd>
                 </div>
               )}
               {o._titles?.commerce_shipping_rule && (
                 <div>
-                  <dt>Delivery</dt>
+                  <dt>{tr("Delivery")}</dt>
                   <dd>{o._titles.commerce_shipping_rule}</dd>
                 </div>
               )}
               {o._titles?.commerce_coupon && (
                 <div>
-                  <dt>Coupon</dt>
+                  <dt>{tr("Coupon")}</dt>
                   <dd>{o._titles.commerce_coupon}</dd>
                 </div>
               )}
             </dl>
             {o.customer && (
               <p className="cm-tight">
-                <a href={open("Customer", o.customer)}>Open the customer</a>
+                <a href={open("Customer", o.customer)}>{tr("Open the customer")}</a>
               </p>
             )}
           </Section>
 
           {o.commerce_shipping_address && (
-            <Section id="o-ship" title="Goes to">
+            <Section id="o-ship" title={tr("Goes to")}>
               <address className="cm-address">{o.commerce_shipping_address}</address>
               {o.commerce_billing_address && o.commerce_billing_address !== o.commerce_shipping_address && (
                 <>
-                  <h3 className="cm-minor">Bill to</h3>
+                  <h3 className="cm-minor">{tr("Bill to")}</h3>
                   <address className="cm-address">{o.commerce_billing_address}</address>
                 </>
               )}
@@ -506,16 +506,16 @@ function OrderPage({ id }: { id: string }) {
           )}
 
           {o.commerce_notes && (
-            <Section id="o-notes" title="Customer's note">
+            <Section id="o-notes" title={tr("Customer's note")}>
               <p className="cm-note">{o.commerce_notes}</p>
             </Section>
           )}
 
-          <Section id="o-story" title="What happened">
+          <Section id="o-story" title={tr("What happened")}>
             {more.error ? (
-              <p className="muted">The story could not be loaded.</p>
+              <p className="muted">{tr("The story could not be loaded.")}</p>
             ) : !more.data ? (
-              <p className="muted">Loading…</p>
+              <p className="muted">{tr("Loading…")}</p>
             ) : (
               <>
                 <ol className="cm-story">
@@ -535,7 +535,7 @@ function OrderPage({ id }: { id: string }) {
                         {e.who && <div className="faint cm-story-detail">{e.who}</div>}
                         {e.to && /^https:\/\//.test(e.to) && (
                           <a href={e.to} target="_blank" rel="noopener noreferrer">
-                            Track it
+                            {tr("Track it")}
                           </a>
                         )}
                       </div>
@@ -544,7 +544,7 @@ function OrderPage({ id }: { id: string }) {
                 </ol>
                 {hidden > 0 && (
                   <button type="button" className="link-btn" onClick={() => setShowAll(true)}>
-                    Show {hidden} older {hidden === 1 ? "entry" : "entries"}
+                    {tr("Show {hidden} older", { hidden })} {hidden === 1 ? "entry" : "entries"}
                   </button>
                 )}
               </>
