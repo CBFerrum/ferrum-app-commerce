@@ -5,7 +5,7 @@
 
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router";
-import { api, docPath, errorMessage, relativeTime, t } from "@ferrum/client";
+import { api, docPath, errorMessage, relativeTime, t, isolate } from "@ferrum/client";
 import { Alert, Badge, Button, confirmDialog, Dialog, Field, Icon, Menu, MenuItem, toast } from "@ferrum/kit";
 import { amountText } from "./queues";
 import { copy, type Rights } from "./data";
@@ -21,8 +21,8 @@ function Card({ words, title, meta, children, actions, id }: { words: Words; tit
           {title}
         </div>
         <div className="cm-money-words">
-          <Badge tone={words.tone}>{words.headline}</Badge>
-          {words.detail && <span className="cm-money-detail">{words.detail}</span>}
+          <Badge tone={words.tone}>{isolate(words.headline)}</Badge>
+          {words.detail && <span className="cm-money-detail">{isolate(words.detail)}</span>}
         </div>
         {children}
         <div className="cm-money-meta faint">{meta}</div>
@@ -36,8 +36,8 @@ function Reference({ value, what }: { value?: string | null; what: string }) {
   if (!value) return null;
   return (
     <span className="cm-ref">
-      <code className="mono">{value}</code>
-      <button type="button" className="icon-btn icon-btn-sm" aria-label={`Copy ${what}`} title={`Copy ${what}`} onClick={() => void copy(value, what)}>
+      <code className="mono">{isolate(value)}</code>
+      <button type="button" className="icon-btn icon-btn-sm" aria-label={t("Copy {what}", { what })} title={t("Copy {what}", { what })} onClick={() => void copy(value, what)}>
         <Icon name="copy" size={13} />
       </button>
     </span>
@@ -74,7 +74,7 @@ function Say({ title, label, hint, required, reference, confirm, danger, onClose
   return (
     <Dialog open onClose={busy ? () => {} : onClose} title={title}>
       <form className="stack" onSubmit={submit}>
-        {error && <Alert tone="error">{error}</Alert>}
+        {error && <Alert tone="error">{isolate(error)}</Alert>}
         <Field label={label} htmlFor="say-note" required={required} hint={hint}>
           <textarea id="say-note" className="textarea" rows={3} value={note} maxLength={2000} required={required} onChange={(e) => setNote(e.target.value)} />
         </Field>
@@ -88,7 +88,7 @@ function Say({ title, label, hint, required, reference, confirm, danger, onClose
             {t("Cancel")}
           </Button>
           <Button type="submit" variant={danger ? "danger" : "primary"} loading={busy} disabled={required && !note.trim()}>
-            {confirm}
+            {isolate(confirm)}
           </Button>
         </div>
       </form>
@@ -115,7 +115,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
     setBusy(name);
     try {
       const done = await run(name);
-      if (done.booked === false || done.error) toast(done.error ?? done.booking_error ?? "It could not be posted yet.", "error");
+      if (done.booked === false || done.error) toast(done.error ?? done.booking_error ?? t("It could not be posted yet."), "error");
       else toast(good);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -125,19 +125,19 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
   };
   const approve = async () => {
     const ok = await confirmDialog({
-      title: `Send ${amountText(r.amount, r.currency_code)} back?`,
+      title: t("Send {value} back?", { value: amountText(r.amount, r.currency_code) }),
       message: (
         <>
           <p>
-            {gatewayName(r.gateway)} {t("sends it to the shopper who paid")}{r.order_number ? ` for order ${r.order_number}` : ""}{t(". This sends money and cannot be undone.")}
+            {isolate(gatewayName(r.gateway))} {t("sends it to the shopper who paid")}{r.order_number ? t(" for order {order_number}", { order_number: r.order_number }) : ""}{t(". This sends money and cannot be undone.")}
           </p>
-          {r.note && <p className="muted">“{r.note}”</p>}
+          {r.note && <p className="muted">“{isolate(r.note)}”</p>}
         </>
       ),
-      confirmLabel: `Send ${amountText(r.amount, r.currency_code)}`,
+      confirmLabel: t("Send {value}", { value: amountText(r.amount, r.currency_code) }),
       danger: true,
     });
-    if (ok) await attempt("approve_refund", "Approved. The gateway sends it within a few minutes.");
+    if (ok) await attempt("approve_refund", t("Approved. The gateway sends it within a few minutes."));
   };
   const can = rights.decides;
   const status = r.status;
@@ -148,7 +148,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       </Button>
     ) : (
       <Button variant="primary" size="sm" icon="check" loading={busy === "approve_refund"} onClick={() => void approve()}>
-        {status === "Refund Failed" ? "Approve again" : "Approve"}
+        {status === "Refund Failed" ? t("Approve again") : t("Approve")}
       </Button>
     )
   ) : status === "Approved" && cash ? (
@@ -156,7 +156,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       {t("I refunded it")}
     </Button>
   ) : status === "Refunded" && !r.booked ? (
-    <Button variant="primary" size="sm" icon="refresh" loading={busy === "post_books"} onClick={() => void attempt("post_books", "Posted to the books")}>
+    <Button variant="primary" size="sm" icon="refresh" loading={busy === "post_books"} onClick={() => void attempt("post_books", t("Posted to the books"))}>
       {t("Try posting again")}
     </Button>
   ) : null;
@@ -197,21 +197,21 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
         words={words}
         title={
           <>
-            <strong>{amountText(r.amount, r.currency_code)}</strong>
-            <span className="muted"> · {r.kind === "Cancellation" ? "order cancelled" : "goods back"}</span>
+            <strong>{isolate(amountText(r.amount, r.currency_code))}</strong>
+            <span className="muted"> · {r.kind === "Cancellation" ? t("order cancelled") : t("goods back")}</span>
             {showOrder && r.sales_order && (
               <>
-                {" "}
-                · <Link to={`/o/${r.sales_order}`}>{r.order_number ?? "order"}</Link>
+                {isolate(" ")}
+                · <Link to={`/o/${r.sales_order}`}>{r.order_number ?? t("order")}</Link>
               </>
             )}
           </>
         }
         meta={
           <>
-            {r.number} · {gatewayName(r.gateway)}
-            {r.created_at ? ` · asked ${relativeTime(r.created_at)}` : ""}
-            {r.approved_by ? ` · approved by ${r.approved_by}` : ""} <Reference value={r.payment_reference} what="payment reference" />
+            {isolate(r.number ?? "")} · {isolate(gatewayName(r.gateway))}
+            {r.created_at ? t(" · asked {value}", { value: relativeTime(r.created_at) }) : ""}
+            {r.approved_by ? t(" · approved by {approved_by}", { approved_by: r.approved_by }) : ""} <Reference value={r.payment_reference} what="payment reference" />
           </>
         }
         actions={
@@ -221,7 +221,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
           </>
         }
       >
-        {r.note && <p className="cm-money-note">“{r.note}”</p>}
+        {r.note && <p className="cm-money-note">“{isolate(r.note)}”</p>}
         {rights.ready && !can && (r.status === "Requested" || r.status === "Refund Failed") && <p className="faint cm-money-note">{t("A manager decides this.")}</p>}
       </Card>
       {asking === "decline" && (
@@ -265,9 +265,9 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
   const approve = async () => {
     const sum = x.amount != null && x.amount !== "" ? amountText(x.amount, x.currency_code) : "this payment";
     const ok = await confirmDialog({
-      title: `Send ${sum} back?`,
-      message: `${gatewayName(x.gateway)} refunds the whole payment (${x.gateway_reference ?? "no reference"}) to the payer. This sends money and cannot be undone.`,
-      confirmLabel: "Refund it",
+      title: t("Send {sum} back?", { sum }),
+      message: t("{value} refunds the whole payment ({value2}) to the payer. This sends money and cannot be undone.", { value: gatewayName(x.gateway), value2: x.gateway_reference ?? "no reference" }),
+      confirmLabel: t("Refund it"),
       danger: true,
     });
     if (!ok) return;
@@ -289,11 +289,11 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
         words={words}
         title={
           <>
-            <strong>{x.amount != null && x.amount !== "" ? amountText(x.amount, x.currency_code) : "An amount the gateway did not say"}</strong>
+            <strong>{x.amount != null && x.amount !== "" ? amountText(x.amount, x.currency_code) : t("An amount the gateway did not say")}</strong>
             <span className="muted"> {t("· payment not booked")}</span>
             {(order || x._titles?.payment_request) && (
               <>
-                {" "}
+                {isolate(" ")}
                 · {order ? <Link to={`/o/${order.id}`}>{order.number ?? x._titles?.payment_request}</Link> : x._titles?.payment_request}
               </>
             )}
@@ -301,16 +301,16 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
         }
         meta={
           <>
-            {gatewayName(x.gateway)}
-            {x.created_at ? ` · reported ${relativeTime(x.created_at)}` : ""}
-            {x.approved_by ? ` · approved by ${x.approved_by}` : ""} <Reference value={x.gateway_reference} what="payment reference" />
+            {isolate(gatewayName(x.gateway))}
+            {x.created_at ? t(" · reported {value}", { value: relativeTime(x.created_at) }) : ""}
+            {x.approved_by ? t(" · approved by {approved_by}", { approved_by: x.approved_by }) : ""} <Reference value={x.gateway_reference} what="payment reference" />
           </>
         }
         actions={
           rights.settles && open ? (
             <>
               <Button variant="primary" size="sm" icon="check" loading={busy} onClick={() => void approve()}>
-                {x.status === "Refund Failed" ? "Approve again" : "Approve refund"}
+                {x.status === "Refund Failed" ? t("Approve again") : t("Approve refund")}
               </Button>
               <Button size="sm" onClick={() => setAsking(true)}>
                 {t("Settled another way")}

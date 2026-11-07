@@ -1,3 +1,4 @@
+import { t as tr } from "@ferrum/client";
 // The web-order desk's rules, kept apart so they are tested without a browser: which queue an order
 // sits in, the one next step it asks for, how the queues count, how long it has waited, and what has
 // to be picked from the shelves. The server holds the real rules (what may be shipped, invoiced or
@@ -27,10 +28,10 @@ export interface Order {
 export type Stage = "pay" | "ship" | "invoice" | "done";
 
 export const STAGES: { id: Stage; label: string; hint: string }[] = [
-  { id: "pay", label: "To pay", hint: "Waiting for money" },
-  { id: "ship", label: "To ship", hint: "Paid, or paid on delivery: pick, pack and send" },
-  { id: "invoice", label: "To invoice", hint: "Sent, not invoiced yet" },
-  { id: "done", label: "Done", hint: "Delivered and settled, or cancelled" },
+  { id: "pay", get label() { return tr("To pay"); }, get hint() { return tr("Waiting for money"); } },
+  { id: "ship", get label() { return tr("To ship"); }, get hint() { return tr("Paid, or paid on delivery: pick, pack and send"); } },
+  { id: "invoice", get label() { return tr("To invoice"); }, get hint() { return tr("Sent, not invoiced yet"); } },
+  { id: "done", get label() { return tr("Done"); }, get hint() { return tr("Delivered and settled, or cancelled"); } },
 ];
 
 const num = (v: unknown) => {
@@ -74,17 +75,17 @@ export function nextStep(o: Order): Next {
     case "ship":
       return {
         step: "ship",
-        label: "Ship",
+        label: tr("Ship"),
         why: method === "Cash on Delivery" && !isPaid(o) ? "Cash on delivery: the courier collects the money." : o.commerce_payment_status === "Not Required" ? "Nothing to pay. Pack it and send it." : "Paid. Pack it and hand it to the carrier.",
       };
     case "invoice":
-      return { step: "invoice", label: "Create invoice", why: "Sent, but not invoiced yet." };
+      return { step: "invoice", label: tr("Create invoice"), why: "Sent, but not invoiced yet." };
     case "pay":
       if (o.commerce_payment_status === "Failed" || o.commerce_payment_status === "Expired") {
         return { step: "wait", label: "", why: `The payment ${o.commerce_payment_status === "Failed" ? "failed" : "ran out of time"}. The shopper can pay again from their order link.` };
       }
-      if (method === "Manual") return { step: "mark_paid", label: "Mark paid", why: "Bank transfer: mark it paid when the money arrives." };
-      if (method === "Cash on Delivery") return { step: "mark_paid", label: "Mark paid", why: "Sent. Record the cash the courier brought." };
+      if (method === "Manual") return { step: "mark_paid", label: tr("Mark paid"), why: "Bank transfer: mark it paid when the money arrives." };
+      if (method === "Cash on Delivery") return { step: "mark_paid", label: tr("Mark paid"), why: "Sent. Record the cash the courier brought." };
       return { step: "wait", label: "", why: method ? `Waiting for ${method} to confirm the shopper's payment.` : "Waiting for the shopper to pay." };
     default:
       return { step: "none", label: "", why: o.status === "Cancelled" || o.docstatus === 2 ? "Cancelled." : "Nothing left to do." };

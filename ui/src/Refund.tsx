@@ -6,7 +6,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { api, docPath, errorMessage, t } from "@ferrum/client";
+import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
 import { Alert, Button, confirmDialog, Dialog, Field, Spinner, toast, useDebounced } from "@ferrum/kit";
 import { amountText, units } from "./queues";
 import { f, list, type Rights } from "./data";
@@ -23,8 +23,8 @@ function Stepper({ line, value, onChange }: { line: PlanLine; value: number; onC
   const max = Number(line.returnable);
   const name = line.name ?? "item";
   return (
-    <div className="cm-stepper" role="group" aria-label={`How many ${name} come back`}>
-      <button type="button" className="btn btn-default btn-sm" aria-label={`One fewer ${name}`} disabled={value <= 0} onClick={() => onChange(clampQty(value - 1, max))}>
+    <div className="cm-stepper" role="group" aria-label={t("How many {name} come back", { name })}>
+      <button type="button" className="btn btn-default btn-sm" aria-label={t("One fewer {name}", { name })} disabled={value <= 0} onClick={() => onChange(clampQty(value - 1, max))}>
         −
       </button>
       <input
@@ -34,12 +34,12 @@ function Stepper({ line, value, onChange }: { line: PlanLine; value: number; onC
         min={0}
         max={max}
         step="any"
-        aria-label={`Number of ${name} to send back`}
+        aria-label={t("Number of {name} to send back", { name })}
         value={value || ""}
         placeholder="0"
         onChange={(e) => onChange(clampQty(e.target.value, max))}
       />
-      <button type="button" className="btn btn-default btn-sm" aria-label={`One more ${name}`} disabled={value >= max} onClick={() => onChange(clampQty(value + 1, max))}>
+      <button type="button" className="btn btn-default btn-sm" aria-label={t("One more {name}", { name })} disabled={value >= max} onClick={() => onChange(clampQty(value + 1, max))}>
         +
       </button>
     </div>
@@ -86,9 +86,9 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
     const sends = rights.decides && !offline;
     if (sends) {
       const ok = await confirmDialog({
-        title: `Send ${money(amount)} back?`,
-        message: `${gatewayName(p.payment.gateway)} sends it to the shopper who paid. This sends money and cannot be undone.`,
-        confirmLabel: `Send ${money(amount)}`,
+        title: t("Send {amount} back?", { amount: money(amount) }),
+        message: t("{value} sends it to the shopper who paid. This sends money and cannot be undone.", { value: gatewayName(p.payment.gateway) }),
+        confirmLabel: t("Send {amount}", { amount: money(amount) }),
         danger: true,
       });
       if (!ok) return;
@@ -104,7 +104,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       return;
     }
     if (!sends) {
-      toast(offline ? "Noted. Hand the money back, then say you did." : "Asked for. A manager decides.");
+      toast(offline ? t("Noted. Hand the money back, then say you did.") : t("Asked for. A manager decides."));
       onDone();
       return;
     }
@@ -112,7 +112,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       await api.post(docPath("OrderRefund", made.id, "actions", "approve_refund"), {});
       toast(t("Approved. The gateway sends it within a few minutes."));
     } catch (err) {
-      toast(`Asked for, but not approved: ${errorMessage(err)}`, "error");
+      toast(t("Asked for, but not approved: {err}", { err: errorMessage(err) }), "error");
     }
     onDone();
   };
@@ -120,7 +120,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
   const body = plan.error && !p ? (
     <div className="state" role="alert">
       <p className="state-title">{t("The refund cannot be worked out")}</p>
-      <p className="muted">{errorMessage(plan.error)}</p>
+      <p className="muted">{isolate(errorMessage(plan.error))}</p>
       <Button icon="refresh" onClick={() => void plan.refetch()}>
         {t("Try again")}
       </Button>
@@ -131,16 +131,16 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       <span className="muted">{t("Looking at the order…")}</span>
     </div>
   ) : !p.payable ? (
-    <Alert tone="info">{p.why}</Alert>
+    <Alert tone="info">{isolate(p.why ?? "")}</Alert>
   ) : (
     <div className="cm-refund">
       <div className="cm-refund-main stack">
-        {error && <Alert tone="error">{error}</Alert>}
+        {error && <Alert tone="error">{isolate(error)}</Alert>}
         <div className="segmented" role="group" aria-label={t("What happens")}>
           <button type="button" aria-pressed={current === "Return"} onClick={() => setKind("Return")}>
             {t("Goods come back")}
           </button>
-          <button type="button" aria-pressed={current === "Cancellation"} disabled={!p.cancel?.allowed} title={p.cancel?.allowed ? undefined : "This order has shipped or is already being refunded"} onClick={() => setKind("Cancellation")}>
+          <button type="button" aria-pressed={current === "Cancellation"} disabled={!p.cancel?.allowed} title={p.cancel?.allowed ? undefined : t("This order has shipped or is already being refunded")} onClick={() => setKind("Cancellation")}>
             {t("Cancel the order")}
           </button>
         </div>
@@ -148,7 +148,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
           <>
             {!p.lines?.some((l) => Number(l.returnable) > 0) ? (
               <Alert tone="info">
-                {p.lines?.some((l) => Number(l.delivered) > 0 && !l.invoiced) ? "Nothing can come back until the order is invoiced: a return credits the invoice." : "Nothing on this order can come back: it was not delivered, or it has all come back already."}
+                {p.lines?.some((l) => Number(l.delivered) > 0 && !l.invoiced) ? t("Nothing can come back until the order is invoiced: a return credits the invoice.") : t("Nothing on this order can come back: it was not delivered, or it has all come back already.")}
               </Alert>
             ) : (
               <ul className="cm-refund-lines">
@@ -160,9 +160,9 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
                     return (
                       <li key={l.id} className="cm-refund-line" data-chosen={qty > 0 || undefined}>
                         <div className="cm-refund-what">
-                          <strong>{l.name}</strong>
+                          <strong>{isolate(l.name ?? "")}</strong>
                           <span className="faint">
-                            {units(Number(l.delivered))} {t("delivered ·")} {max > 0 ? `${units(max)} can come back` : l.invoiced ? "all back already" : "not invoiced yet"}
+                            {isolate(units(Number(l.delivered)))} {t("delivered ·")} {max > 0 ? t("{max} can come back", { max: units(max) }) : l.invoiced ? t("all back already") : t("not invoiced yet")}
                           </span>
                         </div>
                         {max > 0 ? (
@@ -181,7 +181,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
             )}
             <label className="check-field">
               <input type="checkbox" checked={choice.shipping} disabled={!p.shipping?.available} onChange={(e) => setChoice({ ...choice, shipping: e.target.checked })} />
-              <span>{p.shipping?.available ? "Refund the delivery charge too" : "The delivery charge cannot be refunded (there is none, or it went back already)"}</span>
+              <span>{p.shipping?.available ? t("Refund the delivery charge too") : t("The delivery charge cannot be refunded (there is none, or it went back already)")}</span>
             </label>
           </>
         ) : (
@@ -194,7 +194,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
             <option value="">{t("Choose a reason…")}</option>
             {reasons.data?.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.reason}
+                {isolate(r.reason)}
               </option>
             ))}
           </select>
@@ -213,19 +213,19 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
           <dl className="kv">
             <div>
               <dt>{t("Through")}</dt>
-              <dd>{gateway}</dd>
+              <dd>{isolate(gateway)}</dd>
             </div>
             <div>
               <dt>{t("Paid")}</dt>
-              <dd>{money(p.payment.paid)}</dd>
+              <dd>{isolate(money(p.payment.paid))}</dd>
             </div>
             <div>
               <dt>{t("Sent back or asked for")}</dt>
-              <dd>{money(p.payment.held)}</dd>
+              <dd>{isolate(money(p.payment.held))}</dd>
             </div>
             <div>
               <dt>{t("Can still go back")}</dt>
-              <dd>{money(p.payment.refundable)}</dd>
+              <dd>{isolate(money(p.payment.refundable))}</dd>
             </div>
           </dl>
         )}
@@ -234,7 +234,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
           <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
           <span>{t("Tell the shopper")}</span>
         </label>
-        {!ready.ok && ready.why && <p className="cm-refund-why" role="status">{ready.why}</p>}
+        {!ready.ok && ready.why && <p className="cm-refund-why" role="status">{isolate(ready.why)}</p>}
       </aside>
     </div>
   );
@@ -244,14 +244,14 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       open
       wide
       onClose={busy ? () => {} : onClose}
-      title={`Send money back · ${order.number ?? "order"}`}
+      title={t("Send money back · {value}", { value: order.number ?? "order" })}
       footer={
         <>
           <Button onClick={onClose} disabled={busy}>
             {t("Close")}
           </Button>
           <Button variant="primary" loading={busy} disabled={!ready.ok} onClick={() => void submit()}>
-            {p?.payment?.offline ? "Start the refund" : rights.decides ? (amount && Number(amount) > 0 ? `Send ${money(amount)}` : "Send it back") : "Ask for approval"}
+            {p?.payment?.offline ? t("Start the refund") : rights.decides ? (amount && Number(amount) > 0 ? t("Send {amount}", { amount: money(amount) }) : t("Send it back")) : t("Ask for approval")}
           </Button>
         </>
       }

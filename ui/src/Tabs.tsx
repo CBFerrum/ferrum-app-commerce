@@ -17,7 +17,7 @@ export function Tabs() {
         <NavLink to="/money">
           {t("Money")}
           {!!waiting && (
-            <span className="cm-count" title={`${waiting} waiting for a decision`}>
+            <span className="cm-count" title={t("{waiting} waiting for a decision", { waiting })}>
               <span className="sr-only">{t("{waiting} waiting for a decision", { waiting })}</span>
               <span aria-hidden="true">{waiting}</span>
             </span>

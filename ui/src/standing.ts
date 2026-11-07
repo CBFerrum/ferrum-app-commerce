@@ -1,3 +1,4 @@
+import { t as tr } from "@ferrum/client";
 // Money that needs a person: refunds waiting for a decision, and payments a gateway took and could not
 // book. Where each stands, in words, and which list it belongs on. Pure, so it is tested without a
 // browser. The server keeps the states and what may follow each; this only says them.
@@ -53,9 +54,9 @@ export interface Exception {
 export type Bucket = "decide" | "waiting" | "done";
 
 export const BUCKETS: { id: Bucket; label: string }[] = [
-  { id: "decide", label: "Needs a decision" },
-  { id: "waiting", label: "With the gateway" },
-  { id: "done", label: "Done" },
+  { id: "decide", get label() { return tr("Needs a decision"); } },
+  { id: "waiting", get label() { return tr("With the gateway"); } },
+  { id: "done", get label() { return tr("Done"); } },
 ];
 
 export function refundBucket(r: Refund): Bucket {
