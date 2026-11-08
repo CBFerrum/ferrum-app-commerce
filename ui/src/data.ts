@@ -112,8 +112,8 @@ export async function markPaid(order: { id: string; number?: string | null }): P
       return false;
     }
     const ok = await confirmDialog({
-      title: t("Mark {value} as paid?", { value: order.number ?? "this order" }),
-      message: t("{value} received{value2}. The payment goes into the books.", { value: amountText(request.amount, request.currency_code), value2: request.gateway ? ` by ${request.gateway}` : "" }),
+      title: t("Mark {value} as paid?", { value: order.number ?? t("this order") }),
+      message: (request.gateway ? t("{value} received by {gateway}. The payment goes into the books.", { value: amountText(request.amount, request.currency_code), gateway: request.gateway }) : t("{value} received. The payment goes into the books.", { value: amountText(request.amount, request.currency_code) })),
       confirmLabel: t("Mark paid"),
     });
     if (!ok) return false;
@@ -128,7 +128,7 @@ export async function markPaid(order: { id: string; number?: string | null }): P
 
 /** Invoices a delivered order, after asking. */
 export async function invoiceOrder(order: { id: string; number?: string | null }): Promise<boolean> {
-  const ok = await confirmDialog({ title: t("Invoice {value}?", { value: order.number ?? "this order" }), message: t("The invoice is made and posted. A payment already received is applied to it."), confirmLabel: t("Create invoice") });
+  const ok = await confirmDialog({ title: t("Invoice {value}?", { value: order.number ?? t("this order") }), message: t("The invoice is made and posted. A payment already received is applied to it."), confirmLabel: t("Create invoice") });
   if (!ok) return false;
   try {
     await api.post(docPath("SalesOrder", order.id, "actions", "web_invoice"), {});

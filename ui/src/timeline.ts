@@ -129,7 +129,7 @@ export function timeline(i: Input, say: Say): Entry[] {
   }
   for (const r of i.refunds) {
     const sum = say.money(r.amount, r.currency_code);
-    add({ key: `r-${r.id}-ask`, at: when(r.created_at), kind: "refund", title: tr("Refund of {sum} asked for{value}", { sum, value: r.kind === "Cancellation" ? " (order cancelled)" : "" }), who: r.requested_by });
+    add({ key: `r-${r.id}-ask`, at: when(r.created_at), kind: "refund", title: tr("Refund of {sum} asked for{value}", { sum, value: r.kind === "Cancellation" ? tr(" (order cancelled)") : "" }), who: r.requested_by });
     if (r.approved_at) add({ key: `r-${r.id}-ok`, at: when(r.approved_at), kind: "refund", title: tr("Refund approved"), who: r.approved_by });
     if (r.refunded_at) add({ key: `r-${r.id}-sent`, at: when(r.refunded_at), kind: "refund", title: tr("{sum} sent back", { sum }) });
     else if (r.status === "Refund Failed") add({ key: `r-${r.id}-end`, at: when(r.updated_at, r.approved_at), kind: "refund", title: tr("The gateway could not send the refund"), detail: r.refund_error });

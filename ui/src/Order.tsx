@@ -180,7 +180,7 @@ function Payment({ p, order, mayAsk, mayTake, onPaid, onRefund }: { p: Request; 
           <>
             {isolate(" · ")}
             <code className="mono">{isolate(p.gateway_reference)}</code>{isolate(" ")}
-            <button type="button" className="icon-btn icon-btn-sm" aria-label={tr("Copy payment reference")} title={tr("Copy payment reference")} onClick={() => void copy(p.gateway_reference ?? "", "Payment reference")}>
+            <button type="button" className="icon-btn icon-btn-sm" aria-label={tr("Copy payment reference")} title={tr("Copy payment reference")} onClick={() => void copy(p.gateway_reference ?? "", tr("Payment reference"))}>
               <Icon name="copy" size={13} />
             </button>
           </>
@@ -189,7 +189,7 @@ function Payment({ p, order, mayAsk, mayTake, onPaid, onRefund }: { p: Request; 
       {Number(p.refunded_amount ?? 0) > 0 && <p className="cm-payment-line">{isolate(sum(p.refunded_amount))} {tr("sent back so far.")}</p>}
       <div className="row">
         {p.status === "Initiated" && p.payment_url && (
-          <Button size="sm" icon="copy" onClick={() => void copy(p.payment_url ?? "", "Payment link")}>
+          <Button size="sm" icon="copy" onClick={() => void copy(p.payment_url ?? "", tr("Payment link"))}>
             {tr("Copy payment link")}
           </Button>
         )}
@@ -311,7 +311,7 @@ function OrderPage({ id }: { id: string }) {
               {tr("Send money back…")}
             </Button>
           )}
-          <Menu ariaLabel="More about this order" icon="chevronDown" label={tr("More")} buttonClass="btn btn-default btn-md">
+          <Menu ariaLabel={tr("More about this order")} icon="chevronDown" label={tr("More")} buttonClass="btn btn-default btn-md">
             {(close) => (
               <>
                 <MenuItem
@@ -544,7 +544,7 @@ function OrderPage({ id }: { id: string }) {
                 </ol>
                 {hidden > 0 && (
                   <button type="button" className="link-btn" onClick={() => setShowAll(true)}>
-                    {tr("Show {hidden} older", { hidden })} {hidden === 1 ? tr("entry") : tr("entries")}
+                    {(hidden === 1 ? tr("Show {hidden} older entry", { hidden }) : tr("Show {hidden} older entries", { hidden }))}
                   </button>
                 )}
               </>

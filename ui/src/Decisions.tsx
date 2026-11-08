@@ -6,7 +6,7 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router";
 import { api, docPath, errorMessage, relativeTime, t, isolate } from "@ferrum/client";
-import { Alert, Badge, Button, confirmDialog, Dialog, Field, Icon, Menu, MenuItem, toast } from "@ferrum/kit";
+import { Alert, Badge, Button, confirmDialog, Dialog, Field, Icon, Menu, MenuItem, toast, placed } from "@ferrum/kit";
 import { amountText } from "./queues";
 import { copy, type Rights } from "./data";
 import { type Exception, exceptionWords, gatewayName, type Refund, refundWords, type Words } from "./standing";
@@ -129,7 +129,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       message: (
         <>
           <p>
-            {isolate(gatewayName(r.gateway))} {t("sends it to the shopper who paid")}{r.order_number ? t(" for order {order_number}", { order_number: r.order_number }) : ""}{t(". This sends money and cannot be undone.")}
+            {placed(t("{p1} sends it to the shopper who paid{p2}. This sends money and cannot be undone."), { p1: isolate(gatewayName(r.gateway)), p2: r.order_number ? t(" for order {order_number}", { order_number: r.order_number }) : "" })}
           </p>
           {r.note && <p className="muted">“{isolate(r.note)}”</p>}
         </>
@@ -162,7 +162,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
   ) : null;
   const more = can && (status === "Requested" || status === "Refund Failed" || (status === "Approved" && !cash));
   const secondary = more ? (
-    <Menu ariaLabel="More ways to settle this refund" icon="chevronDown" buttonClass="btn btn-default btn-sm" label={t("More")}>
+    <Menu ariaLabel={t("More ways to settle this refund")} icon="chevronDown" buttonClass="btn btn-default btn-sm" label={t("More")}>
       {(close) => (
         <>
           {!(cash && status === "Requested") && (
@@ -211,7 +211,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
           <>
             {isolate(r.number ?? "")} · {isolate(gatewayName(r.gateway))}
             {r.created_at ? t(" · asked {value}", { value: relativeTime(r.created_at) }) : ""}
-            {r.approved_by ? t(" · approved by {approved_by}", { approved_by: r.approved_by }) : ""} <Reference value={r.payment_reference} what="payment reference" />
+            {r.approved_by ? t(" · approved by {approved_by}", { approved_by: r.approved_by }) : ""} <Reference value={r.payment_reference} what={t("payment reference")} />
           </>
         }
         actions={
@@ -229,7 +229,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
           title={t("Decline this refund?")}
           label={t("Why")}
           hint={t("The person who asked will see this.")}
-          confirm="Decline"
+          confirm={t("Decline")}
           danger
           onClose={() => setAsking(null)}
           onSubmit={async (note) => {
@@ -244,8 +244,8 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
           label={t("How")}
           hint={t("For instance: cash handed back at the shop, or refunded from the provider's own dashboard. The money is booked as sent back.")}
           required
-          reference="Reference (optional)"
-          confirm="It is refunded"
+          reference={t("Reference (optional)")}
+          confirm={t("It is refunded")}
           onClose={() => setAsking(null)}
           onSubmit={async (note, ref) => {
             await run("mark_refunded", { note, ...(ref ? { refund_reference: ref } : {}) });
@@ -303,7 +303,7 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
           <>
             {isolate(gatewayName(x.gateway))}
             {x.created_at ? t(" · reported {value}", { value: relativeTime(x.created_at) }) : ""}
-            {x.approved_by ? t(" · approved by {approved_by}", { approved_by: x.approved_by }) : ""} <Reference value={x.gateway_reference} what="payment reference" />
+            {x.approved_by ? t(" · approved by {approved_by}", { approved_by: x.approved_by }) : ""} <Reference value={x.gateway_reference} what={t("payment reference")} />
           </>
         }
         actions={
@@ -331,7 +331,7 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
           label={t("How it was settled")}
           hint={t("For instance: refunded from the provider's own dashboard on 3 May.")}
           required
-          confirm="It is settled"
+          confirm={t("It is settled")}
           onClose={() => setAsking(false)}
           onSubmit={async (note) => {
             await run("resolve", { note });

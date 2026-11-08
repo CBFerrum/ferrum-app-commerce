@@ -25,9 +25,9 @@ const EXCEPTION_FIELDS = "gateway,gateway_reference,payment_request,amount,curre
 const LIMIT = 100;
 
 const NOTHING: Record<Bucket, [string, string]> = {
-  decide: ["Nothing needs a decision", "No refund is waiting, and every payment a gateway took has been booked."],
-  waiting: ["Nothing is with a gateway", "Refunds you approve show here until the gateway has sent them."],
-  done: ["Nothing finished yet", "Refunds that were sent, declined or settled show here."],
+  get decide(): [string, string] { return [t("Nothing needs a decision"), t("No refund is waiting, and every payment a gateway took has been booked.")]; },
+  get waiting(): [string, string] { return [t("Nothing is with a gateway"), t("Refunds you approve show here until the gateway has sent them.")]; },
+  get done(): [string, string] { return [t("Nothing finished yet"), t("Refunds that were sent, declined or settled show here.")]; },
 };
 
 export function Money() {

@@ -8,7 +8,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { api, errorMessage, todayIso, t as tr, isolate } from "@ferrum/client";
-import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
+import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle, placed } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
 import { f, list, soft, useWaiting, workingOrders } from "./data";
@@ -23,7 +23,7 @@ function Sales() {
     queryKey: ["commerce", "sales", end],
     queryFn: ({ signal }) => api.get<{ rows: DayRow[] }>("/api/reports/web_sales", { from_date: daysBefore(end, 29), to_date: end, group_by: "Day" }, signal).then((r) => r.rows),
   });
-  if (q.error) return <p className="muted">{tr("Sales cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
+  if (q.error) return <p className="muted">{tr("Sales cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
   if (!q.data) return <Spinner label={tr("Loading sales")} />;
   const tiles = [
     { label: tr("Today"), t: totals(q.data, end, end) },
@@ -48,7 +48,7 @@ function Sales() {
 function AtTheDesk() {
   const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
   const tally = useMemo(() => counts(q.data ?? []), [q.data]);
-  if (q.error) return <p className="muted">{tr("Orders cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
+  if (q.error) return <p className="muted">{tr("Orders cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
   if (!q.data) return <Spinner small label={tr("Loading orders")} />;
   const oldest = queue(q.data, "ship").slice(0, 5);
   return (
@@ -67,7 +67,7 @@ function AtTheDesk() {
           <ul className="cm-rows" data-ferrum-nocard>
             {oldest.map((o) => (
               <li key={o.id}>
-                <Link to={`/o/${o.id}`}>{isolate(o.number ?? "")}</Link> <span className="faint">{isolate([o.customer_name, waitedDays(o) ? `${waitedDays(o)} days` : "today"].filter(Boolean).join(" · "))}</span>
+                <Link to={`/o/${o.id}`}>{isolate(o.number ?? "")}</Link> <span className="faint">{isolate([o.customer_name, waitedDays(o) ? tr("{o} days", { o: waitedDays(o) }) : "today"].filter(Boolean).join(" · "))}</span>
                 <span className="cm-end">
                   <strong>{isolate(amountText(o.rounded_total, o._titles?.currency))}</strong>
                 </span>
@@ -101,7 +101,7 @@ function Payments() {
     queryKey: ["commerce", "payments"],
     queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
-  if (q.error) return <p className="muted">{tr("Payments cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
+  if (q.error) return <p className="muted">{tr("Payments cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
   if (!q.data) return <Spinner small label={tr("Loading payments")} />;
   if (!q.data.length) return <p className="muted">{tr("No failed or expired payments.")}</p>;
   return (
@@ -140,7 +140,7 @@ function Reviews() {
     setBusy(r.id);
     try {
       await api.patch(`/api/v1/ItemReview/${r.id}`, { status }, { ifMatch: r.version });
-      toast(tr("{value}: {reviewer_name}'s review", { value: status === "Approved" ? "Published" : "Rejected", reviewer_name: String(r.reviewer_name) }));
+      toast((status === "Approved" ? tr("Published: {reviewer_name}'s review", { reviewer_name: String(r.reviewer_name) }) : tr("Rejected: {reviewer_name}'s review", { reviewer_name: String(r.reviewer_name) })));
       await qc.invalidateQueries({ queryKey: ["commerce", "reviews"] });
     } catch (err) {
       toast(errorMessage(err), "error");
@@ -148,7 +148,7 @@ function Reviews() {
       setBusy(null);
     }
   };
-  if (q.error) return <p className="muted">{tr("Reviews cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
+  if (q.error) return <p className="muted">{tr("Reviews cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
   if (!q.data) return <Spinner small label={tr("Loading reviews")} />;
   if (!q.data.rows.length) return <p className="muted">{tr("No reviews waiting.")}</p>;
   return (
@@ -179,7 +179,7 @@ function Reviews() {
 function Catalog() {
   const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
-  if (q.error) return <p className="muted">{tr("The catalog cannot be shown (")}{isolate(errorMessage(q.error))}).</p>;
+  if (q.error) return <p className="muted">{tr("The catalog cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
   if (!q.data) return <Spinner small label={tr("Loading the catalog")} />;
   const [shown, hidden, variants] = q.data;
   const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
@@ -190,7 +190,7 @@ function Catalog() {
         <Link to={open(["published", "=", false], ["variant_of", "is", "not set"])}>{tr("{hidden} not published", { hidden })}</Link>
         {variants > 0 && (
           <>
-            {tr(", and")} <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? tr("variant") : tr("variants")}</Link> {tr("of them")}
+            {placed(tr(", and {p1} of them"), { p1: <Link to={open(["variant_of", "is", "set"])}>{variants} {variants === 1 ? tr("variant") : tr("variants")}</Link> })}
           </>
         )}
         . <Link to="/e/WebsiteItem/new">{tr("Add an item to the store")}</Link>
@@ -244,7 +244,7 @@ export function CommerceHome() {
             </Link>
           }
         >
-          {waiting} {waiting === 1 ? tr("refund or payment needs") : tr("refunds and payments need")} {tr("a decision.")}
+          {waiting} {(waiting === 1 ? tr("refund or payment needs a decision.") : tr("refunds and payments need a decision."))}
         </Alert>
       )}
       {readable("SalesOrder") && <Sales />}

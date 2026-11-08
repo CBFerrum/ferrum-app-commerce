@@ -76,19 +76,19 @@ export function nextStep(o: Order): Next {
       return {
         step: "ship",
         label: tr("Ship"),
-        why: method === "Cash on Delivery" && !isPaid(o) ? "Cash on delivery: the courier collects the money." : o.commerce_payment_status === "Not Required" ? "Nothing to pay. Pack it and send it." : "Paid. Pack it and hand it to the carrier.",
+        why: method === "Cash on Delivery" && !isPaid(o) ? tr("Cash on delivery: the courier collects the money.") : o.commerce_payment_status === "Not Required" ? tr("Nothing to pay. Pack it and send it.") : tr("Paid. Pack it and hand it to the carrier."),
       };
     case "invoice":
-      return { step: "invoice", label: tr("Create invoice"), why: "Sent, but not invoiced yet." };
+      return { step: "invoice", label: tr("Create invoice"), why: tr("Sent, but not invoiced yet.") };
     case "pay":
       if (o.commerce_payment_status === "Failed" || o.commerce_payment_status === "Expired") {
         return { step: "wait", label: "", why: (o.commerce_payment_status === "Failed" ? tr("The payment failed. The shopper can pay again from their order link.") : tr("The payment ran out of time. The shopper can pay again from their order link.")) };
       }
-      if (method === "Manual") return { step: "mark_paid", label: tr("Mark paid"), why: "Bank transfer: mark it paid when the money arrives." };
-      if (method === "Cash on Delivery") return { step: "mark_paid", label: tr("Mark paid"), why: "Sent. Record the cash the courier brought." };
-      return { step: "wait", label: "", why: method ? tr("Waiting for {method} to confirm the shopper's payment.", { method }) : "Waiting for the shopper to pay." };
+      if (method === "Manual") return { step: "mark_paid", label: tr("Mark paid"), why: tr("Bank transfer: mark it paid when the money arrives.") };
+      if (method === "Cash on Delivery") return { step: "mark_paid", label: tr("Mark paid"), why: tr("Sent. Record the cash the courier brought.") };
+      return { step: "wait", label: "", why: method ? tr("Waiting for {method} to confirm the shopper's payment.", { method }) : tr("Waiting for the shopper to pay.") };
     default:
-      return { step: "none", label: "", why: o.status === "Cancelled" || o.docstatus === 2 ? "Cancelled." : "Nothing left to do." };
+      return { step: "none", label: "", why: o.status === "Cancelled" || o.docstatus === 2 ? tr("Cancelled.") : tr("Nothing left to do.") };
   }
 }
 
@@ -121,7 +121,7 @@ export function ago(at: string | null | undefined, now: Date = new Date()): stri
   const t = new Date(at.length <= 10 ? `${at}T00:00:00` : at).getTime();
   if (!Number.isFinite(t)) return "";
   const mins = Math.floor((now.getTime() - t) / 60_000);
-  if (mins < 1) return "just now";
+  if (mins < 1) return tr("just now");
   if (mins < 60) return tr("{mins} min", { mins });
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours} h`;
@@ -142,9 +142,9 @@ export function statusWords(o: Order): string {
   switch (o.status) {
     case "To Deliver and Bill":
     case "To Deliver":
-      return "To deliver";
+      return tr("To deliver");
     case "To Bill":
-      return "To invoice";
+      return tr("To invoice");
     default:
       return o.status ?? "";
   }
