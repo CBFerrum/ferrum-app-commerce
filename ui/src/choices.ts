@@ -3,6 +3,7 @@
 // ahead. The server decides what may come back and what it comes to (the plan); this only carries
 // the person's choices to it and back.
 
+import { t } from "@ferrum/client";
 export interface PlanLine {
   id: string;
   item?: string | null;
@@ -67,15 +68,15 @@ export function readiness(o: { plan: Plan | undefined; kind: Kind; choice: Choic
   const { plan, kind, choice, reason, estimating } = o;
   if (!plan?.payable) return { ok: false, why: plan?.why ?? "" };
   if (kind === "Cancellation") {
-    if (!plan.cancel?.allowed) return { ok: false, why: "This order has shipped or is already being refunded: send the goods back instead." };
+    if (!plan.cancel?.allowed) return { ok: false, why: t("This order has shipped or is already being refunded: send the goods back instead.") };
   } else if (!chosen(choice).length) {
-    return { ok: false, why: "Choose what comes back." };
+    return { ok: false, why: t("Choose what comes back.") };
   }
-  if (!reason) return { ok: false, why: "Say why." };
-  if (estimating) return { ok: false, why: "Working out the amount…" };
+  if (!reason) return { ok: false, why: t("Say why.") };
+  if (estimating) return { ok: false, why: t("Working out the amount…") };
   const e = plan.estimate;
-  if (!e) return { ok: false, why: "Working out the amount…" };
+  if (!e) return { ok: false, why: t("Working out the amount…") };
   if (e.errors.length) return { ok: false, why: e.errors[0] };
-  if (!(Number(e.amount) > 0)) return { ok: false, why: "There is nothing to send back." };
+  if (!(Number(e.amount) > 0)) return { ok: false, why: t("There is nothing to send back.") };
   return { ok: true, why: "" };
 }

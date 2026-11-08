@@ -72,10 +72,10 @@ function Row({ o, onShip, onPaid, onInvoiced, busy }: { o: Order; onShip: (o: Or
 }
 
 const NOTHING: Record<Stage, [string, string]> = {
-  pay: ["Nothing is waiting for money", "Every order is paid, or paid on delivery."],
-  ship: ["Nothing to ship", "You are all caught up. New paid orders show up here."],
-  invoice: ["Nothing to invoice", "Everything that was sent has its invoice."],
-  done: ["No finished orders yet", "Delivered, settled and cancelled orders show up here."],
+  get pay(): [string, string] { return [t("Nothing is waiting for money"), t("Every order is paid, or paid on delivery.")]; },
+  get ship(): [string, string] { return [t("Nothing to ship"), t("You are all caught up. New paid orders show up here.")]; },
+  get invoice(): [string, string] { return [t("Nothing to invoice"), t("Everything that was sent has its invoice.")]; },
+  get done(): [string, string] { return [t("No finished orders yet"), t("Delivered, settled and cancelled orders show up here.")]; },
 };
 
 /** The shelves, for the orders to send: what to take, how many, for which orders. */
@@ -237,7 +237,7 @@ export function Desk() {
         <div>
           <Tabs />
           <p className="page-sub" aria-live="polite">
-            {q.data ? t("{value} open {value2}{value3}", { value: tally.pay + tally.ship + tally.invoice, value2: tally.pay + tally.ship + tally.invoice === 1 ? "order" : "orders", value3: q.data.length >= 200 ? " (the oldest 200)" : "" }) : " "}
+            {q.data ? ((_: number, s: string) => (q.data.length >= 200 ? t("{orders} (the oldest 200)", { orders: s }) : s))(0, tally.pay + tally.ship + tally.invoice === 1 ? t("1 open order") : t("{n} open orders", { n: tally.pay + tally.ship + tally.invoice })) : " "}
           </p>
         </div>
         <div className="cm-tools">

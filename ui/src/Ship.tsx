@@ -60,7 +60,7 @@ export function ShipDialog({ order, onClose, onDone }: { order: Pick<Order, "id"
       <form className="stack" onSubmit={submit}>
         {error && <Alert tone="error">{isolate(error)}</Alert>}
         <p className="muted cm-tight">
-          {t("Everything still to deliver on this order leaves the warehouse")}{order.customer_name ? t(" for {customer_name}", { customer_name: order.customer_name }) : ""}.
+          {(order.customer_name ? t("Everything still to deliver on this order leaves the warehouse for {customer_name}", { customer_name: order.customer_name }) : t("Everything still to deliver on this order leaves the warehouse"))}.
           {cash && t(" Cash on delivery: the courier collects the money, and you record it when it arrives.")}
           {isOffline(order.commerce_payment_method) && !cash && order.commerce_payment_status !== "Paid" && t(" Its payment is not recorded yet.")}
         </p>

@@ -162,7 +162,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
                         <div className="cm-refund-what">
                           <strong>{isolate(l.name ?? "")}</strong>
                           <span className="faint">
-                            {isolate(units(Number(l.delivered)))} {t("delivered ·")} {max > 0 ? t("{max} can come back", { max: units(max) }) : l.invoiced ? t("all back already") : t("not invoiced yet")}
+                            {isolate(units(Number(l.delivered)))} {(max > 0 ? t("delivered · {max} can come back", { max: units(max) }) : (l.invoiced ? t("delivered · all back already") : t("delivered · not invoiced yet")))}
                           </span>
                         </div>
                         {max > 0 ? (
