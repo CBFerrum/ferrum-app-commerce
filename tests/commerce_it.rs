@@ -1395,6 +1395,14 @@ async fn refunds() {
     assert_eq!((rest["booked"].clone(), rest["booking_error"].clone()), (json!(true), Value::Null), "{rest:?}");
     assert_eq!(t.available("blue-mug").await, n("10"), "both mugs are back; the tee was not restocked");
     assert_eq!(t.available("logo-tee").await, n("4"), "a tee that cannot be sold again stays out of stock");
+    let invoice = t.get("SalesInvoice", credit["return_against"].as_str().unwrap().parse().unwrap()).await;
+    assert!(
+        invoice["items"].as_array().unwrap().iter().all(|l| dec(&l["returned_qty"]) == dec(&l["qty"])),
+        "each credit note counted on the invoice line it gave back: {invoice:?}"
+    );
+    let sent = t.get("DeliveryNote", dn).await;
+    let back_on = |item: &str| sent["items"].as_array().unwrap().iter().find(|l| l["item_name"] == json!(item)).map(|l| dec(&l["returned_qty"]));
+    assert_eq!((back_on("Blue Mug"), back_on("Logo Tee")), (Some(n("2")), Some(n("0"))), "both mugs came back on the note that sent them, the tee did not");
     let so_end = t.get("SalesOrder", b.so).await;
     assert_eq!(so_end["commerce_payment_status"], json!("Refunded"), "1121 paid, 1121 sent back");
     assert_eq!(dec(&t.get("PaymentRequest", b.request.unwrap()).await["refunded_amount"]), n("1121"));
