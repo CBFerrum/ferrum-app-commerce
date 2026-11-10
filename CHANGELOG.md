@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.19
+
+Needs ERP 0.15 or later. A refund after an earlier one on the same order no longer fails: since ERP 0.15.0 a credit note carries only what is still returnable, each line naming the invoice line it gives back, and Commerce now cuts the note down by that line rather than by position. What can still come back is read from what ERP counts on each invoice and delivery line (Returned Qty), and the delivery note that restocks the goods names the line it gives back. When ERP refuses a credit note all the same, its sentence is shown on the refund (and in the desk's estimate) rather than an internal error. The money still goes back by a journal entry against the credit note, as before.
+
 ## 0.7.18
 
 The reports it defines in code (their titles and parameters) have names in Arabic and Hindi too, with its models' and manifest's (404 each in ui/src/locales/names). Translated by the model, to be reviewed by native speakers.
