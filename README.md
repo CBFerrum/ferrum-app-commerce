@@ -27,7 +27,7 @@ plugins mark payment requests paid, which books an advance applied when the orde
 |---|---|
 | 📦 Version | `0.7.5` |
 | 🧱 Platform | Ferrum `>=0.3.1, <0.4` |
-| 🔗 Requires | erp `>=0.1` |
+| 🔗 Requires | erp `>=0.15` |
 | 🖥️ Interface | its own, at `/commerce/` |
 | 🗃️ Records | 22 entities in 1 package |
 | 👥 Roles | 5: Website Manager, Sales User, Sales Manager, Accounts Manager, Accounts User |
@@ -163,7 +163,7 @@ flowchart LR
     BAR --> API
     K <--> APP
     K --> OB --> EV["Notifications · webhooks<br/>automations"]
-    APP -. requires .-> D0["erp >=0.1"]
+    APP -. requires .-> D0["erp >=0.15"]
     classDef app fill:#be185d,color:#fff,stroke:#be185d
     class APP app
 ```
@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.19** | A second or third partial refund with ERP 0.15's credit notes. |
 | **0.7.18** | Its reports' names in Arabic and Hindi. |
 | **0.7.17** | Its names in Arabic and Hindi; the last English sentences translated. |
 | **0.7.16** | Sentences built in code are words too, in Arabic and Hindi. |

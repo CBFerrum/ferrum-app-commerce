@@ -72,23 +72,6 @@ pub(crate) struct Room {
     pub qty: Decimal,
 }
 
-/// The lines `(document, line, item, qty)` that covered something, less what has gone back against
-/// them. Returns do not say which line they undo, so a document's returns of an item come off its
-/// lines of that item in turn.
-pub(crate) fn rooms(lines: &[(Uuid, Uuid, Uuid, Decimal)], gone: &HashMap<(Uuid, Uuid), Decimal>) -> Vec<Room> {
-    let mut gone = gone.clone();
-    lines
-        .iter()
-        .filter_map(|(doc, line, item, qty)| {
-            let back = gone.entry((*doc, *item)).or_default();
-            let taken = (*back).min(*qty);
-            *back -= taken;
-            let left = *qty - taken;
-            (left > Decimal::ZERO).then_some(Room { doc: *doc, line: *line, qty: left })
-        })
-        .collect()
-}
-
 /// Takes `qty` out of the rooms, in order; `None` when they cannot hold it.
 pub(crate) fn take(rooms: &[Room], qty: Decimal) -> Option<Vec<Room>> {
     let mut left = qty;
@@ -150,6 +133,15 @@ fn explain(e: &Error) -> String {
     }
 }
 
+/// A refusal of ERP's (on the credit note it drafts) as one sentence on the refund, not on fields of
+/// a document the person never opened.
+fn for_person(e: Error) -> Error {
+    match e {
+        Error::Validation(_) => Error::invalid(explain(&e)),
+        other => other,
+    }
+}
+
 // ───────────────────────────── reading the books ─────────────────────────────
 
 /// What the order's other refunds hold of its payment.
@@ -185,56 +177,43 @@ async fn claims(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Re
     Ok(found.into_iter().map(|(line, all, restocked)| (line, Claims { all, restocked })).collect())
 }
 
-type Lines = Vec<(Uuid, Uuid, Uuid, Decimal)>;
+/// Lines that are left once what came back is taken off (ERP keeps it on each line, `returned_qty`).
+async fn left_on(tx: &mut Tx, sql: &str, tenant: Uuid, so: Uuid, line: Option<Uuid>, item: Option<Uuid>) -> Result<Vec<Room>> {
+    let found: Vec<(Uuid, Uuid, Decimal)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(tenant).bind(so).bind(line.map(|l| l.to_string())).bind(item).fetch_all(&mut **tx).await?;
+    Ok(found.into_iter().map(|(doc, line, qty)| Room { doc, line, qty }).collect())
+}
 
 /// Invoice lines that billed an order line (or the order's lines of one item), newest invoice first,
-/// and what credit notes took back of each invoice's items.
+/// with what credit notes have not taken back yet.
 async fn invoice_rooms(tx: &mut Tx, tenant: Uuid, so: Uuid, line: Option<Uuid>, item: Option<Uuid>) -> Result<Vec<Room>> {
-    let lines: Lines = sqlx::query_as(
-        "select i.parent_id, i.id, i.item, i.qty from e_sales_invoice__items i join e_sales_invoice s on s.tenant_id = i.tenant_id and s.id = i.parent_id \
+    left_on(
+        tx,
+        "select i.parent_id, i.id, i.qty - coalesce(i.returned_qty, 0) from e_sales_invoice__items i join e_sales_invoice s on s.tenant_id = i.tenant_id and s.id = i.parent_id \
          where i.tenant_id = $1 and s.docstatus = 1 and not coalesce(s.is_return, false) and i.sales_order = $2 \
-         and ($3::text is null or i.so_line = $3) and ($4::uuid is null or i.item = $4) order by s.posting_date desc, s.created_at desc, i.idx",
+         and ($3::text is null or i.so_line = $3) and ($4::uuid is null or i.item = $4) and i.qty - coalesce(i.returned_qty, 0) > 0 \
+         order by s.posting_date desc, s.created_at desc, i.idx",
+        tenant,
+        so,
+        line,
+        item,
     )
-    .bind(tenant)
-    .bind(so)
-    .bind(line.map(|l| l.to_string()))
-    .bind(item)
-    .fetch_all(&mut **tx)
-    .await?;
-    let invoices: Vec<Uuid> = lines.iter().map(|l| l.0).collect();
-    let credited: Vec<(Uuid, Uuid, Decimal)> = sqlx::query_as(
-        "select s.return_against, c.item, -sum(c.qty) from e_sales_invoice__items c join e_sales_invoice s on s.tenant_id = c.tenant_id and s.id = c.parent_id \
-         where c.tenant_id = $1 and s.docstatus = 1 and coalesce(s.is_return, false) and s.return_against = any($2) group by s.return_against, c.item",
-    )
-    .bind(tenant)
-    .bind(&invoices)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rooms(&lines, &credited.into_iter().map(|(si, item, q)| ((si, item), q)).collect()))
+    .await
 }
 
 /// Delivery note lines that delivered an order line, newest note first, less what came back.
 async fn delivery_rooms(tx: &mut Tx, tenant: Uuid, so: Uuid, line: Uuid) -> Result<Vec<Room>> {
-    let lines: Lines = sqlx::query_as(
-        "select i.parent_id, i.id, i.item, i.qty from e_delivery_note__items i join e_delivery_note n on n.tenant_id = i.tenant_id and n.id = i.parent_id \
+    left_on(
+        tx,
+        "select i.parent_id, i.id, i.qty - coalesce(i.returned_qty, 0) from e_delivery_note__items i join e_delivery_note n on n.tenant_id = i.tenant_id and n.id = i.parent_id \
          where i.tenant_id = $1 and n.docstatus = 1 and not coalesce(n.is_return, false) and i.sales_order = $2 and i.so_line = $3 \
-         order by n.posting_date desc, n.created_at desc, i.idx",
+         and ($4::uuid is null or i.item = $4) and i.qty - coalesce(i.returned_qty, 0) > 0 order by n.posting_date desc, n.created_at desc, i.idx",
+        tenant,
+        so,
+        Some(line),
+        None,
     )
-    .bind(tenant)
-    .bind(so)
-    .bind(line.to_string())
-    .fetch_all(&mut **tx)
-    .await?;
-    let notes: Vec<Uuid> = lines.iter().map(|l| l.0).collect();
-    let back: Vec<(Uuid, Uuid, Decimal)> = sqlx::query_as(
-        "select n.return_against, c.item, sum(c.qty) from e_delivery_note__items c join e_delivery_note n on n.tenant_id = c.tenant_id and n.id = c.parent_id \
-         where c.tenant_id = $1 and n.docstatus = 1 and coalesce(n.is_return, false) and n.return_against = any($2) group by n.return_against, c.item",
-    )
-    .bind(tenant)
-    .bind(&notes)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rooms(&lines, &back.into_iter().map(|(n, item, q)| ((n, item), q)).collect()))
+    .await
 }
 
 /// The payment being sent back: the order's paid request and its booked payment entry.
@@ -353,25 +332,24 @@ async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: 
     Ok(Plan { shown, credit: group(credit), restock: group(restock) })
 }
 
-/// The credit note for part of an invoice, as a draft: ERP's own `make_credit_note` (which copies the
-/// invoice) cut down to the lines and quantities that come back.
+/// The credit note for part of an invoice, as a draft: ERP's own `make_credit_note` (which carries
+/// what is still returnable, each line naming the invoice line it gives back in `return_line`) cut
+/// down to the lines and quantities that come back.
 async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &[(Uuid, Decimal)]) -> Result<Doc> {
     let si = get(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
     let made = hc.kernel.run_action_tx(actor, hc.tx, "SalesInvoice", invoice, "make_credit_note", &json!({})).await?;
     let note = made.get("id").and_then(Value::as_str).and_then(|v| v.parse::<Uuid>().ok()).ok_or_else(|| Error::internal("no credit note was made"))?;
     let draft = get(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", note).await?;
-    let (from, to) = (rows(&si, "items"), rows(&draft, "items"));
-    if from.len() != to.len() {
-        return Err(Error::internal("the credit note does not copy the invoice's lines"));
+    let lines = rows(&draft, "items");
+    let mut kept = Vec::new();
+    for (line, q) in picks {
+        let Some(now) = lines.iter().find(|l| id(l, "return_line") == Some(*line)) else {
+            let name = rows(&si, "items").iter().find(|l| id(l, "id") == Some(*line)).and_then(|l| s(l, "item_name").map(str::to_string));
+            let number = s(&si, "number").unwrap_or("the invoice");
+            return Err(Error::invalid(format!("{} on {number} has already been credited in full", name.as_deref().unwrap_or("a line"))));
+        };
+        kept.push(json!({"id": now.get("id"), "qty": money(-*q)}));
     }
-    let kept: Vec<Value> = from
-        .iter()
-        .zip(&to)
-        .filter_map(|(was, now)| {
-            let (_, q) = picks.iter().find(|(line, _)| Some(*line) == id(was, "id"))?;
-            Some(json!({"id": now.get("id"), "qty": money(-*q)}))
-        })
-        .collect();
     let mut patch = Doc::new();
     set(&mut patch, "items", Value::Array(kept));
     // A fixed charge belongs to the whole invoice, not to a part of it.
@@ -407,7 +385,7 @@ async fn estimate(hc: &mut HookCtx<'_>, plan: &Plan) -> Result<Decimal> {
         match credit_draft(hc, &actor, *invoice, picks).await {
             Ok(note) => total += d(&note, "rounded_total").abs(),
             Err(e) => {
-                failed = Some(e);
+                failed = Some(for_person(e));
                 break;
             }
         }
@@ -494,10 +472,11 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
         Value::Null
     } else {
         match plan_return(hc, &so, asked, shipping, None).await {
-            Ok(p) => {
-                let amount = estimate(hc, &p).await?;
-                json!({"amount": money(amount), "errors": []})
-            }
+            Ok(p) => match estimate(hc, &p).await {
+                Ok(amount) => json!({"amount": money(amount), "errors": []}),
+                Err(Error::Invalid(why)) => json!({"amount": money(Decimal::ZERO), "errors": [why]}),
+                Err(e) => return Err(e),
+            },
             Err(Error::Validation(f)) => json!({"amount": money(Decimal::ZERO), "errors": f.iter().map(|x| x.message.clone()).collect::<Vec<_>>()}),
             Err(e) => return Err(e),
         }
@@ -889,6 +868,7 @@ async fn return_note(hc: &mut HookCtx<'_>, actor: &Ctx, note: Uuid, picks: &[(Uu
                 }
             }
             r.insert("qty".into(), money(*q));
+            r.insert("return_line".into(), json!(s(l, "id")));
             Some(Value::Object(r))
         })
         .collect();
@@ -971,23 +951,6 @@ mod tests {
 
     fn u(i: u128) -> Uuid {
         Uuid::from_u128(i)
-    }
-
-    #[test]
-    fn what_has_gone_back_comes_off_the_lines_in_turn() {
-        let (inv, item) = (u(1), u(9));
-        let lines = vec![(inv, u(11), item, n("2")), (inv, u(12), item, n("3")), (u(2), u(21), item, n("4"))];
-        let none = HashMap::new();
-        assert_eq!(rooms(&lines, &none).iter().map(|r| r.qty).collect::<Vec<_>>(), vec![n("2"), n("3"), n("4")]);
-        let gone = HashMap::from([((inv, item), n("3"))]);
-        let left = rooms(&lines, &gone);
-        assert_eq!(
-            left.iter().map(|r| (r.line, r.qty)).collect::<Vec<_>>(),
-            vec![(u(12), n("2")), (u(21), n("4"))],
-            "two units off the first line, one off the second"
-        );
-        let all = HashMap::from([((inv, item), n("9"))]);
-        assert_eq!(rooms(&lines, &all).len(), 1, "another document's lines are untouched");
     }
 
     #[test]

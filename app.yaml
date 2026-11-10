@@ -1,6 +1,6 @@
 id: commerce
 name: Commerce
-version: 0.7.18
+version: 0.7.19
 publisher: cbferrum
 summary: "Online store: catalog with variants, carts, coupons, shipping, guest and portal checkout, a web-order desk, refunds and returns, order tracking, payment requests for gateway plugins"
 description: README.md
@@ -11,7 +11,7 @@ support: https://github.com/CBFerrum/ferrum-app-commerce/issues
 runtime: native
 platform: ">=0.3.1, <0.4"
 # Records of ERP (items, customers, accounts, stock): installing it installs ERP.
-requires: {erp: ">=0.1"}
+requires: {erp: ">=0.15"}
 packages: [commerce]
 uninstall: ask
 ui:
