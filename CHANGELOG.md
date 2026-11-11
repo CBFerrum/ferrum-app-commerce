@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.21
+
+Tax follows where the goods are delivered. Checkout records the shopper's shipping address as a structured Address (country code, region, postcode) and sets it as the order's ship-to, which is where the country add-ons read the destination. Until now a returning customer's order took their saved address, and a new customer's had none, so the add-on fell back to the company's home region. The customer's Address for that place is reused when they have one that says the same (ignoring case and spacing), else made: a new customer's is their primary shipping address. The cart carries it too (`ship_to`, set at checkout, when the customer is known), so the cart's final pricing and its order see the same delivery region and their totals agree. Before checkout a cart is still priced without a region: a tax rule that decides by region cannot see one until there is an Address record to read, so the total shown can change at checkout and the shopper is asked to confirm it. Needs the contacts and addresses package (installed with CRM); without it nothing changes. The India add-on does not read the order's ship-to yet (it reads the customer's state or its own place-of-supply field); the other country add-ons do.
+
 ## 0.7.20
 
 The interface follows the upgraded design system, rebuilt with Ferrum-Frontend 0a47157. Text uses the kit's type roles (nothing under 12px) and controls its height tokens; loading shows skeletons shaped like what is coming; empty, no matches, denied, offline and failed are told apart; status colours come from stored state ids. The interface check now runs the UI lint against an empty baseline. An expired payment is amber, not blue; a refused page is shown as refused.
