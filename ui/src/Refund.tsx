@@ -7,7 +7,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
-import { Alert, Button, confirmDialog, Dialog, Field, Spinner, toast, useDebounced } from "@ferrum/kit";
+import { Alert, Button, confirmDialog, Dialog, Field, FormSkeleton, StatePanel, toast, useDebounced } from "@ferrum/kit";
 import { amountText, units } from "./queues";
 import { f, list, type Rights } from "./data";
 import { gatewayName } from "./standing";
@@ -118,18 +118,9 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
   };
 
   const body = plan.error && !p ? (
-    <div className="state" role="alert">
-      <p className="state-title">{t("The refund cannot be worked out")}</p>
-      <p className="muted">{isolate(errorMessage(plan.error))}</p>
-      <Button icon="refresh" onClick={() => void plan.refetch()}>
-        {t("Try again")}
-      </Button>
-    </div>
+    <StatePanel kind="failed" title={t("The refund cannot be worked out")} error={plan.error} onRetry={() => void plan.refetch()} />
   ) : !p ? (
-    <div className="state">
-      <Spinner label={t("Looking at the order")} />
-      <span className="muted">{t("Looking at the order…")}</span>
-    </div>
+    <FormSkeleton fields={3} />
   ) : !p.payable ? (
     <Alert tone="info">{isolate(p.why ?? "")}</Alert>
   ) : (
