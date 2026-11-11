@@ -28,6 +28,7 @@
     - {name: status, type: select, options: [Open, Abandoned, Ordered, Expired], default: Open, read_only: true, in_list: true, in_filter: true}
     - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
+    - {name: ship_to, type: link, to: Address, read_only: true, hidden: true, on_delete: set_null, description: "Where the goods go, as an Address of the customer: set at checkout so the cart is priced exactly as its order will be (tax rules read the delivery region from it)"}
     - {name: user_email, type: email, read_only: true, label: Signed-in User}
     - {name: email, type: email, in_list: true}
     - {name: phone, type: phone}

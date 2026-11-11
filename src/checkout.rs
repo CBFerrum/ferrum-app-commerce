@@ -8,7 +8,7 @@ use crate::catalog::{available, stock_items};
 use crate::store::Store;
 use crate::{coupon, orders, payment, token};
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
-use ferrum_kernel::{Ctx, Doc, Error, FieldError, Kernel, Result, Tx, outbox, with_retry};
+use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, Kernel, Result, Tx, outbox, with_retry};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -87,13 +87,28 @@ async fn crm_records(k: &Kernel, ctx: &Ctx, tx: &mut Tx, customer: Uuid, cart: &
     let _ = sqlx::query(end).execute(&mut **tx).await;
 }
 
-/// The order's own delivery address as a structured Address (country code and region), for the
-/// order's `ship_to`: tax rules of any country read where the goods go from there, not from the
-/// customer, who may be a returning one with other addresses. It is the new customer's primary
-/// shipping address (the CRM records below do not make another). None when the tenant has no
-/// Address entity or it cannot be made: the order never fails because of it.
+/// The customer's Address for where this order goes, as country rules read it (country code,
+/// region, postcode): one of theirs that says the same (type, lines, city, region, postcode and
+/// country, ignoring case and spaces), else a new one, the new customer's primary. It is set on the
+/// cart as well as on the order, so both are priced for the same delivery region. None when the
+/// tenant has no Address entity or it cannot be made: the order never fails because of it.
 async fn ship_to_address(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, customer: Uuid, primary: bool) -> Option<Uuid> {
     ctx.schema.entity("Address")?;
+    let norm = |v: Option<&str>| v.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let country = |v: Option<&str>| ferrum_domain::countries::code_for(v.unwrap_or_default()).map_or_else(|| norm(v), str::to_lowercase);
+    let want = |a: &Doc| {
+        let mine = |part: &str| norm(s(cart, &format!("ship_{part}")));
+        norm(s(a, "address_line1")) == norm(s(cart, "ship_address_line1"))
+            && norm(s(a, "address_line2")) == norm(s(cart, "ship_address_line2"))
+            && ["city", "state", "postal_code"].iter().all(|p| norm(s(a, p)) == mine(p))
+            && country(s(a, "country")) == country(s(cart, "ship_country"))
+    };
+    let own = [Filter::eq("customer", customer.to_string()), Filter::eq("address_type", "Shipping")];
+    if let Ok(found) = k.find_tx(ctx, tx, "Address", &own, Some("created_at asc"), 200).await
+        && let Some(same) = found.iter().find(|a| want(a))
+    {
+        return id(same, "id");
+    }
     sqlx::query("savepoint commerce_ship_to").execute(&mut **tx).await.ok()?;
     let mut a = Doc::new();
     set(&mut a, "address_type", "Shipping");
@@ -322,6 +337,11 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     let (customer, new_customer) = resolve_customer(k, ctx, tx, &store, &cart, c.user).await?;
     let mut patch = Doc::new();
     set(&mut patch, "customer", customer.to_string());
+    // Before the cart's final pricing, so the cart and its order are taxed for the same place.
+    let ship_to = ship_to_address(k, ctx, tx, &cart, customer, new_customer).await;
+    if let Some(a) = ship_to {
+        set(&mut patch, "ship_to", a.to_string());
+    }
     if let Some(u) = c.user {
         set(&mut patch, "user_email", u.email.to_lowercase());
     }
@@ -348,7 +368,6 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         )));
     }
 
-    let ship_to = ship_to_address(k, ctx, tx, &cart, customer, new_customer).await;
     let so = create_order(k, ctx, tx, &store, &cart, customer, ship_to).await?;
     let so_id = id(&so, "id").ok_or_else(|| Error::internal("order without id"))?;
     if d(&so, "rounded_total") != d(&cart, "rounded_total") || d(&so, "grand_total") != d(&cart, "grand_total") {
