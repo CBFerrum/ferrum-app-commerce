@@ -324,6 +324,7 @@ CHANGELOG.md  what changed in each version
 
 | Version | Highlights |
 |---|---|
+| **0.7.20** | The redesigned interface: the upgraded design system, shaped loading, told-apart states. |
 | **0.7.19** | A second or third partial refund with ERP 0.15's credit notes. |
 | **0.7.18** | Its reports' names in Arabic and Hindi. |
 | **0.7.17** | Its names in Arabic and Hindi; the last English sentences translated. |

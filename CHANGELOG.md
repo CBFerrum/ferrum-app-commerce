@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.20
+
+The interface follows the upgraded design system, rebuilt with Ferrum-Frontend 0a47157. Text uses the kit's type roles (nothing under 12px) and controls its height tokens; loading shows skeletons shaped like what is coming; empty, no matches, denied, offline and failed are told apart; status colours come from stored state ids. The interface check now runs the UI lint against an empty baseline. An expired payment is amber, not blue; a refused page is shown as refused.
+
 ## 0.7.19
 
 Needs ERP 0.15 or later. A refund after an earlier one on the same order no longer fails: since ERP 0.15.0 a credit note carries only what is still returnable, each line naming the invoice line it gives back, and Commerce now cuts the note down by that line rather than by position. What can still come back is read from what ERP counts on each invoice and delivery line (Returned Qty), and the delivery note that restocks the goods names the line it gives back. When ERP refuses a credit note all the same, its sentence is shown on the refund (and in the desk's estimate) rather than an internal error. The money still goes back by a journal entry against the credit note, as before.
