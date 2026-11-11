@@ -1138,6 +1138,35 @@ async fn shop_with(slug: &str, packages: &[&str]) -> Shop {
     Shop { t, tenant, cid, stores, products, nos, selling, mug, tee }
 }
 
+#[test]
+fn delivery_region_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(delivery_region()).await.unwrap() });
+}
+
+/// Tax add-ons read where the goods go from the order's `ship_to` address (country code and region):
+/// each order carries the shopper's own, whoever the customer is.
+async fn delivery_region() {
+    let Shop { t, .. } = shop_with("delivery-region", &["commerce", "crm"]).await;
+    let deliver = |email: &'static str, state: &'static str, key: &'static str| {
+        let t = &t;
+        async move {
+            let (cart, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+            let mut d = details(email, "Asha Rao", "IN");
+            d["shipping_address"]["state"] = json!(state);
+            t.cart_ok(&cart, "PUT", "/cart/details", Some(d)).await;
+            let done = t.checkout(None, &cart, key, json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("checkout");
+            let so = t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await;
+            t.find_one("Address", json!({"id": so["ship_to"]})).await
+        }
+    };
+    let home = deliver("home@example.com", "Karnataka", "region-a-0001").await;
+    let away = deliver("away@example.com", "Maharashtra", "region-b-0001").await;
+    assert_eq!((home["country_code"].clone(), home["state"].clone()), (json!("IN"), json!("Karnataka")));
+    assert_eq!((away["country_code"].clone(), away["state"].clone()), (json!("IN"), json!("Maharashtra")), "the other order goes elsewhere");
+}
+
 async fn refunds() {
     let Shop { t, tenant, mug, tee, .. } = small_shop("refunds").await;
     // ───────────── who is who ─────────────
