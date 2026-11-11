@@ -7,10 +7,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, docPath, t, isolate } from "@ferrum/client";
-import { Badge, Button, EmptyState, ErrorState, Icon, Spinner, statusTone, useLiveEntity, useShellTitle } from "@ferrum/kit";
+import { Badge, Button, EmptyState, ErrorState, Icon, ListSkeleton, StatePanel, statusTone, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, counts, nextStep, type Order, type PickOrder, pickList, queue, STAGES, type Stage, stage, statusWords, units, waitedDays } from "./queues";
 import { f, invoiceOrder, list, markPaid, ORDER_FIELDS, useRights, WEB, workingOrders } from "./data";
 import { ShipDialog } from "./Ship";
+import { ORDER_PAYMENT, ORDER_STATUS } from "./tones";
 import { Tabs } from "./Tabs";
 
 const currency = (o: Order) => o._titles?.currency;
@@ -59,8 +60,8 @@ function Row({ o, onShip, onPaid, onInvoiced, busy }: { o: Order; onShip: (o: Or
         <div className="cm-order-why">{cannot ?? next.why}</div>
         <div className="cm-order-badges">
           <span className={late ? "cm-late" : "faint"}>{late ? t("Waiting since {o}", { o: waitText(o) }) : t("Placed {o}", { o: waitText(o) })}</span>
-          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{isolate(o.commerce_payment_status)}</Badge>}
-          {stage(o) !== "done" && <Badge tone="neutral">{isolate(statusWords(o))}</Badge>}
+          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status, ORDER_PAYMENT)}>{isolate(o.commerce_payment_status)}</Badge>}
+          {stage(o) !== "done" && <Badge tone={statusTone(o.status, ORDER_STATUS)}>{isolate(statusWords(o))}</Badge>}
         </div>
       </div>
       <div className="cm-order-side">
@@ -94,7 +95,7 @@ function PickList({ orders }: { orders: Order[] }) {
   });
   if (!ids.length) return <EmptyState title={t("Nothing to pick")} icon="check">{t("No orders are waiting to be sent.")}</EmptyState>;
   if (q.error) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  if (!q.data) return <Spinner label={t("Making the pick list")} />;
+  if (!q.data) return <ListSkeleton rows={4} />;
   const picks = pickList(q.data.docs, (l) => !q.data.shipping || l.item !== q.data.shipping);
   return (
     <section className="cm-pick" aria-label={t("Pick list")}>
@@ -138,7 +139,7 @@ function PickList({ orders }: { orders: Order[] }) {
 }
 
 /** Orders that are over, a page at a time, found by the server. */
-function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string; onShip: (o: Order) => void; onPaid: (o: Order) => void; onInvoiced: (o: Order) => void; busy: string | null }) {
+function Finished({ search, onClear, onShip, onPaid, onInvoiced, busy }: { search: string; onClear: () => void; onShip: (o: Order) => void; onPaid: (o: Order) => void; onInvoiced: (o: Order) => void; busy: string | null }) {
   const [limit, setLimit] = useState(30);
   const q = useQuery({
     queryKey: ["commerce", "finished", search, limit],
@@ -150,8 +151,16 @@ function Finished({ search, onShip, onPaid, onInvoiced, busy }: { search: string
       ),
   });
   if (q.error) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
-  if (!q.data) return <Spinner label={t("Loading finished orders")} />;
-  if (!q.data.rows.length) return <EmptyState title={search ? t("No finished order matches") : NOTHING.done[0]} icon="file">{search ? t("Try another number or name.") : NOTHING.done[1]}</EmptyState>;
+  if (!q.data) return <ListSkeleton rows={6} />;
+  if (!q.data.rows.length) {
+    return search ? (
+      <StatePanel kind="no-matches" title={t("No finished order matches")} onClear={onClear} clearLabel={t("Clear the search")}>
+        {t("Try another number or name.")}
+      </StatePanel>
+    ) : (
+      <EmptyState title={NOTHING.done[0]} icon="file">{NOTHING.done[1]}</EmptyState>
+    );
+  }
   return (
     <>
       <ul className="cm-orders">
@@ -207,11 +216,11 @@ export function Desk() {
   const body = q.error ? (
     <ErrorState error={q.error} onRetry={() => void q.refetch()} />
   ) : !q.data ? (
-    <Spinner label={t("Loading orders")} />
+    <ListSkeleton rows={6} />
   ) : view === "pick" ? (
     <PickList orders={queue(orders, "ship")} />
   ) : which === "done" ? (
-    <Finished search={search} {...row} busy={busy} />
+    <Finished search={search} onClear={() => set({ q: null })} {...row} busy={busy} />
   ) : shown.length ? (
     <ul className="cm-orders">
       {shown.map((o) => (
@@ -219,12 +228,9 @@ export function Desk() {
       ))}
     </ul>
   ) : search ? (
-    <EmptyState title={t("No order matches")} icon="search">
-      {t("Nothing in this queue matches “{search}”.", { search })}{isolate(" ")}
-      <button type="button" className="link-btn" onClick={() => set({ q: null })}>
-        {t("Clear the search")}
-      </button>
-    </EmptyState>
+    <StatePanel kind="no-matches" title={t("No order matches")} onClear={() => set({ q: null })} clearLabel={t("Clear the search")}>
+      {t("Nothing in this queue matches “{search}”.", { search })}
+    </StatePanel>
   ) : (
     <EmptyState title={NOTHING[which][0]} icon="check">
       {isolate(NOTHING[which][1])}
