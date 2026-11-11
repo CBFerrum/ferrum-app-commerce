@@ -61,7 +61,7 @@ describe("the desk", () => {
 
   it("shows the loading state before the orders are there", () => {
     const qc = client([]);
-    expect(draw(qc, "/orders", "/orders", <Desk />)).toContain("Loading orders");
+    expect(draw(qc, "/orders", "/orders", <Desk />)).toContain('role="status" aria-label="Loading…"');
   });
 });
 

@@ -8,9 +8,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { api, errorMessage, todayIso, t as tr, isolate } from "@ferrum/client";
-import { Alert, Badge, Button, EmptyState, Spinner, statusTone, toast, useLiveEntity, useShellTitle, placed } from "@ferrum/kit";
+import { Alert, Badge, Button, ListSkeleton, StatePanel, statusTone, toast, useLiveEntity, useShellTitle, placed } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
+import { REQUEST_PAYMENT } from "./tones";
 import { f, list, soft, useWaiting, workingOrders } from "./data";
 import { Tabs } from "./Tabs";
 import { type DayRow, daysBefore, money, totals } from "./store";
@@ -24,7 +25,7 @@ function Sales() {
     queryFn: ({ signal }) => api.get<{ rows: DayRow[] }>("/api/reports/web_sales", { from_date: daysBefore(end, 29), to_date: end, group_by: "Day" }, signal).then((r) => r.rows),
   });
   if (q.error) return <p className="muted">{tr("Sales cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
-  if (!q.data) return <Spinner label={tr("Loading sales")} />;
+  if (!q.data) return <ListSkeleton rows={1} />;
   const tiles = [
     { label: tr("Today"), t: totals(q.data, end, end) },
     { label: tr("Last 7 days"), t: totals(q.data, daysBefore(end, 6), end) },
@@ -49,7 +50,7 @@ function AtTheDesk() {
   const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
   const tally = useMemo(() => counts(q.data ?? []), [q.data]);
   if (q.error) return <p className="muted">{tr("Orders cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
-  if (!q.data) return <Spinner small label={tr("Loading orders")} />;
+  if (!q.data) return <ListSkeleton rows={3} />;
   const oldest = queue(q.data, "ship").slice(0, 5);
   return (
     <>
@@ -102,7 +103,7 @@ function Payments() {
     queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
   if (q.error) return <p className="muted">{tr("Payments cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
-  if (!q.data) return <Spinner small label={tr("Loading payments")} />;
+  if (!q.data) return <ListSkeleton rows={2} />;
   if (!q.data.length) return <p className="muted">{tr("No failed or expired payments.")}</p>;
   return (
     <ul className="cm-rows" data-ferrum-nocard>
@@ -110,7 +111,7 @@ function Payments() {
         <li key={p.id}>
           {p.sales_order ? <Link to={`/o/${p.sales_order}`}>{p.order_number ?? tr("Payment")}</Link> : <span>{p.order_number ?? tr("Payment")}</span>} <span className="faint">{isolate([p.payer_name, p.gateway].filter(Boolean).join(" · "))}</span>
           <span className="cm-end">
-            <Badge tone={statusTone(p.status)}>{isolate(p.status ?? "")}</Badge>
+            <Badge tone={statusTone(p.status, REQUEST_PAYMENT)}>{isolate(p.status ?? "")}</Badge>
             <strong>{isolate(amountText(p.amount, p.currency_code))}</strong>
           </span>
         </li>
@@ -149,7 +150,7 @@ function Reviews() {
     }
   };
   if (q.error) return <p className="muted">{tr("Reviews cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
-  if (!q.data) return <Spinner small label={tr("Loading reviews")} />;
+  if (!q.data) return <ListSkeleton rows={2} />;
   if (!q.data.rows.length) return <p className="muted">{tr("No reviews waiting.")}</p>;
   return (
     <ul className="cm-reviews">
@@ -180,7 +181,7 @@ function Catalog() {
   const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
   if (q.error) return <p className="muted">{tr("The catalog cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
-  if (!q.data) return <Spinner small label={tr("Loading the catalog")} />;
+  if (!q.data) return <ListSkeleton rows={2} />;
   const [shown, hidden, variants] = q.data;
   const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
   return (
@@ -214,9 +215,7 @@ export function CommerceHome() {
   useLiveEntity("PaymentException", refresh);
   if (meta && !readable("WebsiteItem") && !readable("SalesOrder")) {
     return (
-      <EmptyState title={tr("Nothing here for you")} icon="store">
-        <p className="muted">{tr("Ask an administrator for the Website Manager role.")}</p>
-      </EmptyState>
+      <StatePanel kind="denied">{tr("Ask an administrator for the Website Manager role.")}</StatePanel>
     );
   }
   const card = (id: string, title: string, body: ReactNode) => (
