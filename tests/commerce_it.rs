@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 fn obj(v: Value) -> Doc {
@@ -1136,6 +1136,94 @@ async fn shop_with(slug: &str, packages: &[&str]) -> Shop {
     t.insert("WebsiteItem", json!({"item": tee.to_string(), "published": true})).await;
 
     Shop { t, tenant, cid, stores, products, nos, selling, mug, tee }
+}
+
+/// A tax rule of the kind country add-ons are: it reads where the goods go from the document's
+/// `ship_to` Address (`ferrum_app_erp::localization::ship_to`), as the add-ons for other countries
+/// do, and taxes one region at the reduced template. Test-only, and confined to one tenant so the
+/// other tests in this binary are not touched.
+struct RegionTax(Mutex<Option<Uuid>>, Uuid);
+
+#[async_trait::async_trait]
+impl ferrum_app_erp::localization::Localization for RegionTax {
+    fn package(&self) -> &'static str {
+        "commerce"
+    }
+    async fn determine(
+        &self,
+        k: &Kernel,
+        ctx: &Ctx,
+        tx: &mut ferrum_kernel::Tx,
+        _ent: &ferrum_meta::EffEntity,
+        doc: &mut Doc,
+        _side: ferrum_app_erp::pricing::Side,
+    ) -> ferrum_kernel::Result<()> {
+        if *self.0.lock().unwrap() != Some(ctx.tenant) {
+            return Ok(());
+        }
+        let place = ferrum_app_erp::localization::ship_to(k, ctx, tx, doc).await?;
+        if place.is_some_and(|a| a["state"] == json!("Maharashtra")) {
+            doc.insert("tax_template".into(), json!(self.1.to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn delivery_region_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(delivery_region()).await.unwrap() });
+}
+
+/// Tax rules read where the goods go from the order's `ship_to` Address: each order carries the
+/// shopper's own, one place is one Address however often it is used, and the cart is priced for
+/// the same region as its order (checkout refuses when their totals differ, so a cart that did not
+/// see the region would fail every checkout for a region taxed differently).
+async fn delivery_region() {
+    let Shop { t, tenant, cid, .. } = shop_with("delivery-region", &["commerce", "crm"]).await;
+    let output_tax = t.find_one("Account", json!({"account_name": "Output Tax", "company": cid.to_string()})).await;
+    let reduced = t
+        .insert(
+            "TaxTemplate",
+            json!({"title": "VAT 5%", "company": cid.to_string(), "kind": "Sales",
+                   "rows": [{"charge_type": "On Net Total", "account": output_tax["id"], "description": "VAT", "rate": "5"}]}),
+        )
+        .await;
+    ferrum_app_erp::localization::add(Arc::new(RegionTax(Mutex::new(Some(tenant)), uid(&reduced))));
+    let user = {
+        let u = t.k.create_user(&t.ctx, "regular@example.com", "Regular", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "portal".into()).await.unwrap()
+    };
+    let deliver = |who: Option<&Ctx>, email: &'static str, line1: &'static str, state: &'static str, key: &'static str| {
+        let (t, who) = (&t, who.cloned());
+        async move {
+            let (cart, _) = t.new_cart(who.as_ref(), json!([{"item": "blue-mug", "qty": 1}])).await;
+            let mut d = details(email, "Asha Rao", "IN");
+            d["shipping_address"]["line1"] = json!(line1);
+            d["shipping_address"]["state"] = json!(state);
+            t.cart_ok(&cart, "PUT", "/cart/details", Some(d)).await;
+            let done = t.checkout(who.as_ref(), &cart, key, json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("checkout");
+            let so = t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await;
+            (t.find_one("Address", json!({"id": so["ship_to"]})).await, dec(&so["rounded_total"]), so["customer"].as_str().unwrap().to_string())
+        }
+    };
+    let (home, home_total, _) = deliver(None, "home@example.com", "12 MG Road", "Karnataka", "region-a-0001").await;
+    let (away, away_total, _) = deliver(None, "away@example.com", "12 MG Road", "Maharashtra", "region-b-0001").await;
+    assert_eq!((home["country_code"].clone(), home["state"].clone()), (json!("IN"), json!("Karnataka")));
+    assert_eq!(away["state"], json!("Maharashtra"), "the other order goes elsewhere");
+    assert_eq!((home_total, away_total), (n("354"), n("315")), "300 at 18%, and at 5% where the rule says: both checkouts agreed with their carts");
+
+    // One place is one Address of the customer, however many orders go there; a new place adds one.
+    let (first, _, customer) = deliver(Some(&user), "regular@example.com", "7 Park Street", "Karnataka", "region-c-0001").await;
+    let shipping = || t.count("Address", json!({"customer": customer, "address_type": "Shipping"}));
+    assert_eq!(shipping().await, 1);
+    let (again, _, same) = deliver(Some(&user), "regular@example.com", " 7  PARK street ", "karnataka", "region-c-0002").await;
+    assert_eq!((same, again["id"].clone()), (customer.clone(), first["id"].clone()));
+    assert_eq!(shipping().await, 1, "the same place, said a little differently");
+    let (other, _, _) = deliver(Some(&user), "regular@example.com", "9 Lake Road", "Maharashtra", "region-c-0003").await;
+    assert_ne!(other["id"], first["id"]);
+    assert_eq!(shipping().await, 2);
 }
 
 async fn refunds() {
