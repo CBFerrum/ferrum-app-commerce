@@ -8,13 +8,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ApiError, api, docPath, formatDate, formatDateTime, relativeTime, t as tr, isolate } from "@ferrum/client";
-import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, PageLoading, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
+import { Alert, Badge, Button, EmptyState, ErrorState, Icon, Menu, MenuItem, ListSkeleton, ReaderSkeleton, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units, withMethods } from "./queues";
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { type Exception, gatewayName, type Refund } from "./standing";
 import { RefundDialog } from "./Refund";
 import { ShipDialog } from "./Ship";
+import { INVOICE_STATUS, ORDER_PAYMENT, ORDER_STATUS, REQUEST_PAYMENT } from "./tones";
 import { type AuditEvent, type Delivery, fold, type Invoice, timeline } from "./timeline";
 
 interface Line {
@@ -172,7 +173,7 @@ function Payment({ p, order, mayAsk, mayTake, onPaid, onRefund }: { p: Request; 
       <div className="cm-payment-head">
         <strong>{isolate(sum(p.amount))}</strong>
         <span>{tr("via")} {isOffline(p.gateway) ? p.gateway : gateway}</span>
-        <Badge tone={statusTone(p.status)}>{isolate(p.status ?? "")}</Badge>
+        <Badge tone={statusTone(p.status, REQUEST_PAYMENT)}>{isolate(p.status ?? "")}</Badge>
       </div>
       <p className="faint cm-payment-line">
         {p.status === "Paid" && p.paid_at ? tr("Paid {value}", { value: relativeTime(p.paid_at) }) : p.status === "Initiated" ? (p.expires_at ? tr("Open until {value}", { value: relativeTime(p.expires_at) }) : tr("Open until it is paid")) : p.status === "Expired" ? tr("Ran out of time") : p.status === "Failed" ? p.failure_reason ?? tr("The payment failed") : tr("Cancelled")}
@@ -229,7 +230,7 @@ function OrderPage({ id }: { id: string }) {
   useShellTitle(o?.number ? tr("Order {number}", { number: o.number }) : null);
 
   if (order.error) return <ErrorState error={order.error} onRetry={() => void order.refetch()} />;
-  if (!o) return <PageLoading label={tr("Loading the order")} />;
+  if (!o) return <ReaderSkeleton paragraphs={3} />;
   if (!o.commerce_web_order) {
     return (
       <EmptyState title={tr("This is not a web order")} icon="file">
@@ -303,8 +304,8 @@ function OrderPage({ id }: { id: string }) {
           <p className="page-sub">{isolate([o.customer_name, o.posting_date ? formatDate(o.posting_date) : null, say(o.rounded_total)].filter(Boolean).join(" · "))}</p>
         </div>
         <div className="page-actions">
-          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status)}>{isolate(o.commerce_payment_status)}</Badge>}
-          <Badge tone={statusTone(statusWords(o))}>{isolate(statusWords(o))}</Badge>
+          {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status, ORDER_PAYMENT)}>{isolate(o.commerce_payment_status)}</Badge>}
+          <Badge tone={statusTone(o.docstatus === 2 ? "Cancelled" : o.status, ORDER_STATUS)}>{isolate(statusWords(o))}</Badge>
           {primary}
           {paidRequest && rights.asks && !cancelled && (
             <Button icon="refresh" onClick={() => setRefunding(true)}>
@@ -373,7 +374,7 @@ function OrderPage({ id }: { id: string }) {
             {more.error ? (
               <ErrorState error={more.error} onRetry={() => void more.refetch()} />
             ) : !more.data ? (
-              <p className="muted">{tr("Loading payments…")}</p>
+              <ListSkeleton rows={2} />
             ) : more.data.payments.length ? (
               <ul className="cm-payments">
                 {more.data.payments.map((p) => (
@@ -389,7 +390,7 @@ function OrderPage({ id }: { id: string }) {
             {more.error ? (
               <p className="muted">{tr("Shipping and invoices could not be loaded.")}</p>
             ) : !more.data ? (
-              <p className="muted">{tr("Loading…")}</p>
+              <ListSkeleton rows={2} />
             ) : more.data.deliveries.length || more.data.invoices.length ? (
               <ul className="cm-docs">
                 {more.data.deliveries.map((n) => (
@@ -419,7 +420,7 @@ function OrderPage({ id }: { id: string }) {
                     <div>
                       <a href={open("SalesInvoice", v.id)}>{isolate(v.number ?? "")}</a> <span className="faint">{v.is_return ? tr("credit note") : tr("invoice")} {v.posting_date ? formatDate(v.posting_date) : ""}</span>
                       <div>
-                        {isolate(say(v.rounded_total))} {v.status && <Badge tone={statusTone(v.status)}>{isolate(v.status)}</Badge>}
+                        {isolate(say(v.rounded_total))} {v.status && <Badge tone={statusTone(v.status, INVOICE_STATUS)}>{isolate(v.status)}</Badge>}
                       </div>
                     </div>
                   </li>
@@ -515,7 +516,7 @@ function OrderPage({ id }: { id: string }) {
             {more.error ? (
               <p className="muted">{tr("The story could not be loaded.")}</p>
             ) : !more.data ? (
-              <p className="muted">{tr("Loading…")}</p>
+              <ListSkeleton rows={2} />
             ) : (
               <>
                 <ol className="cm-story">

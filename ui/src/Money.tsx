@@ -6,7 +6,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router";
-import { EmptyState, ErrorState, PageLoading, Spinner, useLiveEntity, useShellTitle } from "@ferrum/kit";
+import { EmptyState, ErrorState, ListSkeleton, StatePanel, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { f, list, soft, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { BUCKETS, type Bucket, exceptionBucket, type Exception, type Refund, refundBucket } from "./standing";
@@ -61,12 +61,10 @@ export function Money() {
     return out;
   }, [q.data]);
 
-  if (!rights.ready) return <PageLoading />;
+  if (!rights.ready) return <ListSkeleton rows={4} />;
   if (!rights.seesMoney) {
     return (
-      <EmptyState title={t("Nothing here for you")} icon="store">
-        <p className="muted">{t("Refunds and payments that need a decision are for the store's managers. Ask an administrator for the Website Manager role.")}</p>
-      </EmptyState>
+      <StatePanel kind="denied">{t("Refunds and payments that need a decision are for the store's managers. Ask an administrator for the Website Manager role.")}</StatePanel>
     );
   }
   const here = buckets[tab];
@@ -74,7 +72,7 @@ export function Money() {
   const body = q.error ? (
     <ErrorState error={q.error} onRetry={() => void q.refetch()} />
   ) : !q.data ? (
-    <Spinner label={t("Loading refunds and payments")} />
+    <ListSkeleton rows={4} />
   ) : size(tab) === 0 ? (
     <EmptyState title={NOTHING[tab][0]} icon="check">
       {isolate(NOTHING[tab][1])}
