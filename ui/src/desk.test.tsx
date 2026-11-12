@@ -114,7 +114,7 @@ describe("changing an order", () => {
 });
 
 describe("cancelling an order", () => {
-  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true };
+  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true, editsCatalog: true };
   const cancel = (payments: unknown[], over: Record<string, unknown> = {}) => (
     <CancelOrderDialog order={{ id: "o1", number: "SO-1" }} payments={payments as never} rights={rights} code="INR" onClose={() => {}} onDone={() => {}} {...over} />
   );

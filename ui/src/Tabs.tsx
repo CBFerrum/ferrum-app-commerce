@@ -26,6 +26,7 @@ export function Tabs() {
         </NavLink>
       )}
       {rights.seesReturns && <NavLink to="/alerts">{t("Stock alerts")}</NavLink>}
+      {rights.editsCatalog && <NavLink to="/variants">{t("Variants")}</NavLink>}
       {rights.seesMoney && (
         <NavLink to="/money">
           {t("Money")}
