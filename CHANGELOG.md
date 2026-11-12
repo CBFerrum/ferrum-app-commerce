@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.22
+
+Rebuilt with Ferrum-Frontend 45dad7f, the design system as tuned after the landed build was reviewed. The left menu's icons are chosen so that none repeats on more than three rows and each fits its row; their drawings load beside the first page instead of inside it, so the page starts lighter; a row that scrolls sideways fades at the edge where there is more, in every browser and with reduced motion; a printed record leaves out empty fields and keeps its totals with the table; menus and popovers sit inside the page's landmarks for assistive technology; a selection bar folds what does not fit into More on a narrow screen. Nothing else changes.
+
 ## 0.7.21
 
 Tax follows where the goods are delivered. Checkout records the shopper's shipping address as a structured Address (country code, region, postcode) and sets it as the order's ship-to, which is where the country add-ons read the destination. Until now a returning customer's order took their saved address, and a new customer's had none, so the add-on fell back to the company's home region. The customer's Address for that place is reused when they have one that says the same (ignoring case and spacing), else made: a new customer's is their primary shipping address. The cart carries it too (`ship_to`, set at checkout, when the customer is known), so the cart's final pricing and its order see the same delivery region and their totals agree. Before checkout a cart is still priced without a region: a tax rule that decides by region cannot see one until there is an Address record to read, so the total shown can change at checkout and the shopper is asked to confirm it. Needs the contacts and addresses package (installed with CRM); without it nothing changes. The India add-on does not read the order's ship-to yet (it reads the customer's state or its own place-of-supply field); the other country add-ons do.
