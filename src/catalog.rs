@@ -440,6 +440,39 @@ pub async fn available(tx: &mut Tx, tenant: Uuid, store: &Store, items: &[Uuid])
     Ok(rows.into_iter().collect())
 }
 
+/// Sellable quantity per item and warehouse, as [`available`] counts it (which is their sum).
+pub async fn available_by_warehouse(tx: &mut Tx, tenant: Uuid, store: &Store, items: &[Uuid]) -> Result<HashMap<(Uuid, Uuid), Decimal>> {
+    let rows: Vec<(Uuid, Uuid, Decimal)> = sqlx::query_as(
+        "with onhand as (select item_id as item, warehouse_id as wh, sum(qty) as qty from stock_balance where tenant_id = $1 and item_id = any($2) \
+           and warehouse_id = any($3) group by item_id, warehouse_id), \
+         reserved as (select si.item, si.warehouse as wh, sum(greatest(si.qty - coalesce(si.delivered_qty, 0), 0)) as qty from e_sales_order so \
+           join e_sales_order__items si on si.tenant_id = so.tenant_id and si.parent_id = so.id \
+           where so.tenant_id = $1 and so.docstatus = 1 and so.status in ('To Deliver and Bill', 'To Deliver') and si.item = any($2) \
+           and si.warehouse = any($3) group by si.item, si.warehouse) \
+         select i, w, coalesce(o.qty, 0) - coalesce(r.qty, 0) from unnest($2::uuid[]) as t(i) cross join unnest($3::uuid[]) as h(w) \
+         left join onhand o on o.item = t.i and o.wh = h.w left join reserved r on r.item = t.i and r.wh = h.w",
+    )
+    .bind(tenant)
+    .bind(items)
+    .bind(&store.warehouses)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(i, w, q)| ((i, w), q)).collect())
+}
+
+/// Where a line of `qty` is fulfilled from: the fulfilment warehouse when it holds enough, else the
+/// first of the store's other warehouses (in Store Settings' order) that does, else the fulfilment
+/// warehouse (whose shortage the delivery then reports). What it takes is taken off `left`, so the
+/// lines of one order do not count the same units twice.
+pub fn allocate(store: &Store, left: &mut HashMap<(Uuid, Uuid), Decimal>, item: Uuid, qty: Decimal) -> Uuid {
+    let order = std::iter::once(store.fulfilment_warehouse).chain(store.warehouses.iter().copied().filter(|w| *w != store.fulfilment_warehouse));
+    let chosen = order.clone().find(|w| left.get(&(item, *w)).copied().unwrap_or_default() >= qty).unwrap_or(store.fulfilment_warehouse);
+    if let Some(have) = left.get_mut(&(item, chosen)) {
+        *have -= qty;
+    }
+    chosen
+}
+
 /// `in_stock` (and the quantity when the store shows it) for one item.
 pub fn stock_view(store: &Store, is_stock: bool, available: Decimal) -> (bool, Option<String>) {
     if !is_stock {
