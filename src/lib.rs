@@ -31,6 +31,7 @@ mod subscriptions;
 mod tell;
 mod token;
 mod upkeep;
+mod variants;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use ferrum_domain::reports::ReportSource;

@@ -386,6 +386,18 @@ and the invoice that applies the shopper's payment; all or nothing), `web_invoic
 `SalesOrder` the *Web Payment Method*. A queue, per order, is read from `status`, `per_delivered`,
 `per_billed`, the web payment status and method; the admin's rules for it are in `ui/src/queues.ts`.
 
+## After sales (0.9.0)
+
+* **Cancel Web Order** (desk) and the shopper's **Cancel My Order** make a cancellation refund for each payment of an order
+  nothing of which shipped (a gift card's first: it is given back last, once the provider's part has gone). **Update Web
+  Order** changes lines and address through ERP's Update Items and settles the difference through the payment (a new
+  request, or an `Adjustment` refund, or an amount recorded as owed). **Return Something** is a `ReturnRequest` the desk
+  approves or declines; **Receive Goods** makes the refund. All three of the shopper's links come from the order
+  confirmation (a signed action link); Store Settings' After Sales tab holds the windows, the fee and where refunds go.
+* A gift card that covers part of an order **holds** that part (ERP's stored value hold) until the rest is paid.
+* Every mail to the shopper is a message template (`commerce.*`), editable in the workspace.
+* **Generate Variants** on a website item makes ERP's item variants (Stock Operations) and their website items.
+
 ## Variants
 
 `Item` has no variants, so a variant here is a `WebsiteItem` of its own, with its own `Item` (price, stock,

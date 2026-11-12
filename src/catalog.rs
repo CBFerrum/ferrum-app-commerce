@@ -246,7 +246,23 @@ impl DocHook for WebsiteItemHook {
         {
             return Err(Error::field("published", "the item is disabled"));
         }
+        // A value the store has disabled on the product is not sold: its combinations stay unpublished.
+        if b(doc, "published")
+            && let Some(parent) = id(doc, "variant_of")
+        {
+            let p = get(hc.kernel, hc.ctx, hc.tx, "WebsiteItem", parent).await?;
+            if crate::variants::has_disabled(&options_of(doc), &crate::variants::disabled_of(&p)) {
+                return Err(Error::field("published", "the store has disabled one of this variant's options: it is not sold"));
+            }
+        }
         Ok(())
+    }
+
+    async fn action(&self, hc: &mut HookCtx<'_>, name: &str, doc: &Doc, params: &Value) -> Result<Option<Value>> {
+        Ok(Some(match name {
+            "generate_variants" => crate::variants::generate(hc, doc, params).await?,
+            _ => return Ok(None),
+        }))
     }
 }
 
