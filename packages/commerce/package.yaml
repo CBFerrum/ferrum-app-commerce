@@ -25,6 +25,8 @@ overlays:
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
       - {op: add_field, field: {name: commerce_paid_by_card, type: currency, label: Paid by Gift Card, read_only: true, description: "Taken from a gift card at checkout: the order was invoiced then, as stored value pays invoices"}}
+      - {op: add_field, field: {name: commerce_card_held, type: currency, label: Held on Gift Card, read_only: true, description: "A gift card covers part of the order: this much is held on it until the rest is paid; nothing is invoiced before"}}
+      - {op: add_field, field: {name: commerce_card_hold, type: data, label: Gift Card Hold, read_only: true, hidden: true, max_length: 40}}
       - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
@@ -35,6 +37,10 @@ overlays:
                    {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}]}}
       - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
           confirm: "Create the invoice for this delivered order?"}}
+      - {op: add_action, action: {name: web_cancel, label: Cancel Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered == 0.0 && doc.status != 'Closed'",
+          confirm: "Cancel this order that has not shipped? What was paid goes back: a gift card's part onto the card, the rest through the payment it came by.",
+          params: [{name: reason, label: Reason, type: link, to: ReturnReason}, {name: note, label: Note, type: text},
+                   {name: approve, label: "Send the money back now", type: select, options: ["Yes", "No"], description: "No: the refunds wait for a person to approve them"}]}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
   - entity: DeliveryNote
     ops:

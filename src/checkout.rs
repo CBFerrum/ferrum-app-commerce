@@ -92,7 +92,7 @@ async fn crm_records(k: &Kernel, ctx: &Ctx, tx: &mut Tx, customer: Uuid, cart: &
 /// country, ignoring case and spaces), else a new one, the new customer's primary. It is set on the
 /// cart as well as on the order, so both are priced for the same delivery region. None when the
 /// tenant has no Address entity or it cannot be made: the order never fails because of it.
-async fn ship_to_address(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, customer: Uuid, primary: bool) -> Option<Uuid> {
+pub(crate) async fn ship_to_address(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, customer: Uuid, primary: bool) -> Option<Uuid> {
     ctx.schema.entity("Address")?;
     let norm = |v: Option<&str>| v.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     let country = |v: Option<&str>| ferrum_domain::countries::code_for(v.unwrap_or_default()).map_or_else(|| norm(v), str::to_lowercase);

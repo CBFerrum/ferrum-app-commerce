@@ -86,6 +86,17 @@ pub async fn expire_requests(k: &Kernel, ctx: &Ctx, store: Option<&Store>) -> Re
             let so = id(&doc, "sales_order");
             if let Some(so) = so {
                 refresh_order(k, ctx, &mut tx, so).await?;
+                // The rest of an order a gift card holds part of will not be paid now: the card is let go.
+                let still_open: bool = sqlx::query_scalar(
+                    "select exists(select 1 from e_payment_request where tenant_id = $1 and sales_order = $2 and docstatus = 1 and status = 'Initiated')",
+                )
+                .bind(ctx.tenant)
+                .bind(so)
+                .fetch_one(&mut *tx)
+                .await?;
+                if let (false, Some(store)) = (still_open, store) {
+                    crate::gift_card::unhold(k, ctx, &mut tx, store, so).await?;
+                }
                 let event = json!({"sales_order": so, "number": s(&doc, "order_number"), "payment_request": pr, "email": s(&doc, "payer_email")});
                 outbox::enqueue(&mut tx, ctx.tenant, "commerce.payment_expired", Some("SalesOrder"), Some(so), event).await?;
             }
@@ -111,18 +122,28 @@ async fn cancel_unpaid(k: &Kernel, ctx: &Ctx, so: Uuid) -> Result<()> {
         let mut tx = k.db.tenant_tx(ctx.tenant).await?;
         let order = k.get_tx(ctx, &mut tx, "SalesOrder", so, true).await?;
         // Still waiting: no payment arrived and no newer request is open in the meantime.
-        let open: bool = sqlx::query_scalar(
-            "select exists(select 1 from e_payment_request where tenant_id = $1 and sales_order = $2 and docstatus = 1 and status in ('Initiated', 'Paid'))",
+        let (open, by_card, by_other): (bool, Decimal, Decimal) = sqlx::query_as(
+            "select coalesce(bool_or(status = 'Initiated'), false), coalesce(sum(amount) filter (where status = 'Paid' and gateway = $3), 0), \
+             coalesce(sum(amount) filter (where status = 'Paid' and gateway <> $3), 0) from e_payment_request where tenant_id = $1 and sales_order = $2 and docstatus = 1",
         )
         .bind(ctx.tenant)
         .bind(so)
+        .bind(crate::gift_card::GIFT_CARD)
         .fetch_one(&mut *tx)
         .await?;
-        if open || d(&order, "docstatus") != Decimal::ONE || s(&order, "commerce_payment_status") == Some("Paid") {
+        if open || d(&order, "docstatus") != Decimal::ONE || by_other > Decimal::ZERO || (by_card.is_zero() && s(&order, "commerce_payment_status") == Some("Paid")) {
             tx.rollback().await?;
             return Ok(());
         }
-        k.cancel_tx(ctx, &mut tx, "SalesOrder", so, None).await?;
+        if by_card > Decimal::ZERO {
+            // An order a gift card paid part of at checkout (invoiced then, by an earlier release): the card
+            // gets its value back, which cancels the order.
+            let ent = k.entity(ctx, "OrderRefund")?;
+            let mut hc = ferrum_kernel::HookCtx { kernel: k, ctx, tx: &mut tx, entity: &ent };
+            crate::refund::cancel_order(&mut hc, &order, None, None, true).await?;
+        } else {
+            k.cancel_tx(ctx, &mut tx, "SalesOrder", so, None).await?;
+        }
         tx.commit().await?;
         Ok(())
     })
