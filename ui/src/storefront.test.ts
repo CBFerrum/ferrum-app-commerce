@@ -4,7 +4,12 @@
 // src/catalog.rs): the cart's place and codes, the checkout's card and consent, an order whose payment
 // failed, an order changed after it was paid, and the product page's picker and back-in-stock box.
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** The storefront's English words, which the server writes into every page (src/pages.rs). */
+const WORDS = readFileSync(resolve(process.cwd(), "../assets/words/en.json"), "utf8");
 
 type Body = Record<string, unknown> | null;
 type Headers = Record<string, string>;
@@ -30,9 +35,12 @@ function serve(routes: Record<string, Answer>) {
   });
 }
 
-async function open(path: string, body: string, view?: string, data: Record<string, string> = {}) {
+async function open(path: string, body: string, view?: string, data: Record<string, string> = {}, words: Record<string, string> = {}, lang = "en") {
   window.history.pushState({}, "", path);
-  document.body.innerHTML = `${view ? `<span data-cart-count hidden></span><div id="view" data-view="${view}" aria-busy="true"></div>` : ""}${body}<div id="live"></div>`;
+  document.documentElement.lang = lang;
+  // What the server writes in: English, with the page's language over it.
+  const page = JSON.stringify({ ...JSON.parse(WORDS), ...words });
+  document.body.innerHTML = `${view ? `<span data-cart-count hidden></span><div id="view" data-view="${view}" aria-busy="true"></div>` : ""}${body}<div id="live"></div><script type="application/json" id="store-words">${page}</script>`;
   Object.assign(document.body.dataset, { api: "/api/site/t/commerce", currency: "INR", precision: "2", tax: "false", ...data });
   vi.resetModules();
   // The script is the storefront's own file, not one of this interface's: it carries no types.
@@ -248,6 +256,11 @@ describe("an order", () => {
     serve({ ...track(order({ payments: [{ id: "c1", status: "Paid", gateway: "Gift Card", amount: "150", currency: "INR" }, { id: "p2", status: "Initiated", gateway: "stripe", amount: "300", currency: "INR", payment_url: "https://pay.example/h" }] })) });
     await on();
     expect(text()).toContain("A gift card or store credit paid INR 150.00 of this order. The other INR 300.00 is still to pay.");
+    // What the server says of the card: what it has left, and when a held part lets go.
+    serve({ ...track(order({ gift_card: { paid: "0", held: "150", held_until: "2026-11-16T10:00:00.000Z", balance_left: "20" }, payments: [{ id: "p2", status: "Initiated", gateway: "stripe", amount: "300", currency: "INR", payment_url: "https://pay.example/h" }] })) });
+    await on();
+    expect(text()).toContain("INR 20.00 is left on the card.");
+    expect(text()).toContain("The part held lets go on");
   });
 });
 
@@ -302,5 +315,20 @@ describe("the product page", () => {
     serve({});
     await open("/p/mug", `<article class="product"><div class="buy"><p class="in">In stock</p><form class="add" data-item="mug"></form></div></article>`);
     expect(document.querySelector("form.alert-box")).toBeNull();
+  });
+});
+
+describe("the storefront's words", () => {
+  it("are the page's own, key by key, with their places filled and a count worded as the language counts", async () => {
+    localStorage.setItem("ferrum.cart:/api/site/t/commerce", JSON.stringify("tok"));
+    serve({ "GET /cart": () => cart({ item_count: "2", items: [line, { ...line, id: "l2", title: "Mug" }] }), "GET /store": store, "GET /cart/shipping-options": () => ({ options: [], selected: null }) });
+    await open("/cart", "", "cart", {}, { "place.title": "Wohin geht es?", "totals.subtotal": "Zwischensumme", "line.removed": "{item} entfernt", "cart.items.other": "{n} Artikel" }, "de");
+    expect(text()).toContain("Wohin geht es?");
+    expect(text()).toContain("Zwischensumme");
+    // A word the language has not is the English one.
+    expect(text()).toContain("Checkout");
+    expect(document.documentElement.lang).toBe("de");
+    // A count is worded as the language counts (here the badge's own phrase, with {n} filled).
+    expect(document.querySelector("[data-cart-count]")?.getAttribute("aria-label")).toBe("2 in your cart");
   });
 });

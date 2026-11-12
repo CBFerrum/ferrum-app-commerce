@@ -158,6 +158,7 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
         "totals": {"subtotal": m(subtotal), "shipping": m(shipping_amount), "taxes": taxes, "total_taxes": m(d(so, "total_taxes")),
                    "grand_total": m(d(so, "grand_total")), "rounding_adjustment": m(d(so, "rounding_adjustment")), "rounded_total": m(d(so, "rounded_total"))},
         "payments": requests.iter().map(|r| request_view(r, store)).collect::<Vec<_>>(),
+        "gift_card": crate::gift_card::view(tx, ctx.tenant, so).await?,
     }))
 }
 
@@ -290,7 +291,12 @@ pub async fn pay_again(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &D
     }
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let requests = find(k, ctx, tx, "PaymentRequest", vec![Filter::eq("sales_order", so_id.to_string())], Some("created_at desc"), 50).await?;
-    if requests.iter().any(|r| s(r, "status") == Some("Paid")) {
+    // What is left to pay: the total less everything paid (a gift card's part among it) and less what a card
+    // holds for the order until the rest is paid. A card that paid part leaves the rest payable.
+    let paid: Decimal = requests.iter().filter(|r| s(r, "status") == Some("Paid") && d(r, "docstatus") == Decimal::ONE).map(|r| d(r, "amount")).sum();
+    let held = d(so, "commerce_card_held");
+    let due = d(so, "rounded_total") - paid - held;
+    if due <= Decimal::ZERO {
         return Err(Error::invalid("this order is already paid"));
     }
     let now = crate::now();
@@ -306,11 +312,7 @@ pub async fn pay_again(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &D
         // Switching methods: the old request stops being payable.
         k.cancel_tx(ctx, tx, "PaymentRequest", id(current, "id").unwrap_or_default(), None).await?;
     }
-    let created = payment::create_request(k, ctx, tx, store, so, &method, return_url).await?;
-    match created {
-        Some(pr) => Ok(request_view(&pr, store)),
-        None => Err(Error::invalid("nothing is due on this order")),
-    }
+    Ok(request_view(&payment::open_request(k, ctx, tx, store, so, &method, return_url, due).await?, store))
 }
 
 async fn code_of(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cache: &mut HashMap<Uuid, String>, cur: Option<Uuid>) -> Result<Option<String>> {

@@ -12,10 +12,11 @@ use crate::cart::address_text;
 use crate::gift_card::GIFT_CARD;
 use crate::payment::{open_request, param_text};
 use crate::refund::{for_person, reason_named};
+use crate::shipping::{Place, Rule, enabled_rules};
 use crate::store::Store;
 use crate::tell;
 use ferrum_domain::util::{d, elevated, find, get, id, money, rows, s, set, sys};
-use ferrum_kernel::{Doc, Error, Filter, HookCtx, Result};
+use ferrum_kernel::{Action, Ctx, Doc, Error, Filter, HookCtx, Kernel, Result};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -221,12 +222,18 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
         }
     }
 
+    // Delivery follows what the order now holds and where it now goes.
+    reprice_delivery(hc, &store, so_id, param_text(params, "shipping_rule", 36)?, new_address.is_some()).await?;
+
     // What the order comes to now, against what has been paid.
     let after = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?;
     let total = d(&after, "rounded_total");
     let difference = total - before;
     let mut summary = Map::new();
     let (mut requested, mut refunded) = (Value::Null, Value::Null);
+    // What happens to the difference, as the desk is shown it before saving and told after.
+    let mut settlement = json!({"kind": "none", "amount": money(Decimal::ZERO)});
+    let label_of = |gateway: &str| store.method(gateway).map(|m| m.label.clone()).unwrap_or_else(|| gateway.to_string());
     let methods_of = |gateway: &str| store.method(gateway).cloned();
     let open = find(
         hc.kernel,
@@ -250,6 +257,7 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
         {
             let made = open_request(hc.kernel, &sctx, hc.tx, &store, &after, &method, None, balance).await?;
             requested = json!(s(&made, "id"));
+            settlement = json!({"kind": "charge", "amount": money(balance), "gateway": method.gateway, "label": method.label, "replaces_open_request": true});
             balance = Decimal::ZERO;
         }
     } else if balance > Decimal::ZERO {
@@ -266,6 +274,7 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
         if let Some(method) = method {
             let made = open_request(hc.kernel, &sctx, hc.tx, &store, &after, &method, None, balance).await?;
             requested = json!(s(&made, "id"));
+            settlement = json!({"kind": "charge", "amount": money(balance), "gateway": method.gateway, "label": method.label, "replaces_open_request": false});
             balance = Decimal::ZERO;
         }
     } else if balance < Decimal::ZERO {
@@ -308,8 +317,15 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
                 hc.kernel.run_action_tx(&sctx, hc.tx, "OrderRefund", rid, "approve_refund", &json!({})).await?;
             }
             refunded = json!(rid.to_string());
+            let sent = get(hc.kernel, &sctx, hc.tx, "OrderRefund", rid).await?;
+            let gateway = s(&pr, "gateway").unwrap_or_default();
+            settlement = json!({"kind": "refund", "amount": money(back), "gateway": gateway, "label": label_of(gateway), "status": s(&sent, "status")});
             balance = owed(hc.tx, hc.ctx.tenant, &after).await?;
         }
+    }
+    if balance != Decimal::ZERO {
+        // Neither asked for nor sent back: left owing, either way.
+        settlement = json!({"kind": "owed", "amount": money(balance), "by": if balance > Decimal::ZERO { "shopper" } else { "store" }});
     }
     let mut v = Doc::new();
     set(&mut v, "commerce_amount_owed", money(balance));
@@ -333,7 +349,159 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
     summary.insert("owed".into(), money(balance));
     summary.insert("payment_request".into(), requested);
     summary.insert("refund".into(), refunded);
+    summary.insert("settlement".into(), settlement);
+    summary.insert("lines".into(), lines_view(&get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?, &store));
+    let goods: Decimal = rows(&after, "items").iter().filter(|l| !is_delivery(&store, l)).map(|l| d(l, "amount")).sum();
+    let delivery: Decimal = rows(&after, "items").iter().filter(|l| is_delivery(&store, l)).map(|l| d(l, "amount")).sum();
+    summary.insert(
+        "totals".into(),
+        json!({"goods": money(goods), "delivery": money(delivery), "taxes": money(d(&after, "total_taxes")), "grand_total": money(d(&after, "grand_total")),
+               "rounded_total": money(total), "was": money(before)}),
+    );
     Ok(Value::Object(summary))
+}
+
+fn is_delivery(store: &Store, l: &Doc) -> bool {
+    store.shipping_item.is_some() && id(l, "item") == store.shipping_item
+}
+
+/// The order's lines as priced, for the desk: each by its number on the order.
+fn lines_view(order: &Doc, store: &Store) -> Value {
+    Value::Array(
+        rows(order, "items")
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                json!({"line": i + 1, "id": s(l, "id"), "item": s(l, "item"), "name": s(l, "item_name"), "qty": money(d(l, "qty")), "rate": money(d(l, "rate")),
+                       "amount": money(d(l, "amount")), "delivery": is_delivery(store, l), "delivered_qty": money(d(l, "delivered_qty"))})
+            })
+            .collect(),
+    )
+}
+
+/// What the desk's change would do, saved or not: the save's own work, in a transaction that is thrown away,
+/// so the preview and the save cannot disagree. The lines as priced (promotions again, tax and delivery for
+/// where it goes), the difference and what happens to it.
+pub async fn preview(k: &Kernel, user: &Ctx, body: &Map<String, Value>) -> Result<Value> {
+    user.require("SalesOrder", Action::Read)?;
+    let so_id =
+        body.get("sales_order").and_then(Value::as_str).and_then(|v| v.parse::<Uuid>().ok()).ok_or_else(|| Error::field("sales_order", "is required"))?;
+    let mut tx = k.db.tenant_tx(user.tenant).await?;
+    let ent = k.entity(user, "SalesOrder")?;
+    let mut hc = HookCtx { kernel: k, ctx: user, tx: &mut tx, entity: &ent };
+    let out = async {
+        let so = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?;
+        let mut params = Value::Object(body.clone());
+        params["notify"] = json!("No");
+        let mut out = web_update_items(&mut hc, &so, &params).await?;
+        // What the save would make is not there to point at.
+        if let Some(m) = out.as_object_mut() {
+            m.insert("payment_request".into(), Value::Null);
+            m.insert("refund".into(), Value::Null);
+            m.insert("preview".into(), json!(true));
+        }
+        Ok(out)
+    }
+    .await;
+    tx.rollback().await?;
+    out
+}
+
+/// Delivery priced again after an order's lines or address changed: by the rule it was priced by (or the one
+/// that now applies), for the goods it now holds (their value after discounts and their weight) and the place
+/// it now goes. Left alone when the order was priced by no rule, when no rule is enabled any more, or when
+/// the place's postal code is not known and the rule goes by postal codes.
+async fn reprice_delivery(hc: &mut HookCtx<'_>, store: &Store, so_id: Uuid, chosen: Option<String>, moved: bool) -> Result<()> {
+    let sctx = sys(hc.ctx);
+    let (Some(item), order) = (store.shipping_item, get(hc.kernel, &sctx, hc.tx, "SalesOrder", so_id).await?) else { return Ok(()) };
+    let had = id(&order, "commerce_shipping_rule");
+    let rules = enabled_rules(hc.kernel, &sctx, hc.tx).await?;
+    if had.is_none() || rules.is_empty() {
+        return Ok(());
+    }
+    let lines = rows(&order, "items");
+    let goods: Vec<&Doc> = lines.iter().filter(|l| id(l, "item") != Some(item)).collect();
+    let subtotal: Decimal = goods.iter().map(|l| d(l, "amount")).sum();
+    let items: Vec<Uuid> = goods.iter().filter_map(|l| id(l, "item")).collect();
+    let weights: std::collections::HashMap<Uuid, Decimal> =
+        sqlx::query_as::<_, (Uuid, Decimal)>("select item, coalesce(weight_kg, 0) from e_website_item where tenant_id = $1 and item = any($2)")
+            .bind(hc.ctx.tenant)
+            .bind(&items)
+            .fetch_all(&mut **hc.tx)
+            .await?
+            .into_iter()
+            .collect();
+    let weight: Decimal = goods.iter().map(|l| id(l, "item").and_then(|i| weights.get(&i)).copied().unwrap_or_default() * d(l, "qty")).sum();
+    let postcode: Option<String> = match id(&order, "ship_to") {
+        Some(a) if hc.ctx.schema.entity("Address").is_some() => sqlx::query_scalar("select postal_code from e_address where tenant_id = $1 and id = $2")
+            .bind(hc.ctx.tenant)
+            .bind(a)
+            .fetch_optional(&mut **hc.tx)
+            .await?
+            .flatten(),
+        _ => None,
+    };
+    let (country, region) = (s(&order, "delivery_country").map(str::to_string), s(&order, "delivery_region").map(str::to_string));
+    let place = Place { country: country.as_deref(), region: region.as_deref(), postcode: postcode.as_deref() };
+    if postcode.is_none() && rules.iter().any(|r| !r.postal_ranges.is_empty()) {
+        return Ok(());
+    }
+    let applicable: Vec<(&Rule, Decimal)> = rules.iter().filter_map(|r| r.charge(&place, subtotal, weight).map(|c| (r, c))).collect();
+    let wanted = chosen.and_then(|c| c.parse::<Uuid>().ok()).or(had);
+    let pick = wanted.and_then(|w| applicable.iter().find(|(r, _)| r.id == w)).or(if applicable.len() == 1 { applicable.first() } else { None });
+    let Some((rule, charge)) = pick else {
+        return Err(if applicable.is_empty() {
+            Error::field(if moved { "address" } else { "changes" }, "none of the store's delivery methods reaches this address with what the order would hold")
+        } else {
+            Error::field("shipping_rule", "more than one delivery method applies now: choose one")
+        });
+    };
+    let at = lines.iter().position(|l| id(l, "item") == Some(item));
+    let now = at.map(|i| d(&lines[i], "price_list_rate")).unwrap_or_default();
+    if Some(rule.id) == had && *charge == now && (at.is_some() || charge.is_zero()) {
+        return Ok(());
+    }
+    let mut v = Doc::new();
+    set(&mut v, "commerce_shipping_rule", rule.id.to_string());
+    hc.kernel.set_values_tx(&sctx, hc.tx, "SalesOrder", so_id, v).await?;
+    let mut rows_now = lines.clone();
+    let line = match at {
+        Some(i) => {
+            set(&mut rows_now[i], "price_list_rate", money(*charge));
+            i
+        }
+        None => {
+            // Free before, charged now: the line the cart would have made.
+            let mut l = Doc::new();
+            set(&mut l, "item", item.to_string());
+            set(&mut l, "qty", "1");
+            let name: Option<String> = sqlx::query_scalar("select item_name from e_item where tenant_id = $1 and id = $2")
+                .bind(hc.ctx.tenant)
+                .bind(item)
+                .fetch_optional(&mut **hc.tx)
+                .await?;
+            set(&mut l, "item_name", json!(name));
+            set(&mut l, "price_list_rate", money(*charge));
+            set(&mut l, "discount_percent", "0");
+            if let Some(w) = id(&order, "set_warehouse") {
+                set(&mut l, "warehouse", w.to_string());
+            }
+            rows_now.push(l);
+            rows_now.len() - 1
+        }
+    };
+    // Only what the lines' own fields hold (a read adds the row's number and the like).
+    let child =
+        hc.entity.children.get("items").and_then(|c| hc.ctx.schema.entity(&c.entity)).cloned().ok_or_else(|| Error::internal("an order without lines"))?;
+    let rows_now: Vec<Doc> = rows_now.into_iter().map(|r| r.into_iter().filter(|(k, _)| k == "id" || child.field(k).is_some()).collect()).collect();
+    hc.kernel.set_child_rows_tx(&sctx, hc.tx, "SalesOrder", "items", so_id, rows_now).await?;
+    // ERP prices the order again when a line changes: the delivery line goes up by one and straight back.
+    let actor = elevated(hc.ctx);
+    for qty in [2, 1] {
+        let p = json!({"line": line + 1, "qty": qty.to_string()});
+        hc.kernel.run_action_tx(&actor, hc.tx, "SalesOrder", so_id, "update_items", &p).await.map_err(for_person)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

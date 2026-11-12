@@ -1,0 +1,10 @@
+- name: StorefrontWords
+  label: Storefront Words
+  kind: master
+  module: commerce
+  title_field: language
+  description: "A language's words for the storefront's pages and cart, checkout and order screens, over the English the app ships: one record a language, a JSON object of word to text, as assets/words/en.json lists them (each {place} a word fills is kept). A word left out is the English one. The language must be one of Store Settings' Languages Offered."
+  fields:
+    - {name: language, type: data, required: true, unique: true, max_length: 16, in_list: true, description: "A language code: en, hi, ar, pt-br"}
+    - {name: words, type: json, label: Words, description: "{\"cart.empty\": \"Your cart is empty\", \"checkout.continue\": \"Continue\"}: any of the words the storefront uses, by their key (the English file lists them all)"}
+  list: {columns: [language], sort: language asc}

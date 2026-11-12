@@ -70,6 +70,8 @@ pub struct Policy {
     pub credit_kind: Option<Uuid>,
     /// What a carrier says (in its own words) when a parcel is out for delivery.
     pub out_for_delivery_words: Vec<String>,
+    /// The words the shopper's link page carries about these terms, the workspace's own (empty: none).
+    pub page_text: Option<String>,
 }
 
 impl Default for Policy {
@@ -83,6 +85,7 @@ impl Default for Policy {
             credit_by_default: false,
             credit_kind: None,
             out_for_delivery_words: vec![],
+            page_text: None,
         }
     }
 }
@@ -119,6 +122,10 @@ pub struct Store {
     /// The stored value kind taken at checkout and sold as gift cards.
     pub gift_card_kind: Option<Uuid>,
     pub policy: Policy,
+    /// How many times one mail may go to the same order in a day, the first one among them.
+    pub resend_per_day: i64,
+    /// The languages the storefront's words come in, the first the default.
+    pub languages: Vec<String>,
 }
 
 impl Store {
@@ -187,6 +194,12 @@ impl Store {
             cancel_unpaid_orders: b(&doc, "cancel_unpaid_orders"),
             channel: s(&doc, "sales_channel").unwrap_or(WEB_SHOP).to_string(),
             gift_card_kind: id(&doc, "gift_card_kind"),
+            languages: crate::words::offered(s(&doc, "store_languages")),
+            resend_per_day: doc
+                .get("resend_per_day")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|t| t.parse().ok())))
+                .filter(|n| *n >= 1)
+                .unwrap_or(3),
             policy: {
                 let was = Policy::default();
                 let count = |f: &str, default: i64| {
@@ -206,6 +219,7 @@ impl Store {
                         .map(|w| w.trim().to_string())
                         .filter(|w| !w.is_empty())
                         .collect(),
+                    page_text: s(&doc, "after_sales_text").map(str::to_string),
                 }
             },
         })

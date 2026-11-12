@@ -36,7 +36,7 @@
     - {name: order_number, type: data, read_only: true, in_list: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
     - {name: kind, type: select, options: [Return, Cancellation, Payment, Adjustment], default: Return, required: true, in_list: true, in_filter: true,
-       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms). Adjustment: what an edit took off an order that was already paid"}
+       description: "Cancellation: one payment of an order that has not shipped going back (an order paid two ways is cancelled by its Cancel Web Order, which sends each back). Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms). Adjustment: what an edit took off an order that was already paid"}
     - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind == 'Return' || doc.kind == 'Cancellation'", in_filter: true}
     - {name: note, type: text, max_length: 2000}
     - {name: lines, type: table, of: OrderRefundLine, visible_if: "doc.kind == 'Return'"}
