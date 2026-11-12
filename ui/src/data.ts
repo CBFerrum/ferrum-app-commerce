@@ -3,7 +3,7 @@
 // (mark its payment received, invoice it) with the words they ask for confirmation in.
 
 import { useQuery } from "@tanstack/react-query";
-import { ApiError, api, docPath, errorMessage, t } from "@ferrum/client";
+import { ApiError, api, docPath, refusal, t } from "@ferrum/client";
 import { confirmDialog, toast } from "@ferrum/kit";
 import { can, useEntityMeta, useMe } from "@ferrum/records";
 import { amountText, type Order, withMethods } from "./queues";
@@ -133,7 +133,7 @@ export async function markPaid(order: { id: string; number?: string | null }): P
     toast(t("Payment recorded"));
     return true;
   } catch (e) {
-    toast(errorMessage(e), "error");
+    toast(refusal(e), "error");
     return false;
   }
 }
@@ -147,7 +147,7 @@ export async function invoiceOrder(order: { id: string; number?: string | null }
     toast(t("Invoice created"));
     return true;
   } catch (e) {
-    toast(errorMessage(e), "error");
+    toast(refusal(e), "error");
     return false;
   }
 }

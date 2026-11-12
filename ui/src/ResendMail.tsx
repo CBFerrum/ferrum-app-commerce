@@ -4,7 +4,7 @@
 // refusal is shown as it is.
 
 import { useState } from "react";
-import { api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { api, docPath, refusal, isolate, t } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
 
 /** The mails that may be sent again, by the label the action takes, with what must exist on the order for there to be anything to tell. */
@@ -58,7 +58,7 @@ export function ResendMailDialog({ order, available, email, limit, onClose, onDo
       toast(said.text, said.ok ? undefined : "error");
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

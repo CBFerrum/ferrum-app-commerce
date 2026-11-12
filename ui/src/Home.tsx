@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { api, errorMessage, todayIso, t as tr, isolate } from "@ferrum/client";
+import { api, refusal, todayIso, t as tr, isolate } from "@ferrum/client";
 import { Alert, Badge, Button, ListSkeleton, StatePanel, statusTone, toast, useLiveEntity, useShellTitle, placed } from "@ferrum/kit";
 import { can, useMetaIndex } from "@ferrum/records";
 import { amountText, counts, queue, STAGES, waitedDays } from "./queues";
@@ -24,7 +24,7 @@ function Sales() {
     queryKey: ["commerce", "sales", end],
     queryFn: ({ signal }) => api.get<{ rows: DayRow[] }>("/api/reports/web_sales", { from_date: daysBefore(end, 29), to_date: end, group_by: "Day" }, signal).then((r) => r.rows),
   });
-  if (q.error) return <p className="muted">{tr("Sales cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
+  if (q.error) return <p className="muted">{tr("Sales cannot be shown ({error}).", { error: refusal(q.error) })}</p>;
   if (!q.data) return <ListSkeleton rows={1} />;
   const tiles = [
     { label: tr("Today"), t: totals(q.data, end, end) },
@@ -49,7 +49,7 @@ function Sales() {
 function AtTheDesk() {
   const q = useQuery({ queryKey: ["commerce", "desk"], queryFn: ({ signal }) => workingOrders(signal) });
   const tally = useMemo(() => counts(q.data ?? []), [q.data]);
-  if (q.error) return <p className="muted">{tr("Orders cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
+  if (q.error) return <p className="muted">{tr("Orders cannot be shown ({error}).", { error: refusal(q.error) })}</p>;
   if (!q.data) return <ListSkeleton rows={3} />;
   const oldest = queue(q.data, "ship").slice(0, 5);
   return (
@@ -102,7 +102,7 @@ function Payments() {
     queryKey: ["commerce", "payments"],
     queryFn: ({ signal }) => soft(list<Payment>("PaymentRequest", { filters: f([["status", "in", ["Failed", "Expired"]]]), sort: "created_at desc", limit: 10, fields: "sales_order,order_number,payer_name,gateway,amount,currency_code,status" }, signal)),
   });
-  if (q.error) return <p className="muted">{tr("Payments cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
+  if (q.error) return <p className="muted">{tr("Payments cannot be shown ({error}).", { error: refusal(q.error) })}</p>;
   if (!q.data) return <ListSkeleton rows={2} />;
   if (!q.data.length) return <p className="muted">{tr("No failed or expired payments.")}</p>;
   return (
@@ -144,12 +144,12 @@ function Reviews() {
       toast((status === "Approved" ? tr("Published: {reviewer_name}'s review", { reviewer_name: String(r.reviewer_name) }) : tr("Rejected: {reviewer_name}'s review", { reviewer_name: String(r.reviewer_name) })));
       await qc.invalidateQueries({ queryKey: ["commerce", "reviews"] });
     } catch (err) {
-      toast(errorMessage(err), "error");
+      toast(refusal(err), "error");
     } finally {
       setBusy(null);
     }
   };
-  if (q.error) return <p className="muted">{tr("Reviews cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
+  if (q.error) return <p className="muted">{tr("Reviews cannot be shown ({error}).", { error: refusal(q.error) })}</p>;
   if (!q.data) return <ListSkeleton rows={2} />;
   if (!q.data.rows.length) return <p className="muted">{tr("No reviews waiting.")}</p>;
   return (
@@ -180,7 +180,7 @@ function Reviews() {
 function Catalog() {
   const count = (...filters: unknown[]) => list("WebsiteItem", { filters: f(filters), limit: 1, count: "true", fields: "title" }).then((r) => r.total ?? 0);
   const q = useQuery({ queryKey: ["commerce", "catalog"], queryFn: () => Promise.all([count(["published", "=", true], ["variant_of", "is", "not set"]), count(["published", "=", false], ["variant_of", "is", "not set"]), count(["variant_of", "is", "set"])]) });
-  if (q.error) return <p className="muted">{tr("The catalog cannot be shown ({error}).", { error: errorMessage(q.error) })}</p>;
+  if (q.error) return <p className="muted">{tr("The catalog cannot be shown ({error}).", { error: refusal(q.error) })}</p>;
   if (!q.data) return <ListSkeleton rows={2} />;
   const [shown, hidden, variants] = q.data;
   const open = (...filters: unknown[]) => `/e/WebsiteItem?filters=${encodeURIComponent(f(filters))}`;
