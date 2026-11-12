@@ -155,7 +155,8 @@ describe("an order", () => {
     expect(html).toContain("Change…");
     expect(html).toContain("Cancel order…");
     expect(html).toContain("the shopper still owes");
-    expect(html).toContain("A gift card holds");
+    for (const expected of ["Gift card", "Held for this order", "₹150.00", "The card holds this part until the rest is paid"]) expect(html, expected).toContain(expected);
+    expect(html).not.toContain("Paid by the card");
     // Shipped in full: nothing to cancel, nothing to change.
     const sent = plain(draw(client([[["commerce", "order", "o1"], full], [["commerce", "order", "o1", "related"], related]]), "/o/o1", "/o/:id", <OrderRoute />));
     expect(sent).not.toContain("Cancel order…");
