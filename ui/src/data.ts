@@ -55,6 +55,12 @@ export interface Rights {
   settles: boolean;
   /** Reads the refunds and the money a gateway could not book. */
   seesMoney: boolean;
+  /** Reads return requests and the stock alerts. */
+  seesReturns: boolean;
+  /** Approves, declines and receives return requests. */
+  decidesReturns: boolean;
+  /** Changes the catalog: makes a product's variants. */
+  editsCatalog: boolean;
 }
 
 export function useRights(): Rights {
@@ -62,6 +68,9 @@ export function useRights(): Rights {
   const refundMeta = useEntityMeta("OrderRefund");
   const requestMeta = useEntityMeta("PaymentRequest");
   const exceptionMeta = useEntityMeta("PaymentException");
+  const returnMeta = useEntityMeta("ReturnRequest");
+  const returns = returnMeta.data?.permissions;
+  const itemMeta = useEntityMeta("WebsiteItem");
   const refunds = refundMeta.data?.permissions;
   const requests = requestMeta.data?.permissions;
   const exceptions = exceptionMeta.data?.permissions;
@@ -73,6 +82,9 @@ export function useRights(): Rights {
     takesPayment: can(requests, "write"),
     settles: can(exceptions, "write"),
     seesMoney: can(refunds, "read") || can(exceptions, "read"),
+    seesReturns: can(returns, "read"),
+    decidesReturns: can(returns, "write"),
+    editsCatalog: can(itemMeta.data?.permissions, "write"),
   };
 }
 
@@ -154,4 +166,15 @@ export async function copy(text: string, what: string): Promise<void> {
 export async function trackingLink(order: string): Promise<string | null> {
   const r = await api.post<{ link: string | null }>(docPath("SalesOrder", order, "actions", "web_tracking_link"), {});
   return r.link;
+}
+
+/** How many return requests wait for the desk to decide: the badge on the Returns tab. */
+export function useReturnsWaiting(): number | undefined {
+  const rights = useRights();
+  const q = useQuery({
+    enabled: rights.seesReturns,
+    queryKey: ["commerce", "returns-waiting"],
+    queryFn: () => list("ReturnRequest", { filters: f([["status", "=", "Requested"]]), limit: 1, count: "true", fields: "id" }).then((r) => r.total ?? 0).catch(() => 0),
+  });
+  return q.data;
 }
