@@ -126,8 +126,8 @@ rating/name/email, `409` this email already reviewed the item, `404` item.
 `X-Cart-Token` from now on. Signed-in callers' carts are priced for their customer account.
 
 `Cart` = `{status: Open | Ordered | Expired, currency, items: [{id, item (slug), title, image, available,
-qty, list_price, price, discount_percent, amount, in_stock, available_qty}], item_count,
-coupon: {code} | null, shipping: {id, label, amount} | null, email, phone, name, notes,
+qty, list_price, price, discount_percent, promotion_percent, added_by_promotion, amount, in_stock, available_qty}], item_count,
+coupon: {code} | null, codes: [{code, applied}], promotions: [{title, amount}], shipping: {id, label, amount} | null, email, phone, name, notes,
 shipping_address: Address, billing_same_as_shipping, billing_address: Address,
 prices_include_tax, totals: {subtotal, discount, shipping, taxes: [{description, amount}],
 total_taxes, grand_total, rounding_adjustment, rounded_total}, missing: [...]}` with
@@ -146,8 +146,9 @@ Every cart call below returns the updated `Cart`:
 | `PUT /cart/items/{line}` | `{qty}` | `qty: 0` removes; same checks; `404` unknown line |
 | `DELETE /cart/items/{line}` | — | |
 | `PUT /cart/details` | any of `{email, phone, name, notes, shipping_address, billing_address, billing_same_as_shipping}` | Keys left out stay; an address replaces the previous one (null clears); giving a `billing_address` turns off *same as shipping*. `422` unknown keys, invalid email/phone, lengths, `shipping_address.country` not shipped to |
-| `PUT /cart/coupon` | `{code}` | `422` `coupon_code`: not valid, not yet valid, expired, used up, already used by this customer/email, below its minimum order, or not lowering this cart |
-| `DELETE /cart/coupon` | — | |
+| `PUT /cart/coupon` | `{code}` | The store's own coupon (one per cart), or one of ERP's promotion codes (up to ten): promotions price the cart as any sales order (amount or percent off the order or lines, buy and get, bundles, free delivery on the shipping item, free items added as lines with `added_by_promotion`). `422` `coupon_code`: not valid (an unknown and a used-up promotion code get the same answer), not yet valid, expired, used up, already used by this customer/email, below its minimum order, or not lowering this cart |
+| `DELETE /cart/coupon` | — | Takes the store's coupon off |
+| `DELETE /cart/codes/{code}` | — | Takes that code off (a promotion code or the coupon) |
 | `GET /cart/shipping-options` | — | `{options: [{id, label, description, amount}], selected}` for the cart's country, subtotal and weight |
 | `PUT /cart/shipping` | `{shipping_method: id}` | `422` not available for this cart; when exactly one method applies it is chosen automatically, and a method that stops applying is dropped |
 
@@ -158,7 +159,8 @@ Changing an ordered or expired cart is `409`.
 **`POST /checkout`** — headers `X-Cart-Token`, **`Idempotency-Key`** (8–200 visible ASCII
 characters; or `idempotency_key` in the body); body `{payment_method: gateway, accept_terms
 (required when the store has a terms page), expected_total? (the rounded total the customer
-saw), return_url? (must start with the store URL), details?: {same as PUT /cart/details}}` →
+saw), return_url? (must start with the store URL), details?: {same as PUT /cart/details},
+gift_card?: {code, pin?}}` →
 `{order: Order, order_token, order_link, payment_request: PaymentRequest | null}` (`null` when
 nothing is to be paid). `order_link` is the shopper's tracking link (see "After checkout"), made when the
 store has a storefront URL.
@@ -174,6 +176,14 @@ details, `payment_method`, `accept_terms`, `return_url`, `shipping_address.count
 rows no longer available / out of stock, `coupon_code`), `409` (`expected_total` differs —
 the message has the new total —, cart already ordered or expired), `403` guest checkout
 disabled. Keep `order_token`: it is the guest's key to the order.
+
+With `gift_card`, the store's Gift Cards kind pays what it holds of the order (ERP's stored value, which
+pays invoices: the order is invoiced at checkout, and the card is redeemed through ERP's prove step, its
+code and PIN never kept); `payment_method` pays the rest and may be left out when the card covers it all.
+`payment_request` is then the rest's request; the card's own request (`gateway: "Gift Card"`) is already
+paid. `422` `gift_card` (unknown code, wrong PIN, blocked or used up; ERP's guessing limits apply).
+An item that names a stored value kind sells a gift card: once its order is paid, the card is opened and
+its code (and PIN) go to the shopper once in the `commerce.gift_card_issued` message.
 
 `Order` = `{number, date, status (sales order status), delivered_percent, payment_status
 (Pending | Paid | Failed | Expired | Cancelled | Not Required | Partly Refunded | Refunded),
