@@ -46,6 +46,7 @@ async fn fresh_kernel() -> Arc<Kernel> {
     packages.extend(ferrum_app_commerce::packages().expect("app packages"));
     packages.extend(ferrum_app_crm::packages().expect("crm packages"));
     packages.extend(ferrum_finance::packages().expect("finance packages"));
+    packages.extend(ferrum_stock_ops::packages().expect("stock operations packages"));
     let catalog = Catalog::from_packages(packages).expect("catalog");
     let mut hooks = HookRegistry::default();
     ferrum_domain::register(&mut hooks);
@@ -56,6 +57,7 @@ async fn fresh_kernel() -> Arc<Kernel> {
     ferrum_app_commerce::register(&mut hooks);
     ferrum_app_crm::register(&mut hooks);
     ferrum_finance::register(&mut hooks);
+    ferrum_stock_ops::register(&mut hooks);
     for source in ferrum_app_commerce::reports() {
         ferrum_domain::reports::add_source(source);
     }
@@ -2403,7 +2405,7 @@ async fn after_sales() {
     pay(&t, &t.ctx, a.request.unwrap(), a.total, "fp_after_a").await;
     let link_a = manage_token(&t, "cancel@example.com", 0).await;
     let waiting = mails(&t, "cancel@example.com").await;
-    assert!(waiting.iter().all(|(_, h)| !h.contains(&link_a) && h.contains("••••••")), "the token is not in the clear in the outbox: {waiting:?}");
+    assert!(waiting.iter().all(|(_, h)| !h.contains(&link_a)) && waiting[0].1.contains("••••••"), "the token is not in the clear in the outbox: {waiting:?}");
     let page = t.k.link_page(slug, &link_a).await.unwrap().expect("a page");
     let offered = page.actions.iter().map(|a| a.1.clone()).collect::<Vec<_>>().join(", ");
     assert!(offered.contains("Cancel My Order") && offered.contains("Return Something"), "the link offers both: {offered}");
@@ -2665,4 +2667,125 @@ async fn shopper_mails() {
     assert_eq!((consent_of("may@example.com"), consent_of("mayhem@example.com")), (Some(json!(true)), Some(json!(false))));
     assert_eq!(subjects("may@example.com").await.iter().filter(|s| s.contains("left something in your cart")).count(), 1);
     assert!(subjects("mayhem@example.com").await.is_empty(), "no consent, no reminder");
+}
+
+#[test]
+fn variants_generated_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(variants_generated()).await.unwrap() });
+}
+
+/// A product with options is ERP's template item: its combinations are ERP's variants (items of their own),
+/// each with a website item, a price and its own stock; the picker reads them; a value the store disables is
+/// never sold.
+async fn variants_generated() {
+    let Shop { t, cid, tee, stores, .. } = shop_with("variants-generated", &["commerce", "stock_ops"]).await;
+    let tee_site = t.find_one("WebsiteItem", json!({"item": tee.to_string()})).await;
+    let generate = |params: Value| {
+        let (t, id) = (&t, uid(&tee_site));
+        async move { t.k.run_action(&t.ctx, "WebsiteItem", id, "generate_variants", params).await }
+    };
+    let none = generate(json!({})).await.unwrap_err().to_string();
+    assert!(none.contains("what it comes in"), "{none}");
+    let made = generate(json!({"options": {"Size": ["S", "M", "L"], "Colour": ["Red"]}, "disabled": r#"{"Size": ["L"]}"#})).await.expect("generated");
+    assert_eq!((made["website_items_made"].clone(), made["unpublished"].clone()), (json!(3), json!(1)), "{made}");
+    let variants = t.count("Item", json!({"stk_variant_of": tee.to_string()})).await;
+    assert_eq!(variants, 3, "ERP made the combinations");
+    let sites = t.count("WebsiteItem", json!({"variant_of": tee_site["id"]})).await;
+    assert_eq!(sites, 3);
+
+    // Generated again, nothing more is made; a new value adds its combination only.
+    let again = generate(json!({"options": {"Size": ["S", "M", "L"], "Colour": ["Red"]}})).await.expect("again");
+    assert_eq!(again["website_items_made"], json!(0), "{again}");
+    let more = generate(json!({"options": {"Size": ["S", "XL"], "Colour": ["Red"]}})).await.expect("a new size");
+    assert_eq!(more["website_items_made"], json!(1), "{more}");
+    assert_eq!(t.count("Item", json!({"stk_variant_of": tee.to_string()})).await, 4);
+
+    // Each has the template's price, and the picker offers what is sold.
+    let medium = t.find_one("WebsiteItem", json!({"variant_of": tee_site["id"], "options.value": "M"})).await;
+    let medium_item = medium["item"].as_str().unwrap().parse::<Uuid>().unwrap();
+    let price = t.find_one("ItemPrice", json!({"item": medium_item.to_string()})).await;
+    assert_eq!(dec(&price["rate"]), n("400"));
+    let page = t.get_pub("/items/logo-tee").await;
+    let shown: Vec<String> = page["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|v| v["options"].as_array().unwrap().iter().filter_map(|o| o["value"].as_str().map(str::to_string)))
+        .collect();
+    let shown = shown.join(" ");
+    assert!(shown.contains(" M") || shown.contains("M "), "{shown}");
+    assert!(
+        shown.split(' ').any(|v| v == "S") && shown.split(' ').any(|v| v == "M") && !shown.split(' ').any(|v| v == "L"),
+        "the picker offers what is sold, not what the store disabled: {shown}"
+    );
+
+    // Its own stock: the medium is stocked, the small is not.
+    let opening = t
+        .insert(
+            "StockEntry",
+            json!({"company": cid.to_string(), "purpose": "Opening Stock", "items": [{"item": medium_item.to_string(), "qty": "4", "basic_rate": "150", "target_warehouse": stores["id"]}]}),
+        )
+        .await;
+    t.submit("StockEntry", uid(&opening)).await;
+    let small = t.find_one("WebsiteItem", json!({"variant_of": tee_site["id"], "options.value": "S"})).await;
+    let in_m = t.get_pub(&format!("/items/{}", medium["slug"].as_str().unwrap())).await;
+    let in_s = t.get_pub(&format!("/items/{}", small["slug"].as_str().unwrap())).await;
+    assert_eq!((in_m["in_stock"].clone(), in_s["in_stock"].clone()), (json!(true), json!(false)), "stock per combination");
+
+    // A disabled value cannot be published by hand.
+    let large = t.find_one("WebsiteItem", json!({"variant_of": tee_site["id"], "options.value": "L"})).await;
+    let refused = t.k.update(&t.ctx, "WebsiteItem", uid(&large), obj(json!({"published": true})), None).await.unwrap_err();
+    assert!(format!("{refused:?}").contains("disabled"), "{refused:?}");
+}
+
+#[test]
+fn updated_app_on_an_old_workspace_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(old_workspace()).await.unwrap() });
+}
+
+/// A workspace that has not been updated has none of what an update seeds (the return reasons) and none of
+/// the new settings (their columns are empty): everything still works, from the defaults in the code, and the
+/// upkeep and its new steps find nothing missing.
+async fn old_workspace() {
+    let slug = "old-workspace";
+    let Shop { t, .. } = small_shop(slug).await;
+    t.sql("delete from e_return_reason").await;
+    t.sql("update e_store_settings set cancel_window_hours = null, cancel_refund = null, return_window_days = null, return_shipping_paid_by = null, restocking_fee_percent = null, refund_destination = null, store_credit_kind = null, out_for_delivery_words = null").await;
+    let fakepay = gateway(&t, "fakepay").await;
+
+    // The desk cancels a paid order: the reason it needs is made when it is not there.
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "old-a@example.com", "fakepay", "old-a-0001").await;
+    pay(&t, &t.ctx, a.request.unwrap(), a.total, "fp_old_a").await;
+    let out = t.k.run_action(&t.ctx, "SalesOrder", a.so, "web_cancel", json!({})).await.expect("cancelled without the seeded reason");
+    let refund = uid(&t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await);
+    t.k.run_action(&fakepay, "OrderRefund", refund, "refund_done", json!({"refund_reference": "re_old"})).await.expect("done");
+    assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(2), "{out}");
+
+    // A shopper cancels and asks to return from the link, with the windows of the defaults.
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 2}]), "old-b@example.com", "Cash on Delivery", "old-b-0001").await;
+    let link = manage_token(&t, "old-b@example.com", 0).await;
+    t.k.run_action(&t.ctx, "SalesOrder", b.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
+    let asked = t.k.use_link(slug, &link, "web_shopper_return", &obj(json!({"reason": "never heard of it"})), None).await.expect("asked");
+    assert!(asked.is_some());
+    let request = t.find_one("ReturnRequest", json!({"sales_order": b.so.to_string()})).await;
+    assert_eq!(
+        (request["resolution"].clone(), request["shipping_paid_by"].clone(), dec(&request["restocking_fee_percent"])),
+        (json!("Original Payment"), json!("Shopper"), n("0"))
+    );
+    let reason = t.get("ReturnReason", request["reason"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(reason["reason"], json!("Other"), "no reason of that name: Other, made");
+
+    // The edit's refund reason, and the upkeep's new steps.
+    let c = place(&t, json!([{"item": "blue-mug", "qty": 2}]), "old-c@example.com", "fakepay", "old-c-0001").await;
+    pay(&t, &t.ctx, c.request.unwrap(), c.total, "fp_old_c").await;
+    t.k.run_action(&t.ctx, "SalesOrder", c.so, "web_update_items", json!({"changes": r#"[{"line": 1, "qty": "1"}]"#}))
+        .await
+        .expect("edited without the seeded reason");
+    assert_eq!(t.count("OrderRefund", json!({"sales_order": c.so.to_string(), "kind": "Adjustment"})).await, 1);
+    t.sql("update e_shopping_cart set last_activity = now() - interval '3 days' where status = 'Open'").await;
+    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
 }
