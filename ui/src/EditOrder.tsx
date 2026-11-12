@@ -1,14 +1,16 @@
-// Changing an order that has not been fulfilled: quantities, lines added and taken away, and where it
-// goes. What it will come to is shown before anything is saved, with what happens to the difference
-// (the shopper is asked for it, it is sent back, or it is recorded as owed); the server prices the
-// change again and its own figures are said once it is saved. Nothing about the rules lives here: ERP
-// refuses what has shipped or been billed, and the server's refusal is shown as it is.
+// Changing an order that has not been fulfilled: quantities, lines added and taken away, where it goes and
+// by which delivery method. What saving would do is asked of the server before anything is saved (the preview
+// route runs the save's own code and throws it away): the lines as priced, the totals, the difference and what
+// happens to it. Saving shows the same figures. Nothing about the rules lives here: the server refuses what has
+// shipped or been billed, and its refusal is shown as it is.
 
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, docPath, errorMessage, isolate, t } from "@ferrum/client";
-import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
+import { ApiError, api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { Alert, Button, Dialog, Field, ListSkeleton, toast, useDebounced } from "@ferrum/kit";
 import { LinkInput } from "@ferrum/records";
-import { type Address, changes, type Draft, emptyAddress, emptyDraft, estimate, type OrderLine, type PayRow, quantity, readiness, savedWords, type Saved, settlement, isCharge, lineProblem, updateParams } from "./edit";
+import { type Address, type Draft, emptyAddress, emptyDraft, type OrderLine, previewBody, quantity, readiness, type Saved, savedWords, settlementWords, isCharge, lineProblem, updateParams } from "./edit";
+import { f, list, soft } from "./data";
 import { amountText, units } from "./queues";
 import { gatewayName } from "./standing";
 
@@ -18,31 +20,78 @@ interface Order {
   commerce_card_held?: string | number | null;
 }
 
-/** What the difference comes to, in words, for the person about to save it. */
-function Outcome({ difference, payments, code, approve, setApprove }: { difference: number; payments: PayRow[]; code?: string | null; approve: boolean; setApprove: (v: boolean) => void }) {
-  const s = settlement(difference, payments);
+interface Rule {
+  id: string;
+  label?: string | null;
+}
+
+const PREVIEW = "/api/app/commerce/desk/change-preview";
+
+/** What saving would come to, as the server worked it out: the lines as priced, the totals, the difference and what happens to it. */
+function Worked({ p, code, approve, setApprove }: { p: Saved; code?: string | null; approve: boolean; setApprove: (v: boolean) => void }) {
   const money = (v: unknown) => amountText(v, code);
-  const via = (g: string | null) => (g ? gatewayName(g) : t("the store's first payment method"));
-  const words =
-    s.kind === "none"
-      ? t("Nothing is asked for and nothing is sent back.")
-      : s.kind === "replace"
-        ? t("The shopper has not paid yet: their open payment request is replaced by one for the new total, through {via}.", { via: via(s.via) })
-        : s.kind === "charge"
-          ? t("The shopper is asked for the difference through {via}, with a payment link on their order page.", { via: via(s.via) })
-          : s.kind === "refund"
-            ? s.offline
-              ? t("The difference is noted as a refund through {via}, which has no gateway: you hand it back and record that you did.", { via: via(s.via) })
-              : t("The difference is sent back through {via} as an adjustment refund.", { via: via(s.via) })
-            : s.toShopper
-              ? t("No payment can take a refund of this size, so it is recorded as owed to the shopper: the store owes {amount}.", { amount: money(Math.abs(difference)) })
-              : t("No payment can be asked for it, so it is recorded as owed by the shopper: {amount} is still to collect.", { amount: money(Math.abs(difference)) });
+  const diff = Number(p.difference ?? 0);
+  const s = p.settlement ?? { kind: "none" as const };
+  const words = settlementWords(s, money, (gateway, label) => (label ? `${label} (${gatewayName(gateway)})` : gateway ? gatewayName(gateway) : t("the store's first payment method")));
+  const t0 = p.totals;
   return (
     <div className="stack">
+      <div className="cm-refund-sum" aria-live="polite">
+        <span className="muted">{diff > 0 ? t("The order will cost more by") : diff < 0 ? t("The order will cost less by") : t("The order's total")}</span>
+        <strong className="cm-refund-amount">{diff === 0 ? isolate(money(p.total)) : isolate(money(Math.abs(diff)))}</strong>
+        {t0 && <span className="faint">{t("Before it was {amount}.", { amount: money(t0.was) })}</span>}
+      </div>
+      <table className="table cm-table" aria-label={t("The lines as priced")}>
+        <thead>
+          <tr>
+            <th>{t("Item")}</th>
+            <th className="num">{t("Qty")}</th>
+            <th className="num">{t("Amount")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(p.lines ?? []).map((l) => (
+            <tr key={`${l.line}-${l.id ?? l.item}`}>
+              <td data-label={t("Item")}>
+                {isolate(l.name ?? "")}
+                {l.delivery && <span className="faint"> · {t("Delivery")}</span>}
+              </td>
+              <td className="num" data-label={t("Qty")}>
+                {isolate(units(Number(l.qty)))}
+              </td>
+              <td className="num" data-label={t("Amount")}>
+                {isolate(money(l.amount))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {t0 && (
+        <dl className="kv">
+          <div>
+            <dt>{t("Goods")}</dt>
+            <dd>{isolate(money(t0.goods))}</dd>
+          </div>
+          <div>
+            <dt>{t("Delivery")}</dt>
+            <dd>{Number(t0.delivery) === 0 ? t("Free") : isolate(money(t0.delivery))}</dd>
+          </div>
+          <div>
+            <dt>{t("Taxes")}</dt>
+            <dd>{isolate(money(t0.taxes))}</dd>
+          </div>
+          <div>
+            <dt>{t("Total")}</dt>
+            <dd>
+              <strong>{isolate(money(t0.rounded_total))}</strong>
+            </dd>
+          </div>
+        </dl>
+      )}
       <p className="cm-tight" role="status">
-        {isolate(words)}
+        {isolate(words.text)}
       </p>
-      {s.kind === "refund" && !s.offline && (
+      {words.approvable && (
         <label className="check-field">
           <input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} />
           <span>{t("Send the refund now (otherwise it waits for a person to approve it)")}</span>
@@ -80,8 +129,9 @@ function AddressFields({ a, onChange }: { a: Address; onChange: (a: Address) => 
   );
 }
 
-export function EditOrderDialog({ order, lines, payments, shippingItem, code, onClose, onDone }: { order: Order; lines: OrderLine[]; payments: PayRow[]; shippingItem?: string | null; code?: string | null; onClose: () => void; onDone: () => void }) {
+export function EditOrderDialog({ order, lines, shippingItem, code, onClose, onDone }: { order: Order; lines: OrderLine[]; shippingItem?: string | null; code?: string | null; onClose: () => void; onDone: () => void }) {
   const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [rule, setRule] = useState("");
   const [note, setNote] = useState("");
   const [notify, setNotify] = useState(true);
   const [approve, setApprove] = useState(true);
@@ -91,19 +141,37 @@ export function EditOrderDialog({ order, lines, payments, shippingItem, code, on
   const held = Number(order.commerce_card_held ?? 0) > 0;
   const charge = (l: OrderLine) => isCharge(l, shippingItem);
   const ready = readiness(lines, draft, charge);
-  const e = estimate(lines, draft);
   const money = (v: unknown) => amountText(v, code);
-  const before = lines.filter((l) => !charge(l)).reduce((n, l) => n + Number(l.amount ?? 0), 0);
+  const rules = useQuery({ queryKey: ["commerce", "shipping-rules"], queryFn: ({ signal }) => soft(list<Rule>("ShippingRule", { filters: f([["enabled", "=", true]]), fields: "label", sort: "sort_order asc", limit: 50 }, signal)) });
+
+  // What saving would do, asked of the server a moment after the last edit; the same body is what saving sends.
+  const asked = JSON.stringify(previewBody(order.id, lines, draft, rule));
+  const key = useDebounced(asked, 300);
+  const preview = useQuery({
+    // Only once the edit has settled: a debounce still catching up would ask about an older body.
+    enabled: ready.ok && !held && key === asked,
+    queryKey: ["commerce", "change-preview", key],
+    queryFn: ({ signal }) => api.post<Saved>(PREVIEW, JSON.parse(key) as unknown, { signal }),
+    placeholderData: keepPreviousData,
+    gcTime: 0,
+  });
+  const p = ready.ok && !held ? preview.data : undefined;
+  const working = ready.ok && !held && (preview.isFetching || key !== asked);
+  // The server asks for a choice when more than one delivery method reaches the place.
+  const needsRule = preview.error instanceof ApiError && preview.error.fields.some((x) => x.field === "shipping_rule");
+  const refused = ready.ok && !held && !working && preview.error ? errorMessage(preview.error, false) : null;
+  const canSave = ready.ok && !held && !!p && !working && !preview.error;
 
   const setQty = (id: string, v: string) => setDraft((d) => ({ ...d, qty: { ...d.qty, [id]: v } }));
 
   const submit = async () => {
-    if (!ready.ok || busy) return;
+    if (!canSave || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const saved = await api.post<Saved>(docPath("SalesOrder", order.id, "actions", "web_update_items"), updateParams(lines, draft, note, notify, approve));
-      toast(savedWords(saved, money));
+      const saved = await api.post<Saved>(docPath("SalesOrder", order.id, "actions", "web_update_items"), { ...updateParams(lines, draft, note, notify, approve), shipping_rule: rule || undefined });
+      // The same figures the preview showed; if the prices moved in between, the desk is told so.
+      toast(savedWords(saved, money) + (p && saved.total !== p.total ? ` ${t("The price moved since the preview: it was {amount}.", { amount: money(p.total) })}` : ""));
       onDone();
     } catch (err) {
       setError(errorMessage(err));
@@ -122,7 +190,7 @@ export function EditOrderDialog({ order, lines, payments, shippingItem, code, on
           <Button onClick={onClose} disabled={busy}>
             {t("Close")}
           </Button>
-          <Button variant="primary" loading={busy} disabled={!ready.ok || held} onClick={() => void submit()}>
+          <Button variant="primary" loading={busy} disabled={!canSave} onClick={() => void submit()}>
             {t("Save the change")}
           </Button>
         </>
@@ -238,23 +306,32 @@ export function EditOrderDialog({ order, lines, payments, shippingItem, code, on
           </label>
         </div>
         <aside className="cm-refund-side" aria-label={t("What the change comes to")}>
-          <div className="cm-refund-sum" aria-live="polite">
-            <span className="muted">{t("The lines change by about")}</span>
-            <strong className="cm-refund-amount">{e.goods === 0 && !e.added && !e.moves ? "—" : isolate(`${e.goods > 0 ? "+" : ""}${money(e.goods)}`)}</strong>
-            <span className="faint">{t("Before it was {amount}, before tax and delivery.", { amount: money(before) })}</span>
-          </div>
-          {(e.added > 0 || e.moves) && (
-            <p className="faint cm-tight">
-              {[e.added > 0 ? t("Added items are priced when it is saved.") : null, e.moves ? t("Tax follows the new address.") : null].filter(Boolean).join(" ")}
-            </p>
+          {(needsRule || ((rules.data?.length ?? 0) > 1 && ready.ok)) && (
+            <Field label={t("Delivery method")} htmlFor="edit-rule" hint={needsRule ? undefined : t("Left as it is, the order's own method is priced again for what it now holds and where it goes.")}>
+              <select id="edit-rule" className="select" value={rule} onChange={(ev) => setRule(ev.target.value)}>
+                <option value="">{t("As the order has it")}</option>
+                {rules.data?.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {isolate(r.label ?? "")}
+                  </option>
+                ))}
+              </select>
+            </Field>
           )}
-          <p className="faint cm-tight">{t("Promotions, tax and delivery are priced again when it is saved: the exact difference is shown then.")}</p>
-          {changes(lines, draft).length > 0 || e.moves ? <Outcome difference={e.goods} payments={payments} code={code} approve={approve} setApprove={setApprove} /> : null}
-          {!ready.ok && ready.why && (
+          {!ready.ok && ready.why ? (
             <p className="cm-refund-why" role="status">
               {isolate(ready.why)}
             </p>
-          )}
+          ) : refused ? (
+            <Alert tone="error">{isolate(refused)}</Alert>
+          ) : p ? (
+            <>
+              <Worked p={p} code={code} approve={approve} setApprove={setApprove} />
+              {working && <p className="faint cm-tight">{t("Working it out again…")}</p>}
+            </>
+          ) : ready.ok && !held ? (
+            <ListSkeleton rows={3} />
+          ) : null}
         </aside>
       </div>
     </Dialog>

@@ -601,7 +601,6 @@ function OrderPage({ id }: { id: string }) {
         <EditOrderDialog
           order={o}
           lines={o.items ?? []}
-          payments={more.data.payments}
           shippingItem={shippingItem.data}
           code={code}
           onClose={() => setEditing(false)}
