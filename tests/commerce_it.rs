@@ -1306,6 +1306,96 @@ async fn promotions() {
     assert!(dec(&view["totals"]["grand_total"]) < dec(&view2["totals"]["grand_total"]) && view2["codes"] == json!([]), "a code comes off again");
 }
 
+#[test]
+fn gift_cards_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(gift_cards()).await.unwrap() });
+}
+
+/// A gift card is sold (its code reaches the buyer once, in a message, and is kept nowhere in the
+/// clear), pays most of another order with the rest by card, and a return of that order goes back
+/// onto it. A wrong code leaves nothing behind.
+async fn gift_cards() {
+    let Shop { t, cid, products, nos, selling, .. } = small_shop("gift-cards").await;
+    let c = cid.to_string();
+    let current = t.find_one("Account", json!({"account_name": "Current Liabilities", "company": c})).await;
+    let liability = t.insert("Account", json!({"account_name": "Gift Cards", "company": c, "parent_account": current["id"], "root_type": "Liability"})).await;
+    let goodwill = t.find_one("Account", json!({"account_name": "Administrative Expenses", "company": c})).await;
+    let kind = t
+        .insert("StoredValueKind", json!({"kind_name": "Gift Card", "company": c, "liability_account": liability["id"], "adjustment_account": goodwill["id"]}))
+        .await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"gift_card_kind": sid(&kind)})), None).await.unwrap();
+    let card_item = t
+        .insert(
+            "Item",
+            json!({"item_code": "GIFT500", "item_name": "Gift Card 500", "item_group": products["id"], "stock_uom": nos["id"], "is_stock_item": false,
+                   "stored_value_kind": sid(&kind)}),
+        )
+        .await;
+    t.insert("ItemPrice", json!({"item": sid(&card_item), "price_list": selling["id"], "rate": "500"})).await;
+    t.insert("WebsiteItem", json!({"item": sid(&card_item), "published": true})).await;
+
+    // ───────────── bought: the code goes to the buyer once ─────────────
+    let bought = place(&t, json!([{"item": "gift-card-500", "qty": 1}]), "giver@example.com", "fakepay", "gift-buy-0001").await;
+    assert_eq!(bought.total, n("649"), "(500 + 50 of delivery) at 18%: taxed when sold");
+    pay(&t, &t.ctx, bought.request.unwrap(), bought.total, "fp_gift_1").await;
+    pay(&t, &t.ctx, bought.request.unwrap(), bought.total, "fp_gift_1").await;
+    let sent: Vec<_> = mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect();
+    assert_eq!(sent.len(), 1, "told once, a repeated payment notice changes nothing: {sent:?}");
+    let body = &sent[0].1;
+    let code = body.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
+    assert!(code.len() >= 8 && body.contains("500"), "{body}");
+    let account = t.find_one("StoredValueAccount", json!({"kind": sid(&kind)})).await;
+    assert_eq!(dec(&account["balance"]), n("500"));
+    assert_ne!(account["code_hash"], json!(code), "kept as a hash");
+    let so = t.get("SalesOrder", bought.so).await;
+    assert!(!so.values().any(|v| v.to_string().contains(&code)) && so["commerce_cards_sent"] == json!(true), "the order keeps that it went, not the code");
+
+    // ───────────── a wrong code: nothing is made ─────────────
+    let orders_before = t.count("SalesOrder", json!({})).await;
+    let (cart, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    t.cart_ok(&cart, "PUT", "/cart/details", Some(details("taker@example.com", "Ravi Rao", "IN"))).await;
+    let wrong =
+        t.checkout(None, &cart, "gift-use-0001", json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": "NOT-A-CARD-0000"}})).await;
+    assert!(field_error(&wrong, "gift_card").contains("no stored value account"), "{wrong:?}");
+    assert_eq!(t.count("SalesOrder", json!({})).await, orders_before, "the order went with the refusal");
+
+    // ───────────── used: 500 from the card, the rest by card ─────────────
+    let done = t
+        .checkout(None, &cart, "gift-use-0002", json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": code.to_lowercase()}}))
+        .await
+        .expect("checkout");
+    let total = dec(&done["order"]["totals"]["rounded_total"]);
+    assert_eq!(total, n("531"), "(400 + 50) at 18%");
+    assert_eq!((dec(&done["payment_request"]["amount"]), done["order"]["payment_status"].clone()), (n("31"), json!("Pending")), "the card took 500");
+    assert_eq!(dec(&t.get("StoredValueAccount", uid(&account)).await["balance"]), n("0"));
+    let so_id = uid(&t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await);
+    pay(&t, &t.ctx, done["payment_request"]["id"].as_str().unwrap().parse().unwrap(), n("31"), "fp_rest_1").await;
+    let so = t.get("SalesOrder", so_id).await;
+    assert_eq!((so["commerce_payment_status"].clone(), dec(&so["commerce_paid_by_card"])), (json!("Paid"), n("500")));
+    let invoice = t.find_one("SalesInvoice", json!({"items.sales_order": so_id.to_string(), "is_return": false})).await;
+    assert_eq!(dec(&invoice["outstanding_amount"]), n("0"), "the card and the card payment settle the invoice made at checkout");
+
+    // ───────────── shipped, then the tee comes back: onto the card ─────────────
+    t.k.run_action(&t.ctx, "SalesOrder", so_id, "web_ship", json!({"notify": "No"})).await.expect("shipped, with nothing left to invoice");
+    let so = t.get("SalesOrder", so_id).await;
+    let tee_line = so["items"].as_array().unwrap().iter().find(|l| l["item_name"] == json!("Logo Tee")).unwrap()["id"].as_str().unwrap().to_string();
+    let reason = t.find_one("ReturnReason", json!({"reason": "Changed their mind"})).await;
+    let refund = t
+        .insert(
+            "OrderRefund",
+            json!({"sales_order": so_id.to_string(), "kind": "Return", "reason": reason["id"], "lines": [{"sales_order_line": tee_line, "qty": "1"}]}),
+        )
+        .await;
+    assert_eq!((refund["gateway"].clone(), dec(&refund["amount"])), (json!("Gift Card"), n("472")), "the card is paid back first: 400 at 18%");
+    t.k.run_action(&t.ctx, "OrderRefund", uid(&refund), "approve_refund", json!({})).await.expect("approved");
+    let refund = t.get("OrderRefund", uid(&refund)).await;
+    assert_eq!((refund["status"].clone(), refund["booked"].clone()), (json!("Refunded"), json!(true)), "{refund:?}");
+    assert_eq!(dec(&t.get("StoredValueAccount", uid(&account)).await["balance"]), n("472"), "back onto the card that paid");
+}
+
 async fn refunds() {
     let Shop { t, tenant, mug, tee, .. } = small_shop("refunds").await;
     // ───────────── who is who ─────────────

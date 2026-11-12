@@ -14,6 +14,7 @@
 //! refuse (a closed period, a missing account) the refund stays `Refunded`, because the money has
 //! gone, and says why; `post_books` tries again once someone has put that right.
 
+use crate::gift_card::GIFT_CARD;
 use crate::payment::{PLUGIN_DOMAIN, param_text, refresh_order};
 use crate::store::{Store, is_offline, notify_managers};
 use async_trait::async_trait;
@@ -216,22 +217,47 @@ async fn delivery_rooms(tx: &mut Tx, tenant: Uuid, so: Uuid, line: Uuid) -> Resu
     .await
 }
 
-/// The payment being sent back: the order's paid request and its booked payment entry.
+/// The payment being sent back: the order's paid request and its booked payment entry. Of an order
+/// paid two ways, a gift card's first while it has room left (money goes back where it came from,
+/// the card before the rest), then the latest.
 async fn paid_payment(hc: &mut HookCtx<'_>, so: Uuid) -> Result<(Doc, Doc)> {
-    let request: Option<Uuid> = sqlx::query_scalar(
-        "select r.id from e_payment_request r join e_payment_entry p on p.tenant_id = r.tenant_id and p.id = r.payment_entry \
+    let found: Vec<(Uuid, Decimal)> = sqlx::query_as(
+        "select r.id, r.amount from e_payment_request r join e_payment_entry p on p.tenant_id = r.tenant_id and p.id = r.payment_entry \
          where r.tenant_id = $1 and r.sales_order = $2 and r.status = 'Paid' and r.docstatus = 1 and p.docstatus = 1 \
-         order by r.paid_at desc nulls last, r.created_at desc limit 1",
+         order by r.gateway = $3 desc, r.paid_at desc nulls last, r.created_at desc",
     )
     .bind(hc.ctx.tenant)
     .bind(so)
-    .fetch_optional(&mut **hc.tx)
+    .bind(GIFT_CARD)
+    .fetch_all(&mut **hc.tx)
     .await?;
+    let mut request = found.first().map(|f| f.0);
+    for (r, amount) in &found {
+        if *amount > held_payment(hc.tx, hc.ctx.tenant, *r, None).await? {
+            request = Some(*r);
+            break;
+        }
+    }
     let request = request.ok_or_else(|| Error::invalid("this order has no payment to send back"))?;
     let pr = get(hc.kernel, hc.ctx, hc.tx, "PaymentRequest", request).await?;
     let pe = id(&pr, "payment_entry").ok_or_else(|| Error::invalid("this order has no payment to send back"))?;
     let pe = get(hc.kernel, hc.ctx, hc.tx, "PaymentEntry", pe).await?;
     Ok((pr, pe))
+}
+
+/// Whether an order has begun to go out: delivered, or invoiced other than at checkout for a gift card.
+fn started(so: &Doc) -> bool {
+    let card_invoiced = d(so, "commerce_paid_by_card") > Decimal::ZERO;
+    rows(so, "items").iter().any(|l| d(l, "delivered_qty") > Decimal::ZERO || (!card_invoiced && d(l, "billed_qty") > Decimal::ZERO))
+}
+
+/// How many ways an order was paid (a gift card and a gateway are two).
+async fn payments_made(tx: &mut Tx, tenant: Uuid, so: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar("select count(*) from e_payment_request where tenant_id = $1 and sales_order = $2 and status = 'Paid' and docstatus = 1")
+        .bind(tenant)
+        .bind(so)
+        .fetch_one(&mut **tx)
+        .await?)
 }
 
 // ───────────────────────────── planning a return ─────────────────────────────
@@ -447,7 +473,8 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
         Err(e) => return Err(e),
     };
     let store = Store::load(hc.kernel, hc.ctx, hc.tx).await?;
-    let (paid, already) = (d(&pr, "amount"), held(hc.tx, tenant, so_id, None).await?);
+    let pr_id = id(&pr, "id").unwrap_or_default();
+    let (paid, already) = (d(&pr, "amount"), held_payment(hc.tx, tenant, pr_id, None).await?);
     let code = s(&pr, "currency_code").unwrap_or_default().to_string();
     let claimed = claims(hc.tx, tenant, so_id, None).await?;
     let lines: Vec<Value> = rows(&so, "items")
@@ -464,8 +491,7 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
         Some(item) => invoice_rooms(hc.tx, tenant, so_id, None, Some(item)).await?.first().map(|r| r.qty > Decimal::ZERO).unwrap_or(false),
         None => false,
     };
-    let started = rows(&so, "items").iter().any(|l| d(l, "delivered_qty") > Decimal::ZERO || d(l, "billed_qty") > Decimal::ZERO);
-    let can_cancel = !started && already.is_zero();
+    let can_cancel = !started(&so) && held(hc.tx, tenant, so_id, None).await?.is_zero() && payments_made(hc.tx, tenant, so_id).await? == 1;
     let estimate = if cancel {
         json!({"amount": money(if can_cancel { paid } else { Decimal::ZERO }), "errors": if can_cancel { json!([]) } else { json!(["Part of this order was delivered or invoiced, or its payment is already being sent back."]) }})
     } else if asked.is_empty() {
@@ -512,15 +538,17 @@ async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
     }
     let (pr, _) = paid_payment(hc, so_id).await?;
     let code = s(&pr, "currency_code").unwrap_or_default().to_string();
-    let already = held(hc.tx, hc.ctx.tenant, so_id, None).await?;
+    let already = held_payment(hc.tx, hc.ctx.tenant, id(&pr, "id").unwrap_or_default(), None).await?;
     let amount = match s(doc, "kind") {
         Some("Cancellation") => {
-            let started = rows(&so, "items").iter().any(|l| d(l, "delivered_qty") > Decimal::ZERO || d(l, "billed_qty") > Decimal::ZERO);
-            if started {
+            if started(&so) {
                 return Err(Error::field("kind", "part of this order was delivered or invoiced: send back the goods instead"));
             }
-            if already > Decimal::ZERO {
+            if held(hc.tx, hc.ctx.tenant, so_id, None).await? > Decimal::ZERO {
                 return Err(Error::invalid("this payment is already being sent back"));
+            }
+            if payments_made(hc.tx, hc.ctx.tenant, so_id).await? > 1 {
+                return Err(Error::field("kind", "this order was paid two ways (a gift card and another): it is not cancelled with one refund"));
             }
             set(doc, "lines", Value::Array(vec![]));
             set(doc, "include_shipping", false);
@@ -610,16 +638,18 @@ impl DocHook for OrderRefundHook {
                 // Another refund may have been asked for since: the payment must still hold this one.
                 let pr_id = id(doc, "payment_request").ok_or_else(|| Error::internal("refund without payment"))?;
                 let pr = get(hc.kernel, hc.ctx, hc.tx, "PaymentRequest", pr_id).await?;
-                let already = match id(doc, "sales_order") {
-                    Some(so) => held(hc.tx, hc.ctx.tenant, so, Some(refund)).await?,
-                    None => held_payment(hc.tx, hc.ctx.tenant, pr_id, Some(refund)).await?,
-                };
+                let already = held_payment(hc.tx, hc.ctx.tenant, pr_id, Some(refund)).await?;
                 check_cap(d(&pr, "amount"), already, d(doc, "amount"), s(doc, "currency_code").unwrap_or_default())?;
                 let mut v = Doc::new();
                 set(&mut v, "status", "Approved");
                 set(&mut v, "approved_by", hc.ctx.email.clone());
                 set(&mut v, "approved_at", crate::now_str());
                 hc.kernel.set_values_tx(&sctx, hc.tx, "OrderRefund", refund, v).await?;
+                // No gateway carries a gift card's refund out: it goes back onto the card now.
+                if s(doc, "gateway") == Some(GIFT_CARD) {
+                    let approved = get(hc.kernel, hc.ctx, hc.tx, "OrderRefund", refund).await?;
+                    return finish(hc, &approved, None, None).await.map(Some);
+                }
                 json!({"status": "Approved"})
             }
             "decline" => {
@@ -809,7 +839,19 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     }
     let so_id = id(refund, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
     if s(refund, "kind") == Some("Cancellation") {
+        // A gift card's payment cancelled gives its value back to the card; its checkout invoice goes too.
         hc.kernel.cancel_tx(&actor, hc.tx, "PaymentEntry", pe_id, None).await?;
+        let invoices: Vec<Uuid> = sqlx::query_scalar(
+            "select distinct v.id from e_sales_invoice v join e_sales_invoice__items i on i.tenant_id = v.tenant_id and i.parent_id = v.id \
+             where v.tenant_id = $1 and i.sales_order = $2 and v.docstatus = 1 and not coalesce(v.is_return, false)",
+        )
+        .bind(hc.ctx.tenant)
+        .bind(so_id)
+        .fetch_all(&mut **hc.tx)
+        .await?;
+        for si in invoices {
+            hc.kernel.cancel_tx(&actor, hc.tx, "SalesInvoice", si, None).await?;
+        }
         hc.kernel.cancel_tx(&actor, hc.tx, "SalesOrder", so_id, None).await?;
         return Ok(out);
     }
@@ -832,8 +874,13 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     if let Some(first) = credits.first() {
         set(&mut out, "credit_note", first.to_string());
     }
-    let entry = money_out(hc, &actor, refund, &pe, &credits).await?;
-    set(&mut out, "journal_entry", entry.to_string());
+    if s(refund, "gateway") == Some(GIFT_CARD) {
+        let entry = onto_card(hc, &actor, refund, &pe, &credits).await?;
+        set(&mut out, "payment_entry", entry.to_string());
+    } else {
+        let entry = money_out(hc, &actor, refund, &pe, &credits).await?;
+        set(&mut out, "journal_entry", entry.to_string());
+    }
     close_if_done(hc, &actor, so_id, &asked).await?;
     Ok(out)
 }
@@ -918,6 +965,37 @@ async fn money_out(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
         left -= x;
     }
     Ok(je)
+}
+
+/// Puts a refund back onto the gift card that paid: a refund payment loading that card (ERP's stored
+/// value), allocated to what the credit notes left owing the shopper.
+async fn onto_card(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, credits: &[Uuid]) -> Result<Uuid> {
+    let account = id(pe, "stored_value_account").ok_or_else(|| Error::internal("a gift card's payment without its card"))?;
+    let amount = d(refund, "amount");
+    let mut left = amount;
+    let mut references = Vec::new();
+    for note in credits {
+        let Some(item) = ledger::load_open_item(hc.tx, hc.ctx.tenant, *note, true).await? else { continue };
+        let x = left.min(-item.outstanding);
+        if x > Decimal::ZERO {
+            references.push(json!({"invoice": note.to_string(), "allocated_amount": money(x)}));
+            left -= x;
+        }
+    }
+    if left > Decimal::ZERO {
+        return Err(Error::invalid("the credit notes do not cover this refund: it goes back onto the card by hand"));
+    }
+    let remark =
+        format!("Refund {} of web order {} onto its gift card", s(refund, "number").unwrap_or_default(), s(refund, "order_number").unwrap_or_default());
+    let entry = json!({
+        "company": s(refund, "company"), "posting_date": crate::today().to_string(), "payment_type": "Pay", "is_refund": true,
+        "customer": s(pe, "customer"), "currency": s(pe, "currency"), "paid_amount": money(amount), "references": references,
+        "stored_value_account": account.to_string(), "remarks": remark, "commerce_sales_order": s(refund, "sales_order"),
+    });
+    let draft = hc.kernel.insert_tx(actor, hc.tx, "PaymentEntry", entry.as_object().cloned().unwrap_or_default()).await?;
+    let made = id(&draft, "id").ok_or_else(|| Error::internal("payment entry without id"))?;
+    hc.kernel.submit_tx(actor, hc.tx, "PaymentEntry", made, None).await?;
+    Ok(made)
 }
 
 /// Closes the order when nothing is left to ship once the returned goods are counted: otherwise the

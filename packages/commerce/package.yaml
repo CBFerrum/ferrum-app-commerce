@@ -22,6 +22,8 @@ overlays:
       - {op: add_field, field: {name: commerce_shipping_rule, type: link, to: ShippingRule, label: Shipping Method, read_only: true}}
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
+      - {op: add_field, field: {name: commerce_paid_by_card, type: currency, label: Paid by Gift Card, read_only: true, description: "Taken from a gift card at checkout: the order was invoiced then, as stored value pays invoices"}}
+      - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
       - {op: add_action, action: {name: web_ship, label: Ship Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
@@ -121,6 +123,17 @@ roles:
     permissions:
       - {entity: PaymentRequest, read: true, write: true}
       - {entity: OrderRefund, read: true}
+
+messages:
+  - key: commerce.gift_card_issued
+    label: A gift card bought in the store
+    entity: SalesOrder
+    values: [code, pin, amount, store]
+    languages:
+      en:
+        email:
+          subject: "Your gift card from {{ values.store }}"
+          body: "<p>Here is the gift card you bought with order {{ doc.number }}, holding {{ values.amount }}.</p><p>Its code: <strong>{{ values.code }}</strong>{% if values.pin %}, PIN <strong>{{ values.pin }}</strong>{% endif %}</p><p>Keep this message: we do not keep the code and cannot send it again.</p>"
 
 seed:
   - entity: ReturnReason

@@ -6,7 +6,7 @@
 use crate::cart::{self, address_text, goods};
 use crate::catalog::{available, stock_items};
 use crate::store::Store;
-use crate::{coupon, orders, payment, token};
+use crate::{coupon, gift_card, orders, payment, token};
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
 use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, Kernel, Result, Tx, outbox, with_retry};
 use rust_decimal::Decimal;
@@ -330,8 +330,14 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     if store.terms_url.is_some() && c.body.get("accept_terms").and_then(Value::as_bool) != Some(true) {
         return Err(Error::field("accept_terms", "accept the terms to place the order"));
     }
+    let card = gift_card::parse(c.body)?;
     let gateway = c.body.get("payment_method").and_then(Value::as_str).unwrap_or_default();
-    let method = store.method(gateway).cloned().ok_or_else(|| Error::field("payment_method", "choose one of the store's payment methods"))?;
+    // A gift card may pay all of it, with no other method.
+    let method = match store.method(gateway) {
+        Some(m) => Some(m.clone()),
+        None if card.is_some() && gateway.is_empty() => None,
+        None => return Err(Error::field("payment_method", "choose one of the store's payment methods")),
+    };
     let return_url = return_url(&store, c.body.get("return_url"))?;
     let rules_exist = cart::shipping_rules_exist(tx, ctx.tenant).await?;
     let missing = cart::missing(&cart, rules_exist);
@@ -386,7 +392,27 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
             d(&cart, "rounded_total").normalize()
         )));
     }
-    let request = payment::create_request(k, ctx, tx, &store, &so, &method, return_url).await?;
+    let by_card = match &card {
+        Some(card) => gift_card::pay(k, ctx, tx, &store, &so, card, c.key).await?,
+        None => Decimal::ZERO,
+    };
+    let request = match &method {
+        Some(m) => payment::create_request(k, ctx, tx, &store, &so, m, return_url).await?,
+        None if by_card < d(&so, "rounded_total") => {
+            return Err(Error::field("payment_method", "the gift card does not cover the order: choose how to pay the rest"));
+        }
+        None => {
+            let mut v = Doc::new();
+            set(&mut v, "commerce_payment_status", "Paid");
+            set(&mut v, "commerce_payment_method", gift_card::GIFT_CARD);
+            k.set_values_tx(ctx, tx, "SalesOrder", so_id, v).await?;
+            None
+        }
+    };
+    if request.is_none() {
+        gift_card::send_sold(k, ctx, tx, &store, so_id).await?;
+    }
+    let method_label = method.as_ref().map_or(gift_card::GIFT_CARD.to_string(), |m| m.label.clone());
     let mut done = Doc::new();
     set(&mut done, "status", "Ordered");
     set(&mut done, "sales_order", so_id.to_string());
@@ -407,7 +433,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         tx,
         ctx.tenant,
         &format!("New web order {number}"),
-        Some(&format!("{} · {total} · {}", s(&so, "customer_name").unwrap_or_default(), method.label)),
+        Some(&format!("{} · {total} · {method_label}", s(&so, "customer_name").unwrap_or_default())),
         "SalesOrder",
         so_id,
     )
@@ -416,13 +442,13 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &order_token));
     let event = json!({
         "sales_order": so_id, "number": number, "customer": customer, "email": s(&cart, "email"), "name": s(&cart, "contact_name"),
-        "currency": store.currency_code, "grand_total": money(d(&so, "rounded_total")), "payment_method": method.gateway,
+        "currency": store.currency_code, "grand_total": money(d(&so, "rounded_total")), "payment_method": method.as_ref().map(|m| m.gateway.clone()), "paid_by_gift_card": money(by_card),
         "payment_request": request.as_ref().and_then(|r| s(r, "id")), "order_token": order_token, "order_link": order_link,
     });
     outbox::enqueue(tx, ctx.tenant, "commerce.order_placed", Some("SalesOrder"), Some(so_id), event).await?;
     let amount = crate::pages::money(&store.currency_code, &d(&so, "rounded_total").to_string(), store.precision);
-    let mut lines = vec![format!("Thank you for your order {number} at {}: {amount}, paid by {}.", store.name, method.label)];
-    lines.extend(method.instructions.clone());
+    let mut lines = vec![format!("Thank you for your order {number} at {}: {amount}, paid by {method_label}.", store.name)];
+    lines.extend(method.as_ref().and_then(|m| m.instructions.clone()));
     crate::tell::shopper(k, tx, ctx.tenant, s(&cart, "email"), &format!("Your order {number} at {}", store.name), &lines, order_link.as_deref()).await?;
     response(k, ctx, tx, &store, so_id).await
 }
@@ -431,7 +457,9 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
 async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid) -> Result<Value> {
     let so = get(k, ctx, tx, "SalesOrder", so_id).await?;
     let view = orders::order_view(k, &sys(ctx), tx, store, &so).await?;
-    let active = view["payments"].as_array().and_then(|p| p.first()).cloned().unwrap_or(Value::Null);
+    // The one still to pay (beside a gift card's, already paid), else the latest.
+    let payments = view["payments"].as_array().cloned().unwrap_or_default();
+    let active = payments.iter().find(|p| p["status"] == json!("Initiated")).or(payments.first()).cloned().unwrap_or(Value::Null);
     let token = token::order_token(tx, ctx.tenant, so_id).await?;
     let link = s(&so, "number").zip(store.store_url.as_deref()).map(|(number, url)| orders::tracking_url(url, number, &token));
     Ok(json!({"order": view, "order_token": token, "order_link": link, "payment_request": active}))
@@ -468,6 +496,7 @@ mod tests {
             cart_expiry_days: 30,
             cancel_unpaid_orders: true,
             channel: "Web Shop".into(),
+            gift_card_kind: None,
         }
     }
 

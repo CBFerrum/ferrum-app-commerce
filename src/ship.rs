@@ -85,7 +85,8 @@ pub async fn web_ship(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<
     }
     hc.kernel.update_tx(&actor, hc.tx, "DeliveryNote", dn, patch, None).await?;
     let sent = hc.kernel.submit_tx(&actor, hc.tx, "DeliveryNote", dn, None).await?;
-    let invoiced = if yes(params, "invoice") { Some(invoice(hc, &actor, so_id).await?) } else { None };
+    // An order a gift card paid was invoiced at checkout.
+    let invoiced = if yes(params, "invoice") && d(so, "per_billed") < Decimal::ONE_HUNDRED { Some(invoice(hc, &actor, so_id).await?) } else { None };
     Ok(json!({"delivery_note": {"id": dn, "number": s(&sent, "number")}, "sales_invoice": invoiced}))
 }
 
