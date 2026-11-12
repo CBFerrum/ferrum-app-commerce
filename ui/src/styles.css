@@ -665,6 +665,36 @@
   font-size: var(--text-sm);
 }
 
+/* ── storefront words ── */
+
+.cm-words-lang {
+  max-width: 24rem;
+}
+
+.cm-words-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem 1.25rem;
+}
+
+.cm-words-bar .field {
+  flex: 1 1 16rem;
+}
+
+.cm-words .textarea {
+  width: 100%;
+  min-width: 12rem;
+}
+
+.cm-words td:first-child {
+  overflow-wrap: anywhere;
+}
+
+.cm-words tr[data-own] td:first-child {
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
 /* ── phones: columns stack, tables become cards, nothing scrolls sideways ── */
 
 @media (max-width: 720px) {

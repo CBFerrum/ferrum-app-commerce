@@ -262,6 +262,83 @@ describe("an order", () => {
     expect(text()).toContain("INR 20.00 is left on the card.");
     expect(text()).toContain("The part held lets go on");
   });
+
+  it("lets a shopper whose card paid part pay the rest, for the rest only", async () => {
+    const card = { id: "c1", status: "Paid", gateway: "Gift Card", amount: "150", currency: "INR" };
+    const rest = { id: "p2", status: "Expired", gateway: "stripe", amount: "300", currency: "INR", label: "Card" };
+    const gift = { paid: "150", held: "0", held_until: null, balance_left: "850" };
+    // The server says Expired for an order only a card's part paid (src/payment.rs).
+    serve({ ...track(order({ payment_status: "Expired", gift_card: gift, totals: { subtotal: "400", shipping: "50", taxes: [], rounded_total: "450", grand_total: "450" }, payments: [rest, card] })), "GET /store": store, "POST /orders/pay": () => ({ payment_request: { id: "p3", status: "Initiated", payment_url: "https://pay.example/r" } }) });
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign, origin: "http://localhost:3000", pathname: "/order", search: "", hash: `#n=${link.number}&t=${link.token}`, reload: vi.fn() });
+    await on();
+    await tick();
+    expect(text()).toContain("Your payment was not made in time");
+    expect(text()).toContain("Your gift card or store credit already paid INR 150.00");
+    expect(text()).toContain("pay the other INR 300.00 and try again");
+    expect(text()).toContain("The other INR 300.00 is still to pay.");
+    expect(text()).toContain("INR 850.00 is left on the card.");
+    expect(text()).toContain("Try again · INR 300.00");
+    const form = document.querySelector(".retry form") as HTMLFormElement;
+    (form.elements.namedItem("email") as HTMLInputElement).value = "a@x.test";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await tick();
+    await tick();
+    // The server asks for what is left; the page names the order and the method, as for any payment that failed.
+    expect(calls.find((c) => c.path === "/orders/pay")?.body).toMatchObject({ number: "SO-1", email: "a@x.test", token: "tok", payment_method: "stripe" });
+    expect(assign).toHaveBeenCalledWith("https://pay.example/r");
+  });
+
+  it("shows the server's refusal when the rest cannot be paid again", async () => {
+    const card = { id: "c1", status: "Paid", gateway: "Gift Card", amount: "150", currency: "INR" };
+    serve({ ...track(order({ payment_status: "Failed", payments: [{ id: "p2", status: "Failed", gateway: "stripe", amount: "300", currency: "INR" }, card] })), "GET /store": store, "POST /orders/pay": { refuse: 422, body: { message: "this order is already paid" } } });
+    await on();
+    await tick();
+    const form = document.querySelector(".retry form") as HTMLFormElement;
+    (form.elements.namedItem("email") as HTMLInputElement).value = "a@x.test";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await tick();
+    await tick();
+    expect(text()).toContain("this order is already paid");
+  });
+});
+
+describe("the language of the page", () => {
+  it("writes its numbers as the page's language does", async () => {
+    serve({ ...{ "POST /orders/track": { order: { number: "SO-1", status: "To Deliver and Bill", payment_status: "Paid", currency: "INR", steps: [], items: [], payments: [], shipments: [], refunds: [], totals: { subtotal: "1234.5", shipping: "0", taxes: [], rounded_total: "1234.5", grand_total: "1234.5" } } } } });
+    await open("/order#n=SO-1&t=tok", "", "order", {}, {}, "de");
+    expect(text()).toContain("INR 1.234,50");
+  });
+
+  it("keeps a visitor's ?lang= on the links of the store, and the search", async () => {
+    serve({});
+    await open("/?lang=hi", `<header><form class="search" action="/search"><input name="q"></form><a id="a" href="/cart">Cart</a><a id="b" href="/assets/store.css">Style</a><a id="c" href="https://elsewhere.test/x">Away</a><a id="d" href="/p/tee?lang=de">Tee</a></header>`, undefined, {}, {}, "hi");
+    const href = (id: string) => document.getElementById(id)?.getAttribute("href");
+    expect(href("a")).toBe("/cart?lang=hi");
+    expect(href("b")).toBe("/assets/store.css");
+    expect(href("c")).toBe("https://elsewhere.test/x");
+    expect(href("d")).toBe("/p/tee?lang=de");
+    expect((document.querySelector('form.search input[name="lang"]') as HTMLInputElement).value).toBe("hi");
+    // Without a choice in the address, nothing is changed: the browser's language is the server's to read.
+    await open("/", `<a id="a" href="/cart">Cart</a>`);
+    expect(href("a")).toBe("/cart");
+  });
+
+  it("has no word of its own in the script: every word shown is a key, and every key has its English", () => {
+    const script = readFileSync(resolve(process.cwd(), "../assets/store.js"), "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("/**") && !l.trim().startsWith("*"))
+      .join("\n");
+    // Names the server gives (statuses, gateways) and the wire are not words shown to anyone.
+    const names = new Set(["Gift Card", "Cash on Delivery", "Not Required", "Partly Refunded", "To Deliver and Bill"]);
+    const literals = [...script.matchAll(/"([^"\n]*)"/g)].map((m) => m[1]);
+    // A capitalised phrase that is not one of those names is a sentence the script wrote itself (class names are lower case).
+    const words = literals.filter((l) => /^[A-Z][a-z]+( [A-Za-z]+)+/.test(l) && !names.has(l));
+    expect(words).toEqual([]);
+    const english = JSON.parse(WORDS) as Record<string, string>;
+    const plural = ["zero", "one", "two", "few", "many", "other"];
+    for (const [, key] of script.matchAll(/\bt\("([^"]+)"/g)) expect(english[key] ?? plural.some((p) => english[`${key}.${p}`]), key).toBeTruthy();
+  });
 });
 
 describe("the product page", () => {

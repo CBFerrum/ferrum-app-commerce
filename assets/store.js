@@ -74,7 +74,14 @@ async function call(method, path, body, headers = {}) {
   return data;
 }
 
-const nf = new Intl.NumberFormat("en-US", { minimumFractionDigits: PRECISION, maximumFractionDigits: PRECISION });
+const nf = (() => {
+  const options = { minimumFractionDigits: PRECISION, maximumFractionDigits: PRECISION };
+  try {
+    return new Intl.NumberFormat(LANG, options);
+  } catch {
+    return new Intl.NumberFormat(undefined, options);
+  }
+})();
 const money = (v, code = CURRENCY) => t("money", { code, amount: nf.format(Number(v ?? 0)) });
 
 /** A country's name in the shopper's own language, from its two-letter code; the code when the browser does not know it. */
@@ -83,7 +90,7 @@ function countryName(code, countries = []) {
   const listed = countries.find((c) => c.code === code)?.name;
   if (listed) return listed;
   try {
-    return new Intl.DisplayNames(undefined, { type: "region" }).of(code) ?? code;
+    return new Intl.DisplayNames(LANG, { type: "region" }).of(code) ?? code;
   } catch {
     return code;
   }
@@ -707,11 +714,11 @@ async function checkoutView(root) {
 /** After the order is placed: to the gateway's page when there is one, waiting a little for the gateway to make it. */
 async function sendOn(root, done, online) {
   const request = done.payment_request;
-  const go = (url) => location.assign(typeof url === "string" && url.startsWith("https://") ? url : "/order");
+  const go = (url) => location.assign(typeof url === "string" && url.startsWith("https://") ? url : withLang("/order"));
   if (!online || !request || request.status !== "Initiated" || request.payment_url || !request.id) return go(request?.payment_url);
   // Online payment: the gateway writes its page for the request a moment after the order, so ask for it.
-  const stop = h("a", { href: "/order", text: t("sendon.instead") });
-  root.replaceChildren(h("div", { class: "state", role: "status" }, h("h2", { text: t("sendon.placed") }), h("p", { class: "muted", text: t("sendon.taking") }), h("p", {}, stop)));
+  const stop = h("a", { href: withLang("/order"), text: t("sendon.instead") });
+  root.replaceChildren(h("div", { class: "state", role: "status" }, h("h2", { text: t("sendon.placed") }), done.order ? cardNote(done.order) : null, h("p", { class: "muted", text: t("sendon.taking") }), h("p", {}, stop)));
   for (let i = 0; i < 12; i++) {
     await new Promise((r) => setTimeout(r, 1500));
     try {
@@ -798,13 +805,15 @@ function paymentsOf(o) {
 
 /** What a gift card did for the order, in words: its part paid, or its part held until the rest is paid. */
 function cardNote(o) {
-  const { card, held, asked } = paymentsOf(o);
+  const { card, held, asked, failed, total } = paymentsOf(o);
   const gift = o.gift_card;
   // What the card has left, and when a hold lets go (the server says both; never the card's code).
   const left = gift?.balance_left != null ? t("note.card_left", { amount: money(gift.balance_left, o.currency) }) : "";
   const until = gift?.held_until ? t("note.card_until", { date: new Date(gift.held_until).toLocaleString(LANG, { dateStyle: "medium", timeStyle: "short" }) }) : "";
   const more = (text) => [text, until, left].filter(Boolean).join(" ");
-  if (card) return h("p", { class: "notice", role: "status", text: more([t("note.card_paid", { amount: money(card, o.currency) }), asked ? t("note.card_rest", { amount: money(asked.amount, asked.currency ?? o.currency) }) : ""].filter(Boolean).join(" ")) });
+  // The rest of the order: what is asked for now, or what is still to pay after its payment did not go through.
+  const rest = asked ? money(asked.amount, asked.currency ?? o.currency) : failed.length && total - card > 0 && o.status !== "Cancelled" ? money(total - card, o.currency) : "";
+  if (card) return h("p", { class: "notice", role: "status", text: more([t("note.card_paid", { amount: money(card, o.currency) }), rest ? t("note.card_rest", { amount: rest }) : ""].filter(Boolean).join(" ")) });
   if (held > 0)
     return h(
       "p",
@@ -822,19 +831,21 @@ function difference(o) {
   return h("p", { class: "notice", role: "status", text: t("note.changed", { paid: money(paidSum, o.currency), total: money(total, o.currency), due: money(asked.amount, asked.currency ?? o.currency) }) });
 }
 
-/** A payment that did not go through, and the way to try again: the same order, a method of your choice, no new cart. */
+/** A payment that did not go through, and the way to try again: the same order, a method of your choice, no new cart. A gift card's part stays paid: what is asked again is the rest (the server works it out the same way). */
 function retryPanel(o, link, reload) {
   const { failed, asked, paid, card, total, held } = paymentsOf(o);
-  const unpaid = !asked && !paid.length && !card && !held && failed.length && !["Cancelled", "Paid", "Not Required", "Refunded", "Partly Refunded"].includes(o.payment_status ?? "") && o.status !== "Cancelled";
+  const rest = total - card;
+  const done = ["Paid", "Not Required", "Refunded", "Partly Refunded"].includes(o.payment_status ?? "") || (o.payment_status === "Cancelled" && !card);
+  const unpaid = !asked && !paid.length && !held && failed.length && rest > 0 && !done && o.status !== "Cancelled";
   if (!unpaid) return null;
-  const box = h("section", { class: "panel retry", "aria-labelledby": "retry-title" }, h("h2", { id: "retry-title", text: failed[0].status === "Failed" ? t("retry.failed") : t("retry.expired") }), h("p", { class: "muted", text: t("retry.text", { total: money(total, o.currency) }) }), skeleton());
+  const box = h("section", { class: "panel retry", "aria-labelledby": "retry-title" }, h("h2", { id: "retry-title", text: failed[0].status === "Failed" ? t("retry.failed") : t("retry.expired") }), h("p", { class: "muted", text: card ? t("retry.text_card", { card: money(card, o.currency), total: money(rest, o.currency) }) : t("retry.text", { total: money(rest, o.currency) }) }), skeleton());
   box.setAttribute("aria-busy", "true");
   call("GET", "/store").then(
     (shop) => {
       box.removeAttribute("aria-busy");
       const methods = shop.payment_methods ?? [];
       const email = o.email ? null : field(t("retry.email"), "email", "", { type: "email", required: true, autocomplete: "email" });
-      const go = h("button", { type: "submit", text: t("retry.again", { total: money(total, o.currency) }), disabled: !methods.length });
+      const go = h("button", { type: "submit", text: t("retry.again", { total: money(rest, o.currency) }), disabled: !methods.length });
       const form = h("form", { novalidate: true }, methods.map((m, i) => h("label", { class: "choice" }, h("input", { type: "radio", name: "method", value: m.gateway, checked: m.gateway === failed[0].gateway || (i === 0 && !methods.some((x) => x.gateway === failed[0].gateway)) }), h("span", {}, h("strong", { text: m.label ?? m.gateway }), m.instructions ? h("div", { class: "muted", text: m.instructions }) : null))), email, h("p", {}, go));
       form.addEventListener("submit", async (ev) => {
         ev.preventDefault();
@@ -957,6 +968,29 @@ async function orderView(root) {
     due = await again();
   }
   document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && void again());
+}
+
+// ───────────────────────── the language ─────────────────────────
+
+/** The language a visitor chose (`?lang=`) goes with them: the server reads it from the address, so each link of the store carries it. */
+const CHOSEN = new URLSearchParams(location.search).get("lang");
+const withLang = (href) => {
+  if (!CHOSEN) return href;
+  try {
+    const to = new URL(href, location.origin);
+    if (to.origin !== location.origin || /^\/(assets|files)\//.test(to.pathname) || to.searchParams.has("lang")) return href;
+    to.searchParams.set("lang", CHOSEN);
+    return to.pathname + to.search + to.hash;
+  } catch {
+    return href;
+  }
+};
+if (CHOSEN) {
+  const carry = (a) => a.setAttribute("href", withLang(a.getAttribute("href")));
+  document.querySelectorAll("a[href^='/']").forEach(carry);
+  // Links the script makes later carry it when they are followed.
+  document.addEventListener("click", (ev) => { const a = ev.target.closest?.("a[href^='/']"); if (a) carry(a); }, true);
+  for (const form of document.querySelectorAll("form.search")) form.append(h("input", { type: "hidden", name: "lang", value: CHOSEN }));
 }
 
 // ───────────────────────── start ─────────────────────────

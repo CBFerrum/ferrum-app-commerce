@@ -155,7 +155,8 @@ describe("an order", () => {
     expect(html).toContain("Change…");
     expect(html).toContain("Cancel order…");
     expect(html).toContain("the shopper still owes");
-    expect(html).toContain("A gift card holds");
+    for (const expected of ["Gift card", "Held for this order", "₹150.00", "The card holds this part until the rest is paid"]) expect(html, expected).toContain(expected);
+    expect(html).not.toContain("Paid by the card");
     // Shipped in full: nothing to cancel, nothing to change.
     const sent = plain(draw(client([[["commerce", "order", "o1"], full], [["commerce", "order", "o1", "related"], related]]), "/o/o1", "/o/:id", <OrderRoute />));
     expect(sent).not.toContain("Cancel order…");
@@ -196,6 +197,20 @@ describe("the return and refund dialog", () => {
       expect(text, expected).toContain(expected);
     }
     expect(html).toContain("Number of Blue Mug to send back");
+  });
+
+  it("no longer cancels an order: it points to Cancel order on the order, which sends each payment back", () => {
+    const qc = client([[["commerce", "reasons"], []], [["commerce", "refund-plan", asked], { ...plan, cancel: { allowed: true }, lines: [{ id: "l1", item: "mug", name: "Blue Mug", qty: "2", delivered: "0", invoiced: false, returnable: "0", rate: "250" }] }]]);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <RefundDialog order={{ id: "o1", number: "SO-1" }} rights={rights} onClose={() => {}} onDone={() => {}} />
+      </QueryClientProvider>,
+    );
+    const text = plain(html);
+    expect(text).toContain("use Cancel order… on the order");
+    expect(text).not.toContain("Goods come back");
+    expect(text).not.toContain("Cancel the order");
+    expect(html).not.toContain("aria-pressed");
   });
 
   it("says why an order has nothing to send back", () => {
