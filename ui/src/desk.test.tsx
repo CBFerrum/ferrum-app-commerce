@@ -10,11 +10,13 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CancelOrderDialog } from "./CancelOrder";
 import { EditOrderDialog } from "./EditOrder";
+import { ResendMailDialog } from "./ResendMail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const sent: { url: string; body: unknown }[] = [];
 let refuse: string | null = null;
+let refuseStatus = 422;
 let refusePreview: { message: string; field?: string } | null = null;
 /** What the preview route answers for a quantity of the Blue Mug taken from 2 to 1 on an order paid by card (src/edit.rs). */
 const worked = (over: Record<string, unknown> = {}) => ({
@@ -37,6 +39,7 @@ const worked = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   sent.length = 0;
   refuse = null;
+  refuseStatus = 422;
   refusePreview = null;
   document.body.innerHTML = "";
   HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
@@ -53,8 +56,8 @@ beforeEach(() => {
     }
     if (init.method === "POST") {
       sent.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
-      if (refuse) return new Response(JSON.stringify({ message: refuse }), { status: 422, headers: { "content-type": "application/json" } });
-      return new Response(JSON.stringify({ ...worked({ refund: "r1" }), cancelled: true, refunds: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      if (refuse) return new Response(JSON.stringify({ message: refuse }), { status: refuseStatus, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ...worked({ refund: "r1" }), cancelled: true, refunds: [], sent: true, state: "queued", mail: "Shipped", resent: "1", left_today: 1 }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (String(url).includes("/ShippingRule")) return new Response(JSON.stringify({ rows: [{ id: "r1", label: "Standard" }, { id: "r2", label: "Express" }], total: 2 }), { status: 200, headers: { "content-type": "application/json" } });
     return new Response(JSON.stringify({ rows: [{ id: "re1", reason: "Out of stock" }], total: 1 }), { status: 200, headers: { "content-type": "application/json" } });
@@ -211,5 +214,46 @@ describe("cancelling an order", () => {
     await press(button("Cancel and send"));
     expect(sent[0].body).toEqual({ approve: "No" });
     expect(text()).toContain("part of this order has been delivered or invoiced");
+  });
+});
+
+describe("sending a mail again", () => {
+  const all = { Shipped: true, "Payment Received": true, "Payment Failed": false, Refunded: false };
+  const resend = (over: Record<string, unknown> = {}) => (
+    <ResendMailDialog order={{ id: "o1", number: "SO-1", commerce_mails_resent: "2" }} available={all} email="asha@example.com" limit={3} onClose={() => {}} onDone={() => {}} {...over} />
+  );
+
+  it("offers the mails that may go again, the count and the daily limit, and sends the one chosen", async () => {
+    const done = vi.fn();
+    await mount(resend({ onDone: done }));
+    expect(text()).toContain("at asha@example.com and nowhere else");
+    expect(text()).toContain("Mails have been sent again 2 times on this order.");
+    expect(text()).toContain("at most 3 times a day, the first send included");
+    expect(text()).toContain("cannot be sent again: they hold a secret value");
+    // Nothing failed and nothing was sent back, so those two cannot be chosen.
+    expect((document.querySelector('input[value="Payment Failed"]') as HTMLInputElement).disabled).toBe(true);
+    expect(text()).toContain("No payment on this order has failed.");
+    await press(document.querySelector('input[value="Payment Received"]'));
+    await press(button("Send it again"));
+    expect(sent[0].url).toContain("/actions/web_resend_mail");
+    expect(sent[0].body).toEqual({ mail: "Payment Received" });
+    expect(done).toHaveBeenCalled();
+  });
+
+  it("shows the server's refusal as it is when the day's limit is reached", async () => {
+    refuse = "this mail has gone to this order 3 times today: the limit is 3";
+    refuseStatus = 409;
+    const done = vi.fn();
+    await mount(resend({ onDone: done }));
+    await press(button("Send it again"));
+    expect(text()).toContain("this mail has gone to this order 3 times today: the limit is 3");
+    expect(done).not.toHaveBeenCalled();
+    expect((button("Send it again") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("cannot be sent to an order with no address", async () => {
+    await mount(resend({ email: null }));
+    expect(text()).toContain("This order has no email address to write to.");
+    expect((button("Send it again") as HTMLButtonElement).disabled).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ import { type Exception, gatewayName, type Refund } from "./standing";
 import { CancelOrderDialog } from "./CancelOrder";
 import { EditOrderDialog } from "./EditOrder";
 import { RefundDialog } from "./Refund";
+import { ResendMailDialog } from "./ResendMail";
 import { ShipDialog } from "./Ship";
 import { INVOICE_STATUS, ORDER_PAYMENT, ORDER_STATUS, REQUEST_PAYMENT } from "./tones";
 import { type AuditEvent, type Delivery, fold, type Invoice, timeline } from "./timeline";
@@ -45,6 +46,7 @@ interface Full extends Order {
   commerce_amount_owed?: string | number | null;
   commerce_card_held?: string | number | null;
   commerce_paid_by_card?: string | number | null;
+  commerce_mails_resent?: string | number | null;
 }
 
 interface Request {
@@ -221,10 +223,12 @@ function OrderPage({ id }: { id: string }) {
   const [refunding, setRefunding] = useState(false);
   const [editing, setEditing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [resending, setResending] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [busy, setBusy] = useState(false);
   const order = useQuery({ queryKey: ["commerce", "order", id], queryFn: ({ signal }) => api.get<Full>(docPath("SalesOrder", id), { titles: true }, signal) });
-  const shippingItem = useQuery({ queryKey: ["commerce", "shipping-item"], queryFn: ({ signal }) => list<{ shipping_item?: string | null }>("StoreSettings", { fields: "shipping_item", limit: 1 }, signal).then((r) => r.rows[0]?.shipping_item ?? null).catch(() => null) });
+  const settings = useQuery({ queryKey: ["commerce", "order-settings"], queryFn: ({ signal }) => list<{ shipping_item?: string | null; resend_per_day?: number | null }>("StoreSettings", { fields: "shipping_item,resend_per_day", limit: 1 }, signal).then((r) => r.rows[0] ?? null).catch(() => null) });
+  const shippingItem = { data: settings.data?.shipping_item ?? null };
   const more = useQuery({ queryKey: ["commerce", "order", id, "related"], enabled: !!order.data, queryFn: ({ signal }) => related(id, signal) });
   const refresh = useCallback(() => void qc.invalidateQueries({ queryKey: ["commerce"] }), [qc]);
   const mine = useCallback((e: { id: string }) => void (e.id === id && refresh()), [id, refresh]);
@@ -349,6 +353,16 @@ function OrderPage({ id }: { id: string }) {
                 >
                   {tr("Copy the shopper's tracking link")}
                 </MenuItem>
+                {rights.ships && !cancelled && (
+                  <MenuItem
+                    onSelect={() => {
+                      close();
+                      setResending(true);
+                    }}
+                  >
+                    {tr("Send a mail again…")}
+                  </MenuItem>
+                )}
                 <MenuItem
                   onSelect={() => {
                     close();
@@ -388,12 +402,10 @@ function OrderPage({ id }: { id: string }) {
         </>
       )}
 
-      {!cancelled && (owed !== 0 || held > 0 || byCard > 0) && (
+      {!cancelled && owed !== 0 && (
         <div className="stack cm-standing">
           {owed > 0 && <Alert tone="warning">{tr("After the order was changed, the shopper still owes {amount}. It was asked for or could not be: collect it, or it settles when they pay.", { amount: say(owed) })}</Alert>}
           {owed < 0 && <Alert tone="warning">{tr("After the order was changed, the store owes the shopper {amount}. It is sent back when a person approves the refund, or settle it with them.", { amount: say(-owed) })}</Alert>}
-          {held > 0 && <Alert tone="info">{tr("A gift card holds {amount} of this order until the rest is paid. Nothing is invoiced before; if the rest is not paid in time, the hold is let go and the order is cancelled.", { amount: say(held) })}</Alert>}
-          {byCard > 0 && held === 0 && <Alert tone="info">{tr("A gift card paid {amount} of this order.", { amount: say(byCard) })}</Alert>}
         </div>
       )}
 
@@ -527,6 +539,30 @@ function OrderPage({ id }: { id: string }) {
             )}
           </Section>
 
+          {(held > 0 || byCard > 0) && (
+            <Section id="o-card" title={tr("Gift card")}>
+              <dl className="kv">
+                {byCard > 0 && (
+                  <div>
+                    <dt>{tr("Paid by the card")}</dt>
+                    <dd>{isolate(say(byCard))}</dd>
+                  </div>
+                )}
+                {held > 0 && (
+                  <div>
+                    <dt>{tr("Held for this order")}</dt>
+                    <dd>{isolate(say(held))}</dd>
+                  </div>
+                )}
+              </dl>
+              <p className="faint cm-tight">
+                {held > 0
+                  ? tr("The card holds this part until the rest is paid. Nothing is invoiced before; if the rest is not paid in time, the hold is let go and the order is cancelled.")
+                  : tr("The card's part is paid. Its code is never shown here.")}
+              </p>
+            </Section>
+          )}
+
           {o.commerce_shipping_address && (
             <Section id="o-ship" title={tr("Goes to")}>
               <address className="cm-address">{isolate(o.commerce_shipping_address)}</address>
@@ -620,6 +656,24 @@ function OrderPage({ id }: { id: string }) {
           onClose={() => setCancelling(false)}
           onDone={() => {
             setCancelling(false);
+            refresh();
+          }}
+        />
+      )}
+      {resending && more.data && (
+        <ResendMailDialog
+          order={o}
+          email={o.commerce_contact_email}
+          limit={settings.data?.resend_per_day}
+          available={{
+            Shipped: more.data.deliveries.some((n) => !n.is_return),
+            "Payment Received": more.data.payments.some((p) => p.status === "Paid"),
+            "Payment Failed": more.data.payments.some((p) => p.status === "Failed"),
+            Refunded: more.data.refunds.some((r) => r.status === "Refunded"),
+          }}
+          onClose={() => setResending(false)}
+          onDone={() => {
+            setResending(false);
             refresh();
           }}
         />
