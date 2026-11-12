@@ -39,16 +39,32 @@ pub async fn manage_link(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: 
     {
         return None;
     }
-    let days = (p.cancel_hours / 24 + 1).max(p.return_days + 30).min(90);
+    // As long as the windows that apply: a cancellation's, and a return's from a delivery that may be a month
+    // away. A store with no returns has no link beyond its cancellation window.
+    let cancel_days = if p.cancel_hours > 0 { p.cancel_hours / 24 + 1 } else { 0 };
+    let return_span = if p.return_days > 0 { p.return_days + 30 } else { 0 };
+    let days = cancel_days.max(return_span).clamp(1, 90);
+    let mut show: Vec<String> = ["posting_date", "commerce_fulfilment_status", "rounded_total", "items"].map(String::from).to_vec();
+    // A workspace not yet updated has no field to keep the terms in: its page shows the order alone.
+    let has_field = ctx.schema.entity("SalesOrder").is_some_and(|e| e.field("commerce_after_sales_terms").is_some());
+    let terms = terms_text(p).filter(|_| has_field);
+    if let Some(words) = &terms {
+        let mut v = Doc::new();
+        set(&mut v, "commerce_after_sales_terms", words.clone());
+        k.set_values_tx(&sys(ctx), tx, "SalesOrder", so, v).await.ok()?;
+        show.push("commerce_after_sales_terms".into());
+    }
     let spec = LinkSpec {
         actions,
-        show: ["posting_date", "commerce_fulfilment_status", "rounded_total"].map(String::from).to_vec(),
+        show,
         params: Map::new(),
         expires_at: Some(Utc::now() + Duration::days(days)),
         uses: Some(10),
         code_to: None,
         recipient: email.map(str::to_string),
         frame_origins: vec![],
+        // What was bought, line by line, beside the date, status and total.
+        columns: std::collections::BTreeMap::from([("items".to_string(), ["item_name", "qty", "rate", "amount"].map(String::from).to_vec())]),
     };
     match k.issue_link(&sys(ctx), tx, "SalesOrder", so, &spec).await {
         Ok(issued) => issued.url.rsplit_once('/').map(|(start, token)| (format!("{start}/"), token.to_string())),
@@ -57,6 +73,38 @@ pub async fn manage_link(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: 
             None
         }
     }
+}
+
+/// The workspace's words about the store's terms, with the settings they name filled in: `{hours}`, `{days}`,
+/// `{fee}`, `{shipping}` (who pays it) and `{refund}` (where it goes). `None` when the workspace says nothing.
+pub(crate) fn terms_text(p: &crate::store::Policy) -> Option<String> {
+    let words = p.page_text.as_deref()?.trim();
+    if words.is_empty() {
+        return None;
+    }
+    Some(
+        words
+            .replace("{hours}", &p.cancel_hours.to_string())
+            .replace("{days}", &p.return_days.to_string())
+            .replace("{fee}", &p.restocking_fee.normalize().to_string())
+            .replace("{shipping}", if p.store_pays_return_shipping { "Store" } else { "Shopper" })
+            .replace("{refund}", if p.credit_by_default { "Store Credit" } else { "Original Payment" }),
+    )
+}
+
+/// What a refund goes back to, as the shopper is told: each payment's method, the card's first.
+fn refund_labels(store: &Store, refunds: &Value) -> (Decimal, Vec<String>) {
+    let mut total = Decimal::ZERO;
+    let mut to: Vec<String> = Vec::new();
+    for r in refunds.as_array().into_iter().flatten() {
+        total += r.get("amount").and_then(Value::as_str).and_then(|a| a.parse::<Decimal>().ok()).unwrap_or_default();
+        let gateway = r.get("gateway").and_then(Value::as_str).unwrap_or_default();
+        let label = store.method(gateway).map_or_else(|| gateway.to_string(), |m| m.label.clone());
+        if !label.is_empty() && !to.contains(&label) {
+            to.push(label);
+        }
+    }
+    (total, to)
 }
 
 fn guard(so: &Doc) -> Result<()> {
@@ -91,6 +139,9 @@ pub async fn cancel(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Va
     let after = get(hc.kernel, &sctx, hc.tx, "SalesOrder", so_id).await?;
     let mut values = Map::new();
     values.insert("refund_waits".into(), json!(!store.policy.cancel_auto && out["refunds"].as_array().is_some_and(|r| !r.is_empty())));
+    let (back, to) = refund_labels(&store, &out["refunds"]);
+    values.insert("refund_amount".into(), json!((back > Decimal::ZERO).then(|| crate::pages::money(&store.currency_code, &back.to_string(), store.precision))));
+    values.insert("refund_to".into(), json!((!to.is_empty()).then(|| to.join(", "))));
     values.insert(
         "link".into(),
         json!(tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), s(&after, "number").unwrap_or_default(), so_id).await?),
@@ -100,20 +151,36 @@ pub async fn cancel(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Va
     Ok(out)
 }
 
-/// What the text of lines asks for: `1x2, 3` is line 1 twice and line 3 once; empty: nothing named.
-pub(crate) fn parse_lines(text: &str) -> Result<Vec<(usize, Option<Decimal>)>> {
-    let bad = |t: &str| Error::field("lines", format!("\"{t}\" is not a line number, or a line number and how many, as 1x2"));
+/// One item a shopper names: by its number in the list or by its name.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Pick {
+    Number(usize),
+    Name(String),
+}
+
+/// What the text of lines asks for: `Blue Mug x2, 3` is the Blue Mug twice and item 3 whole; empty: nothing named.
+pub(crate) fn parse_lines(text: &str) -> Result<Vec<(Pick, Option<Decimal>)>> {
+    let bad = |t: &str| Error::field("lines", format!("\"{t}\" is not an item's name or number, or one with how many, as Blue Mug x2"));
+    let how_many = |t: &str| t.trim().parse::<Decimal>().ok().filter(|q| *q > Decimal::ZERO);
     let mut out = Vec::new();
     for part in text.split([',', ';', '\n']).map(str::trim).filter(|p| !p.is_empty()) {
-        let (line, qty) = match part.split_once(['x', 'X', '×', '*']) {
-            Some((l, q)) => (l.trim(), Some(q.trim().parse::<Decimal>().ok().filter(|q| *q > Decimal::ZERO).ok_or_else(|| bad(part))?)),
-            None => (part, None),
+        let (name, qty) = match part.rsplit_once(['x', 'X', '×', '*']) {
+            Some((l, q)) if !l.trim().is_empty() && how_many(q).is_some() => (l.trim(), how_many(q)),
+            Some((l, _)) if !l.trim().is_empty() && l.trim().bytes().all(|c| c.is_ascii_digit()) => return Err(bad(part)),
+            _ => (part, None),
         };
-        let n: usize = line.parse().ok().filter(|n| *n >= 1).ok_or_else(|| bad(part))?;
-        if out.iter().any(|(l, _)| *l == n) {
-            return Err(Error::field("lines", format!("line {n} is listed twice")));
+        // Digits alone are a number (and then not zero); a sign is a mistake; anything else is a name.
+        let pick = if name.bytes().all(|c| c.is_ascii_digit()) {
+            Pick::Number(name.parse().ok().filter(|n| *n >= 1).ok_or_else(|| bad(part))?)
+        } else if name.starts_with(['-', '+']) {
+            return Err(bad(part));
+        } else {
+            Pick::Name(name.to_string())
+        };
+        if out.iter().any(|(p, _)| *p == pick) {
+            return Err(Error::field("lines", format!("\"{name}\" is listed twice")));
         }
-        out.push((n, qty));
+        out.push((pick, qty));
     }
     Ok(out)
 }
@@ -187,15 +254,34 @@ pub async fn request_return(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> R
     let chosen: Vec<(usize, Decimal)> = if named.is_empty() {
         lines.iter().enumerate().map(|(i, l)| (i, room(l))).filter(|(_, q)| *q > Decimal::ZERO).collect()
     } else {
-        let mut v = Vec::new();
-        for (n, qty) in named {
-            let l = lines.get(n - 1).ok_or_else(|| Error::field("lines", format!("this order has no item {n}")))?;
+        let mut v: Vec<(usize, Decimal)> = Vec::new();
+        for (pick, qty) in named {
+            let at = match &pick {
+                Pick::Number(n) => (*n <= lines.len()).then_some(*n - 1).ok_or_else(|| Error::field("lines", format!("this order has no item {n}")))?,
+                Pick::Name(name) => {
+                    let hits: Vec<usize> = (0..lines.len()).filter(|i| s(&lines[*i], "item_name").is_some_and(|x| x.eq_ignore_ascii_case(name))).collect();
+                    match hits.as_slice() {
+                        [one] => *one,
+                        [] => {
+                            return Err(Error::field(
+                                "lines",
+                                format!("this order has no item called {name}: write its name as the list has it, or its number"),
+                            ));
+                        }
+                        _ => return Err(Error::field("lines", format!("more than one item is called {name}: write its number"))),
+                    }
+                }
+            };
+            if v.iter().any(|(i, _)| *i == at) {
+                return Err(Error::field("lines", "an item is listed twice"));
+            }
+            let l = &lines[at];
             let name = s(l, "item_name").unwrap_or("this item");
             let q = qty.unwrap_or_else(|| room(l));
             if q > room(l) {
                 return Err(Error::field("lines", format!("at most {} of {name} can still be sent back", room(l).normalize())));
             }
-            v.push((n - 1, q));
+            v.push((at, q));
         }
         v
     };
@@ -226,6 +312,9 @@ pub async fn request_return(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> R
         "lines".into(),
         json!(chosen.iter().map(|(i, q)| format!("{} × {}", q.normalize(), s(&lines[*i], "item_name").unwrap_or_default())).collect::<Vec<_>>()),
     );
+    values.insert("to_credit".into(), json!(p.credit_by_default && p.credit_kind.is_some()));
+    values.insert("fee".into(), json!((p.restocking_fee > Decimal::ZERO).then(|| p.restocking_fee.normalize().to_string())));
+    values.insert("store_pays_shipping".into(), json!(p.store_pays_return_shipping));
     tell::message(hc.kernel, hc.tx, &sctx, "commerce.return_requested", so_id, s(so, "commerce_contact_email"), values, vec![]).await?;
     Ok(json!({"return_request": rid.to_string(), "number": s(&made, "number")}))
 }
@@ -321,10 +410,15 @@ mod tests {
     #[test]
     fn a_shopper_names_lines_and_how_many() {
         let n = |t: &str| t.parse::<Decimal>().unwrap();
+        let name = |t: &str| Pick::Name(t.to_string());
         assert_eq!(parse_lines("").unwrap(), vec![]);
-        assert_eq!(parse_lines("1x2, 3").unwrap(), vec![(1, Some(n("2"))), (3, None)]);
-        assert_eq!(parse_lines(" 2 × 1.5 ;\n4").unwrap(), vec![(2, Some(n("1.5"))), (4, None)]);
-        for bad in ["a", "0", "1x0", "1x", "1,1", "-1"] {
+        assert_eq!(parse_lines("1x2, 3").unwrap(), vec![(Pick::Number(1), Some(n("2"))), (Pick::Number(3), None)]);
+        assert_eq!(parse_lines(" 2 × 1.5 ;\n4").unwrap(), vec![(Pick::Number(2), Some(n("1.5"))), (Pick::Number(4), None)]);
+        assert_eq!(
+            parse_lines("Blue Mug x2, Box, logo tee X 1").unwrap(),
+            vec![(name("Blue Mug"), Some(n("2"))), (name("Box"), None), (name("logo tee"), Some(n("1")))]
+        );
+        for bad in ["0", "1x0", "1x", "1,1", "-1", "Mug,Mug"] {
             assert!(parse_lines(bad).is_err(), "{bad}");
         }
     }

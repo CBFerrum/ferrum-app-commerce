@@ -7,7 +7,7 @@
 use crate::catalog::{self, Listing, Sort, decimal_param};
 use crate::checkout::{self, Checkout};
 use crate::store::Store;
-use crate::{cart, orders, refund, subscriptions};
+use crate::{cart, edit, orders, refund, subscriptions};
 use async_trait::async_trait;
 use ferrum_domain::util::{id, s};
 use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
@@ -258,6 +258,11 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         ("POST", ["desk", "refund-plan"]) => {
             let user = r.signed_in()?;
             ok(refund::plan(k, user, &r.ctx, &r.body()?).await?)
+        }
+        // What the desk's change of an order would do, worked out by the save's own code and thrown away.
+        ("POST", ["desk", "change-preview"]) => {
+            let user = r.signed_in()?;
+            ok(edit::preview(k, user, &r.body()?).await?)
         }
         ("GET", ["orders"]) => {
             let user = r.signed_in()?;
