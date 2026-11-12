@@ -26,8 +26,6 @@ export interface Plan {
   estimate?: { amount: string; errors: string[] } | null;
 }
 
-export type Kind = "Return" | "Cancellation";
-
 export interface Choice {
   /** Units chosen per order line. */
   qty: Record<string, number>;
@@ -53,25 +51,20 @@ export const restocks = (c: Choice, line: string, reasonRestocks: boolean) => c.
 export const chosen = (c: Choice) => Object.entries(c.qty).filter(([, q]) => q > 0);
 
 /** What the server is asked: for the plan (an estimate) and for the refund itself. */
-export function request(order: string, kind: Kind, c: Choice, reasonRestocks: boolean) {
-  if (kind === "Cancellation") return { sales_order: order, kind };
+export function request(order: string, c: Choice, reasonRestocks: boolean) {
   return {
     sales_order: order,
-    kind,
+    kind: "Return" as const,
     include_shipping: c.shipping,
     lines: chosen(c).map(([line, qty]) => ({ sales_order_line: line, qty: String(qty), restock: restocks(c, line, reasonRestocks) })),
   };
 }
 
 /** Whether the person may go ahead, and if not, what is missing. */
-export function readiness(o: { plan: Plan | undefined; kind: Kind; choice: Choice; reason: string | null; estimating: boolean }): { ok: boolean; why: string } {
-  const { plan, kind, choice, reason, estimating } = o;
+export function readiness(o: { plan: Plan | undefined; choice: Choice; reason: string | null; estimating: boolean }): { ok: boolean; why: string } {
+  const { plan, choice, reason, estimating } = o;
   if (!plan?.payable) return { ok: false, why: plan?.why ?? "" };
-  if (kind === "Cancellation") {
-    if (!plan.cancel?.allowed) return { ok: false, why: t("This order has shipped or is already being refunded: send the goods back instead.") };
-  } else if (!chosen(choice).length) {
-    return { ok: false, why: t("Choose what comes back.") };
-  }
+  if (!chosen(choice).length) return { ok: false, why: t("Choose what comes back.") };
   if (!reason) return { ok: false, why: t("Say why.") };
   if (estimating) return { ok: false, why: t("Working out the amount…") };
   const e = plan.estimate;

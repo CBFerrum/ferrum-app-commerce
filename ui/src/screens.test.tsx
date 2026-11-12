@@ -198,6 +198,20 @@ describe("the return and refund dialog", () => {
     expect(html).toContain("Number of Blue Mug to send back");
   });
 
+  it("no longer cancels an order: it points to Cancel order on the order, which sends each payment back", () => {
+    const qc = client([[["commerce", "reasons"], []], [["commerce", "refund-plan", asked], { ...plan, cancel: { allowed: true }, lines: [{ id: "l1", item: "mug", name: "Blue Mug", qty: "2", delivered: "0", invoiced: false, returnable: "0", rate: "250" }] }]]);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <RefundDialog order={{ id: "o1", number: "SO-1" }} rights={rights} onClose={() => {}} onDone={() => {}} />
+      </QueryClientProvider>,
+    );
+    const text = plain(html);
+    expect(text).toContain("use Cancel order… on the order");
+    expect(text).not.toContain("Goods come back");
+    expect(text).not.toContain("Cancel the order");
+    expect(html).not.toContain("aria-pressed");
+  });
+
   it("says why an order has nothing to send back", () => {
     const qc = client([[["commerce", "reasons"], []], [["commerce", "refund-plan", asked], { payable: false, why: "Nothing has been paid on this order, so there is no money to send back." } satisfies Plan]]);
     const html = renderToStaticMarkup(
