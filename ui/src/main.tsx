@@ -64,6 +64,8 @@ const router = createBrowserRouter(
         { index: true, element: <CommerceHome /> },
         { path: "orders", lazy: () => import("./Desk").then((m) => ({ Component: m.Desk })) },
         { path: "o/:id", lazy: () => import("./Order").then((m) => ({ Component: m.OrderRoute })) },
+        { path: "returns", lazy: () => import("./Returns").then((m) => ({ Component: m.Returns })) },
+        { path: "alerts", lazy: () => import("./Alerts").then((m) => ({ Component: m.Alerts })) },
         { path: "money", lazy: () => import("./Money").then((m) => ({ Component: m.Money })) },
         { path: "e/:entity", lazy: page("ListView") },
         { path: "e/:entity/:id", lazy: page("FormView") },
