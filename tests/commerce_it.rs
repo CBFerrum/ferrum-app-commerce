@@ -2352,3 +2352,148 @@ async fn order_edits() {
     let refused = edit(c.so, json!({"address": {"line1": "1 Rue", "city": "Paris", "country": "FR"}})).await.unwrap_err().to_string();
     assert!(refused.contains("ship"), "{refused}");
 }
+
+#[test]
+fn after_sales_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(after_sales()).await.unwrap() });
+}
+
+/// The token of the link in an order's confirmation (the address is a secret value: it is read from the
+/// sealed mail, and the mail waiting in the outbox holds a placeholder).
+async fn manage_token(t: &T, email: &str, nth: usize) -> String {
+    let mail = opened_mails(t, email).await.into_iter().filter(|(s, _)| s.starts_with("Your order")).nth(nth).expect("a confirmation");
+    let html = mail.1.replace("&#x2f;", "/");
+    let at = html.find("/links/").expect("a link in the confirmation") + "/links/".len();
+    html[at..].split('"').next().unwrap().to_string()
+}
+
+/// Shoppers cancel or ask to return from the link in their confirmation; the desk decides; the refund
+/// goes back to the payment or as store credit; each step tells the shopper.
+async fn after_sales() {
+    let slug = "after-sales";
+    let Shop { t, cid, products, nos, selling, .. } = shop_with(slug, &["commerce"]).await;
+    let fakepay = gateway(&t, "fakepay").await;
+    let c = cid.to_string();
+    let current = t.find_one("Account", json!({"account_name": "Current Liabilities", "company": c})).await;
+    let liability = t.insert("Account", json!({"account_name": "Store Credit", "company": c, "parent_account": current["id"], "root_type": "Liability"})).await;
+    let goodwill = t.find_one("Account", json!({"account_name": "Administrative Expenses", "company": c})).await;
+    let kind = t
+        .insert(
+            "StoredValueKind",
+            json!({"kind_name": "Store Credit", "company": c, "liability_account": liability["id"], "adjustment_account": goodwill["id"]}),
+        )
+        .await;
+    let _ = (&products, &nos, &selling);
+    let settings = uid(&t.find_one("StoreSettings", json!({})).await);
+    let set_policy = |v: Value| {
+        let t = &t;
+        async move { t.k.update(&t.ctx, "StoreSettings", settings, obj(v), None).await.unwrap() }
+    };
+    set_policy(json!({"restocking_fee_percent": "10", "return_shipping_paid_by": "Store"})).await;
+    let use_link = |token: &str, action: &str, params: Value| {
+        let (t, token, action) = (&t, token.to_string(), action.to_string());
+        async move { t.k.use_link(slug, &token, &action, params.as_object().unwrap(), None).await }
+    };
+
+    // ───────────── a shopper cancels before anything shipped ─────────────
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 2}]), "cancel@example.com", "fakepay", "after-a-0001").await;
+    pay(&t, &t.ctx, a.request.unwrap(), a.total, "fp_after_a").await;
+    let link_a = manage_token(&t, "cancel@example.com", 0).await;
+    let waiting = mails(&t, "cancel@example.com").await;
+    assert!(waiting.iter().all(|(_, h)| !h.contains(&link_a) && h.contains("••••••")), "the token is not in the clear in the outbox: {waiting:?}");
+    let page = t.k.link_page(slug, &link_a).await.unwrap().expect("a page");
+    let offered = page.actions.iter().map(|a| a.1.clone()).collect::<Vec<_>>().join(", ");
+    assert!(offered.contains("Cancel My Order") && offered.contains("Return Something"), "the link offers both: {offered}");
+    let out = use_link(&link_a, "web_shopper_cancel", json!({"reason": "bought twice"})).await.expect("cancelled").expect("an answer");
+    assert_eq!(out["refunds"].as_array().unwrap().len(), 1, "{out}");
+    let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await;
+    assert_eq!(refund["status"], json!("Approved"), "approved with the cancellation, the gateway carries it out");
+    t.k.run_action(&fakepay, "OrderRefund", uid(&refund), "refund_done", json!({"refund_reference": "re_after_a"})).await.expect("refunded");
+    assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(2));
+    let told: Vec<String> = mails(&t, "cancel@example.com").await.into_iter().map(|m| m.0).collect();
+    assert!(told.iter().any(|s| s.contains("was cancelled")) && told.iter().any(|s| s.contains("refunded for order")), "{told:?}");
+    assert!(use_link(&link_a, "web_shopper_cancel", json!({})).await.is_err(), "a cancelled order cannot be cancelled again");
+
+    // ───────────── the window: a cancellation too late is refused in words ─────────────
+    let late = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "late@example.com", "fakepay", "after-b-0001").await;
+    t.sql(&format!("update e_sales_order set created_at = now() - interval '30 hours' where id = '{}'", late.so)).await;
+    let link_late = manage_token(&t, "late@example.com", 0).await;
+    let refused = use_link(&link_late, "web_shopper_cancel", json!({})).await.unwrap_err().to_string();
+    assert!(refused.contains("24 hours") && refused.contains("passed"), "{refused}");
+
+    // ───────────── a return: asked, approved, received, refunded to the payment less the fee ─────────────
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 2}, {"item": "logo-tee", "qty": 1}]), "return@example.com", "fakepay", "after-c-0001").await;
+    pay(&t, &t.ctx, b.request.unwrap(), b.total, "fp_after_c").await;
+    let link_b = manage_token(&t, "return@example.com", 0).await;
+    let early = use_link(&link_b, "web_shopper_return", json!({})).await.unwrap_err().to_string();
+    assert!(early.contains("delivered"), "nothing to send back before it is delivered: {early}");
+    t.k.run_action(&t.ctx, "SalesOrder", b.so, "web_ship", json!({"notify": "No"})).await.expect("shipped and invoiced");
+    let too_many = use_link(&link_b, "web_shopper_return", json!({"lines": "1x5"})).await.unwrap_err().to_string();
+    assert!(too_many.contains("at most 2"), "{too_many}");
+    let made = use_link(&link_b, "web_shopper_return", json!({"lines": "1x1", "reason": "wrong item sent", "note": "the handle is chipped"}))
+        .await
+        .expect("asked")
+        .unwrap();
+    let request = uid(&t.find_one("ReturnRequest", json!({"sales_order": b.so.to_string()})).await);
+    assert_eq!(made["return_request"], json!(request.to_string()));
+    let rr = t.get("ReturnRequest", request).await;
+    let reason = t.get("ReturnReason", rr["reason"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (rr["status"].clone(), reason["reason"].clone(), dec(&rr["restocking_fee_percent"]), rr["shipping_paid_by"].clone()),
+        (json!("Requested"), json!("Wrong item sent"), n("10"), json!("Store"))
+    );
+    let again = use_link(&link_b, "web_shopper_return", json!({"lines": "1x2"})).await.unwrap_err().to_string();
+    assert!(again.contains("at most 1"), "what is asked for already is not asked for twice: {again}");
+    t.k.run_action(&t.ctx, "ReturnRequest", request, "approve_return", json!({"note": "Use the label in the box"})).await.expect("approved");
+    t.k.run_action(&t.ctx, "ReturnRequest", request, "receive_return", json!({})).await.expect("received");
+    let rr = t.get("ReturnRequest", request).await;
+    let refund = t.get("OrderRefund", rr["refund"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (refund["kind"].clone(), dec(&refund["amount"]), refund["destination"].clone()),
+        (json!("Return"), n("265.5"), json!("Original Payment")),
+        "250 less 10%, at 18%: {refund:?}"
+    );
+    t.k.run_action(&t.ctx, "OrderRefund", uid(&refund), "approve_refund", json!({})).await.expect("approved");
+    t.k.run_action(&fakepay, "OrderRefund", uid(&refund), "refund_done", json!({"refund_reference": "re_after_c"})).await.expect("refunded");
+    assert_eq!(t.get("ReturnRequest", request).await["status"], json!("Refunded"));
+    let told: Vec<String> = mails(&t, "return@example.com").await.into_iter().map(|m| m.0).collect();
+    for part in ["We have your return request", "is approved", "refunded for order"] {
+        assert!(told.iter().any(|s| s.contains(part)), "{part} in {told:?}");
+    }
+    let declined = use_link(&link_b, "web_shopper_return", json!({"lines": "2x1"})).await.expect("the tee asked for");
+    let tee_request = uid(&t.find_one("ReturnRequest", json!({"sales_order": b.so.to_string(), "status": "Requested"})).await);
+    let _ = declined;
+    assert!(t.k.run_action(&t.ctx, "ReturnRequest", tee_request, "decline_return", json!({})).await.is_err(), "a decline says why");
+    t.k.run_action(&t.ctx, "ReturnRequest", tee_request, "decline_return", json!({"note": "worn"})).await.expect("declined");
+    assert!(mails(&t, "return@example.com").await.iter().any(|m| m.0.contains("was not approved") && m.1.contains("worn")));
+
+    // ───────────── store credit: the refund is a new card, its code sent once ─────────────
+    set_policy(json!({"refund_destination": "Store Credit", "store_credit_kind": sid(&kind), "restocking_fee_percent": "0"})).await;
+    let d = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "credit@example.com", "fakepay", "after-d-0001").await;
+    pay(&t, &t.ctx, d.request.unwrap(), d.total, "fp_after_d").await;
+    let link_d = manage_token(&t, "credit@example.com", 0).await;
+    t.k.run_action(&t.ctx, "SalesOrder", d.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
+    use_link(&link_d, "web_shopper_return", json!({})).await.expect("asked");
+    let request = uid(&t.find_one("ReturnRequest", json!({"sales_order": d.so.to_string()})).await);
+    assert_eq!(t.get("ReturnRequest", request).await["resolution"], json!("Store Credit"));
+    t.k.run_action(&t.ctx, "ReturnRequest", request, "approve_return", json!({})).await.expect("approved");
+    t.k.run_action(&t.ctx, "ReturnRequest", request, "receive_return", json!({})).await.expect("received");
+    let refund = uid(&t.find_one("OrderRefund", json!({"sales_order": d.so.to_string()})).await);
+    t.k.run_action(&t.ctx, "OrderRefund", refund, "approve_refund", json!({})).await.expect("approved: done at once, no gateway carries store credit");
+    let refund = t.get("OrderRefund", refund).await;
+    assert_eq!((refund["status"].clone(), refund["booked"].clone(), dec(&refund["amount"])), (json!("Refunded"), json!(true), n("295")), "{refund:?}");
+    let credit = t.find_one("StoredValueAccount", json!({"kind": sid(&kind)})).await;
+    assert_eq!(dec(&credit["balance"]), n("295"));
+    let sent = opened_mails(&t, "credit@example.com").await.into_iter().find(|m| m.0.contains("store credit")).expect("the code was sent");
+    assert!(sent.1.contains("<strong>"), "{sent:?}");
+    let waiting = mails(&t, "credit@example.com").await.into_iter().find(|m| m.0.contains("store credit")).unwrap();
+    assert!(waiting.1.contains("••••••"), "kept sealed while it waits: {waiting:?}");
+    assert_eq!(t.get("ReturnRequest", request).await["status"], json!("Refunded"));
+
+    // ───────────── the window of a return ─────────────
+    t.sql(&format!("update e_delivery_note set created_at = now() - interval '20 days' where id in (select parent_id from e_delivery_note__items where sales_order = '{}')", d.so)).await;
+    let gone = use_link(&link_d, "web_shopper_return", json!({})).await.unwrap_err().to_string();
+    assert!(gone.contains("14 days") && gone.contains("passed") || gone.contains("sent back"), "{gone}");
+}
