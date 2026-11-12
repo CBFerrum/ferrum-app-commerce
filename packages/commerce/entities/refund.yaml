@@ -61,6 +61,7 @@
     - {name: delivery_note, type: link, to: DeliveryNote, read_only: true, no_copy: true}
     - {name: credit_note, type: link, to: SalesInvoice, read_only: true, no_copy: true}
     - {name: journal_entry, type: link, to: JournalEntry, read_only: true, no_copy: true}
+    - {name: payment_entry, type: link, to: PaymentEntry, read_only: true, no_copy: true, description: "A refund onto the gift card that paid: the payment that loads it again"}
   indexes: [[sales_order, status]]
   rules:
     - {name: refunds_something, check: "doc.sales_order != null || doc.sales_invoice != null", message: "A refund is of an order or of an invoice's payment"}
@@ -68,7 +69,7 @@
     - {label: Refund, fields: [sales_order, order_number, customer, kind, reason, note, status, amount, currency_code]}
     - {label: Goods, fields: [lines, include_shipping, notify_customer]}
     - {label: Payment, fields: [payment_request, gateway, payment_reference, requested_by, approved_by, approved_at, refund_reference, refunded_at, refund_error, decision_note]}
-    - {label: Books, collapsible: true, fields: [booked, booking_error, delivery_note, credit_note, journal_entry]}
+    - {label: Books, collapsible: true, fields: [booked, booking_error, delivery_note, credit_note, journal_entry, payment_entry]}
   actions:
     - {name: approve_refund, label: Approve Refund, permission: write, condition: "doc.status == 'Requested' || doc.status == 'Refund Failed'", confirm: "Send this money back? The gateway the order was paid with carries it out."}
     - {name: decline, label: Decline, permission: write, condition: "doc.status == 'Requested' || doc.status == 'Refund Failed'", params: [{name: note, label: Why, type: text}]}

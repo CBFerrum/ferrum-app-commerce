@@ -79,6 +79,8 @@ pub struct Store {
     pub cancel_unpaid_orders: bool,
     /// The channel carts and orders name, as promotions list it.
     pub channel: String,
+    /// The stored value kind taken at checkout and sold as gift cards.
+    pub gift_card_kind: Option<Uuid>,
 }
 
 impl Store {
@@ -146,6 +148,7 @@ impl Store {
             cart_expiry_days: int("cart_expiry_days", 30),
             cancel_unpaid_orders: b(&doc, "cancel_unpaid_orders"),
             channel: s(&doc, "sales_channel").unwrap_or(WEB_SHOP).to_string(),
+            gift_card_kind: id(&doc, "gift_card_kind"),
         })
     }
 
@@ -171,6 +174,7 @@ impl Store {
             "payment_methods": self.payment_methods.iter().map(PaymentMethod::view).collect::<Vec<_>>(),
             "max_qty_per_line": self.max_qty_per_line.normalize().to_string(),
             "max_cart_lines": self.max_cart_lines,
+            "gift_cards": self.gift_card_kind.is_some(),
         })
     }
 }
