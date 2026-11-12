@@ -5,6 +5,7 @@
 //! public and signed in — and confirms payments the way a gateway plugin does: as its service
 //! user, through the payment request's `mark_paid` action.
 
+use ferrum_kernel::secret::SecretKey;
 use ferrum_kernel::tenant::NewTenant;
 use ferrum_kernel::{Ctx, Db, DbConfig, Doc, Error, HookRegistry, Kernel, KernelSettings, ListQuery, Site, SiteRequest};
 use ferrum_meta::{Catalog, PermissionDef};
@@ -58,10 +59,42 @@ async fn fresh_kernel() -> Arc<Kernel> {
     for source in ferrum_app_commerce::reports() {
         ferrum_domain::reports::add_source(source);
     }
-    let k = Kernel::boot(db, catalog, hooks, KernelSettings::default(), None).await.expect("boot");
+    // Messages with a secret value (a gift card's code) are sealed with the server's key while they wait.
+    let settings = KernelSettings { secret_key: Some(SecretKey::new(SECRET)), ..Default::default() };
+    let k = Kernel::boot(db, catalog, hooks, settings, None).await.expect("boot");
     ferrum_domain::maintenance(&k).await.expect("maintenance");
     ferrum_app_erp::maintenance(&k).await.expect("maintenance");
     k
+}
+
+const SECRET: [u8; 32] = [7; 32];
+
+/// The mails queued to `to` with what the outbox holds sealed opened (a secret value's place, otherwise).
+async fn opened_mails(t: &T, to: &str) -> Vec<(String, String)> {
+    let key = SecretKey::new(SECRET);
+    events(t, "ferrum.mail")
+        .await
+        .iter()
+        .filter(|m| m["to"] == json!(to))
+        .map(|m| match m["sealed"].as_str() {
+            Some(sealed) => {
+                let open: Value = serde_json::from_str(&key.open(&format!("{}/message", t.ctx.tenant), sealed).unwrap()).unwrap();
+                (open["subject"].as_str().unwrap().to_string(), open["html"].as_str().unwrap().to_string())
+            }
+            None => (m["subject"].as_str().unwrap_or_default().to_string(), m["html"].as_str().unwrap_or_default().to_string()),
+        })
+        .collect()
+}
+
+/// A gateway's service user, as its plugin acts.
+async fn gateway(t: &T, name: &str) -> Ctx {
+    let role = format!("plugin:{name}");
+    for entity in ["PaymentRequest", "PaymentException", "OrderRefund"] {
+        let p = PermissionDef { entity: entity.into(), read: true, write: true, ..Default::default() };
+        t.k.set_role_permission(&t.ctx, &role, &p).await.unwrap();
+    }
+    let u = t.k.create_user(&t.ctx, &format!("{name}@plugins.ferrum.invalid"), &format!("Plugin: {name}"), None, &[role], false).await.unwrap();
+    t.k.load_ctx(t.ctx.tenant, u, None, format!("plugin-{name}")).await.unwrap()
 }
 
 struct T {
@@ -1342,11 +1375,14 @@ async fn gift_cards() {
     assert_eq!(bought.total, n("649"), "(500 + 50 of delivery) at 18%: taxed when sold");
     pay(&t, &t.ctx, bought.request.unwrap(), bought.total, "fp_gift_1").await;
     pay(&t, &t.ctx, bought.request.unwrap(), bought.total, "fp_gift_1").await;
-    let sent: Vec<_> = mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect();
+    let sent: Vec<_> = opened_mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect();
     assert_eq!(sent.len(), 1, "told once, a repeated payment notice changes nothing: {sent:?}");
     let body = &sent[0].1;
     let code = body.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
     assert!(code.len() >= 8 && body.contains("500"), "{body}");
+    // While it waits for the mailer the outbox holds the code sealed, and only a placeholder where it goes.
+    let waiting = mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect::<Vec<_>>();
+    assert!(waiting.len() == 1 && !waiting[0].1.contains(&code) && waiting[0].1.contains("••••••"), "the code is not in the clear in the outbox: {waiting:?}");
     let account = t.find_one("StoredValueAccount", json!({"kind": sid(&kind)})).await;
     assert_eq!(dec(&account["balance"]), n("500"));
     assert_ne!(account["code_hash"], json!(code), "kept as a hash");
@@ -1370,9 +1406,18 @@ async fn gift_cards() {
     let total = dec(&done["order"]["totals"]["rounded_total"]);
     assert_eq!(total, n("531"), "(400 + 50) at 18%");
     assert_eq!((dec(&done["payment_request"]["amount"]), done["order"]["payment_status"].clone()), (n("31"), json!("Pending")), "the card took 500");
-    assert_eq!(dec(&t.get("StoredValueAccount", uid(&account)).await["balance"]), n("0"));
+    // Held for the order, not taken: nothing is invoiced before the rest is paid.
+    let held = t.get("StoredValueAccount", uid(&account)).await;
+    assert_eq!((dec(&held["balance"]), dec(&held["held"])), (n("500"), n("500")), "the card's value is set aside for the order");
     let so_id = uid(&t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await);
-    pay(&t, &t.ctx, done["payment_request"]["id"].as_str().unwrap().parse().unwrap(), n("31"), "fp_rest_1").await;
+    assert_eq!(t.count("SalesInvoice", json!({"items.sales_order": so_id.to_string()})).await, 0, "no invoice before it is fully paid");
+    let so = t.get("SalesOrder", so_id).await;
+    assert_eq!((dec(&so["commerce_card_held"]), dec(&so["commerce_paid_by_card"])), (n("500"), n("0")));
+    let rest_request: Uuid = done["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    assert!(t.get("PaymentRequest", rest_request).await["expires_at"].is_string(), "the rest is asked for within the hold");
+    pay(&t, &t.ctx, rest_request, n("31"), "fp_rest_1").await;
+    let account_now = t.get("StoredValueAccount", uid(&account)).await;
+    assert_eq!((dec(&account_now["balance"]), dec(&account_now["held"])), (n("0"), n("0")), "paid: the invoice took the card's value");
     let so = t.get("SalesOrder", so_id).await;
     assert_eq!((so["commerce_payment_status"].clone(), dec(&so["commerce_paid_by_card"])), (json!("Paid"), n("500")));
     let invoice = t.find_one("SalesInvoice", json!({"items.sales_order": so_id.to_string(), "is_return": false})).await;
@@ -1394,6 +1439,69 @@ async fn gift_cards() {
     let refund = t.get("OrderRefund", uid(&refund)).await;
     assert_eq!((refund["status"].clone(), refund["booked"].clone()), (json!("Refunded"), json!(true)), "{refund:?}");
     assert_eq!(dec(&t.get("StoredValueAccount", uid(&account)).await["balance"]), n("472"), "back onto the card that paid");
+
+    let fakepay = gateway(&t, "fakepay").await;
+    let with_card = |item: &'static str, email: &'static str, key: &'static str, method: Option<&'static str>| {
+        let (t, code) = (&t, code.clone());
+        async move {
+            let (cart, _) = t.new_cart(None, json!([{"item": item, "qty": 1}])).await;
+            t.cart_ok(&cart, "PUT", "/cart/details", Some(details(email, "Card Holder", "IN"))).await;
+            let mut body = json!({"accept_terms": true, "gift_card": {"code": code}});
+            if let Some(m) = method {
+                body["payment_method"] = json!(m);
+            }
+            let done = t.checkout(None, &cart, key, body).await.expect("checkout");
+            let so = uid(&t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await);
+            (so, done["payment_request"]["id"].as_str().and_then(|r| r.parse::<Uuid>().ok()))
+        }
+    };
+    let card = || async { t.get("StoredValueAccount", uid(&account)).await };
+
+    // ───────────── part held, the rest never paid: the card is let go, the order cancels ─────────────
+    let (late, request) = with_card("logo-tee", "late@example.com", "gift-late-0001", Some("fakepay")).await;
+    assert_eq!((dec(&card().await["held"]), dec(&card().await["balance"])), (n("472"), n("472")));
+    t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{}'", request.unwrap())).await;
+    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    assert_eq!(t.get("PaymentRequest", request.unwrap()).await["status"], json!("Expired"));
+    assert_eq!(t.get("SalesOrder", late).await["docstatus"], json!(2), "cancelled by the upkeep: nothing was invoiced, so nothing stops it");
+    assert_eq!((dec(&card().await["held"]), dec(&card().await["balance"])), (n("0"), n("472")), "the card's value is free again");
+    assert_eq!(dec(&t.get("SalesOrder", late).await["commerce_card_held"]), n("0"));
+
+    // ───────────── paid two ways, then cancelled: the card gets its value back, the gateway's part goes through it ─────────────
+    let (two, request) = with_card("logo-tee", "two@example.com", "gift-two-0001", Some("fakepay")).await;
+    pay(&t, &t.ctx, request.unwrap(), n("59"), "fp_two_1").await;
+    assert_eq!(dec(&card().await["balance"]), n("0"));
+    let cancelled = t.k.run_action(&t.ctx, "SalesOrder", two, "web_cancel", json!({})).await.expect("cancelled");
+    assert_eq!(cancelled["refunds"].as_array().unwrap().len(), 2, "a refund for each payment: {cancelled}");
+    assert_eq!(cancelled["cancelled"], json!(false), "the gateway's part is still on its way");
+    assert_eq!(dec(&card().await["balance"]), n("0"), "the card waits for the part that goes through a provider, which can fail");
+    let theirs = t.find_one("OrderRefund", json!({"sales_order": two.to_string(), "gateway": "fakepay"})).await;
+    assert_eq!((theirs["status"].clone(), dec(&theirs["amount"])), (json!("Approved"), n("59")));
+    t.k.run_action(&fakepay, "OrderRefund", uid(&theirs), "refund_failed", json!({"error": "the bank said later"})).await.expect("failed");
+    assert_eq!(t.get("OrderRefund", uid(&theirs)).await["status"], json!("Refund Failed"), "recorded, and a person can try again");
+    assert_eq!(t.get("SalesOrder", two).await["docstatus"], json!(1), "the order stands until both have gone back");
+    t.k.run_action(&t.ctx, "OrderRefund", uid(&theirs), "approve_refund", json!({})).await.expect("again");
+    t.k.run_action(&fakepay, "OrderRefund", uid(&theirs), "refund_done", json!({"refund_reference": "re_two"})).await.expect("done");
+    let mine = t.find_one("OrderRefund", json!({"sales_order": two.to_string(), "gateway": "Gift Card"})).await;
+    assert_eq!((mine["status"].clone(), mine["booked"].clone(), dec(&mine["amount"])), (json!("Refunded"), json!(true), n("472")), "{mine:?}");
+    assert_eq!(dec(&card().await["balance"]), n("472"), "the card has its value back");
+    let so = t.get("SalesOrder", two).await;
+    assert_eq!((so["docstatus"].clone(), so["commerce_payment_status"].clone()), (json!(2), json!("Refunded")));
+    assert_eq!(t.count("SalesInvoice", json!({"items.sales_order": two.to_string(), "docstatus": 1})).await, 0, "its invoice went with it");
+
+    // ───────────── a card alone paid it: cancelled and given back in one go ─────────────
+    let (alone, none) = with_card("blue-mug", "alone@example.com", "gift-alone-0001", None).await;
+    let _ = none;
+    assert_eq!(dec(&card().await["balance"]), n("118"), "354 of 472 taken");
+    let cancelled = t.k.run_action(&t.ctx, "SalesOrder", alone, "web_cancel", json!({})).await.expect("cancelled");
+    assert_eq!(cancelled["cancelled"], json!(true), "{cancelled}");
+    assert_eq!(dec(&card().await["balance"]), n("472"));
+    // Cancelled with nothing paid: held value goes with the order.
+    let (unpaid, _) = with_card("logo-tee", "unpaid@example.com", "gift-unpaid-0001", Some("fakepay")).await;
+    assert_eq!(dec(&card().await["held"]), n("472"));
+    let cancelled = t.k.run_action(&t.ctx, "SalesOrder", unpaid, "web_cancel", json!({})).await.expect("cancelled");
+    assert_eq!(cancelled["cancelled"], json!(true));
+    assert_eq!((dec(&card().await["held"]), dec(&t.get("SalesOrder", unpaid).await["commerce_card_held"])), (n("0"), n("0")));
 }
 
 #[test]

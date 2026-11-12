@@ -35,9 +35,9 @@
     - {name: sales_invoice, type: link, to: SalesInvoice, read_only: true, in_filter: true, description: "A payment's refund: the invoice the payment paid"}
     - {name: order_number, type: data, read_only: true, in_list: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
-    - {name: kind, type: select, options: [Return, Cancellation, Payment], default: Return, required: true, in_list: true, in_filter: true,
-       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms)"}
-    - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind != 'Payment'", in_filter: true}
+    - {name: kind, type: select, options: [Return, Cancellation, Payment, Adjustment], default: Return, required: true, in_list: true, in_filter: true,
+       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms). Adjustment: what an edit took off an order that was already paid"}
+    - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind == 'Return' || doc.kind == 'Cancellation'", in_filter: true}
     - {name: note, type: text, max_length: 2000}
     - {name: lines, type: table, of: OrderRefundLine, visible_if: "doc.kind == 'Return'"}
     - {name: include_shipping, type: check, label: Refund the Delivery Charge Too, visible_if: "doc.kind == 'Return'"}
