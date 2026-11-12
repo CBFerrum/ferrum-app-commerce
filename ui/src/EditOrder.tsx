@@ -6,7 +6,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { ApiError, api, docPath, refusal, isolate, t } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, ListSkeleton, toast, useDebounced } from "@ferrum/kit";
 import { LinkInput } from "@ferrum/records";
 import { type Address, type Draft, emptyAddress, emptyDraft, type OrderLine, previewBody, quantity, readiness, type Saved, savedWords, settlementWords, isCharge, lineProblem, updateParams } from "./edit";
@@ -159,7 +159,7 @@ export function EditOrderDialog({ order, lines, shippingItem, code, onClose, onD
   const working = ready.ok && !held && (preview.isFetching || key !== asked);
   // The server asks for a choice when more than one delivery method reaches the place.
   const needsRule = preview.error instanceof ApiError && preview.error.fields.some((x) => x.field === "shipping_rule");
-  const refused = ready.ok && !held && !working && preview.error ? errorMessage(preview.error, false) : null;
+  const refused = ready.ok && !held && !working && preview.error ? refusal(preview.error) : null;
   const canSave = ready.ok && !held && !!p && !working && !preview.error;
 
   const setQty = (id: string, v: string) => setDraft((d) => ({ ...d, qty: { ...d.qty, [id]: v } }));
@@ -174,7 +174,7 @@ export function EditOrderDialog({ order, lines, shippingItem, code, onClose, onD
       toast(savedWords(saved, money) + (p && saved.total !== p.total ? ` ${t("The price moved since the preview: it was {amount}.", { amount: money(p.total) })}` : ""));
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

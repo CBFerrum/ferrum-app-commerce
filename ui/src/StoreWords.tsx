@@ -7,7 +7,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { api, docPath, refusal, isolate, t } from "@ferrum/client";
 import { Alert, Button, confirmDialog, EmptyState, ErrorState, Field, ListSkeleton, StatePanel, toast, useDebounced, useShellTitle } from "@ferrum/kit";
 import { useEntityMeta, useMe } from "@ferrum/records";
 import english from "../../assets/words/en.json";
@@ -61,7 +61,7 @@ function Editor({ language, record, onSaved, onDirty }: { language: string; reco
       toast(t("Saved. The storefront shows these words within a minute."));
       onSaved();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

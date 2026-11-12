@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { api, docPath, errorMessage, formatDate, isolate, relativeTime, t } from "@ferrum/client";
+import { api, docPath, refusal, formatDate, isolate, relativeTime, t } from "@ferrum/client";
 import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, Field, FormSkeleton, ListSkeleton, StatePanel, statusTone, toast, useLiveEntity, useShellTitle } from "@ferrum/kit";
 import { f, list, soft, useRights } from "./data";
 import { amountText, units } from "./queues";
@@ -75,7 +75,7 @@ function Decide({ r, mode, onClose, onDone }: { r: ReturnRequest; mode: "approve
       toast(approve ? t("Approved. The shopper is told how to send it back.") : t("Declined. The shopper is told why."));
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };
@@ -139,7 +139,7 @@ function Receive({ r, onClose, onDone }: { r: ReturnRequest; onClose: () => void
       toast(t("Goods received. The refund is asked for: a person approves it."));
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

@@ -5,7 +5,7 @@
 
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router";
-import { api, docPath, errorMessage, relativeTime, t, isolate } from "@ferrum/client";
+import { api, docPath, refusal, relativeTime, t, isolate } from "@ferrum/client";
 import { Alert, Badge, Button, confirmDialog, Dialog, Field, Icon, Menu, MenuItem, toast, placed } from "@ferrum/kit";
 import { amountText } from "./queues";
 import { copy, type Rights } from "./data";
@@ -67,7 +67,7 @@ function Say({ title, label, hint, required, reference, confirm, danger, onClose
     try {
       await onSubmit(note.trim(), ref.trim());
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };
@@ -118,7 +118,7 @@ export function RefundRow({ r, rights, showOrder = true, onChange }: { r: Refund
       if (done.booked === false || done.error) toast(done.error ?? done.booking_error ?? t("It could not be posted yet."), "error");
       else toast(good);
     } catch (e) {
-      toast(errorMessage(e), "error");
+      toast(refusal(e), "error");
     } finally {
       setBusy(null);
     }
@@ -276,7 +276,7 @@ export function ExceptionRow({ x, rights, order, onChange }: { x: Exception; rig
       await run("approve_refund");
       toast(t("Approved. The gateway sends it within a few minutes."));
     } catch (e) {
-      toast(errorMessage(e), "error");
+      toast(refusal(e), "error");
     } finally {
       setBusy(false);
     }
