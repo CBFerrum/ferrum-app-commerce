@@ -1226,6 +1226,86 @@ async fn delivery_region() {
     assert_eq!(shipping().await, 2);
 }
 
+#[test]
+fn promotions_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(promotions()).await.unwrap() });
+}
+
+/// The cart and its order are priced by ERP's promotions, as any sales order is: an automatic amount
+/// off the order, free delivery and an amount off one item by codes, several codes at once, a
+/// promotion of another channel left out; a promotion that changes between cart and checkout is
+/// caught by the total check and the order then agrees with the cart; a code is counted once.
+async fn promotions() {
+    let Shop { t, cid, .. } = small_shop("promotions").await;
+    let ship = t.find_one("Item", json!({"item_code": "SHIP"})).await;
+    let ship = t.get("Item", uid(&ship)).await;
+    assert_eq!(ship["is_delivery_charge"], json!(true), "the store's shipping item is a delivery charge");
+    let tee = t.find_one("Item", json!({"item_code": "TEE"})).await;
+    let off = t
+        .insert(
+            "Promotion",
+            json!({"title": "100 off 500", "company": cid.to_string(), "channels": "Web Shop", "gives": "Amount Off the Document", "amount": "100", "min_amount": "500"}),
+        )
+        .await;
+    let free = t.insert("Promotion", json!({"title": "Free delivery", "requires_code": true, "gives": "Free Delivery"})).await;
+    t.insert("PromotionCode", json!({"code": "SHIPFREE", "promotion": sid(&free), "max_uses": 1})).await;
+    let tee50 = t
+        .insert(
+            "Promotion",
+            json!({"title": "50 off the tee", "requires_code": true, "priority": 5, "gives": "Amount Off Qualifying Lines", "amount": "50",
+                   "qualifying_items": [{"item": sid(&tee)}]}),
+        )
+        .await;
+    t.insert("PromotionCode", json!({"code": "TEE50", "promotion": sid(&tee50)})).await;
+    t.insert("Promotion", json!({"title": "Till only", "channels": "Point of Sale", "gives": "Percent Off the Document", "percent": "50"})).await;
+
+    let (cart, view) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    assert_eq!(dec(&view["totals"]["discount"]), n("0"), "400 is under the minimum spend");
+    t.cart_ok(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 1}))).await;
+    let view = t.cart_ok(&cart, "PUT", "/cart/details", Some(details(GUEST, "Asha Rao", "IN"))).await;
+    let totals = &view["totals"];
+    assert_eq!(
+        (dec(&totals["discount"]), dec(&totals["shipping"]), dec(&totals["grand_total"])),
+        (n("100"), n("50"), n("708")),
+        "(650 - 100 + 50) at 18%: {view}"
+    );
+    assert_eq!(view["promotions"], json!([{"title": "100 off 500", "amount": "100"}]));
+
+    let view = t.cart_ok(&cart, "PUT", "/cart/coupon", Some(json!({"code": "shipfree"}))).await;
+    assert_eq!((dec(&view["totals"]["shipping"]), dec(&view["totals"]["grand_total"])), (n("0"), n("649")), "delivery is free, the rest as it was");
+    let view = t.cart_ok(&cart, "PUT", "/cart/coupon", Some(json!({"code": "TEE50"}))).await;
+    assert_eq!(dec(&view["totals"]["grand_total"]), n("590"), "two codes at once: (650 - 50 - 100) at 18%");
+    assert_eq!(view["codes"], json!([{"code": "SHIPFREE", "applied": true}, {"code": "TEE50", "applied": true}]));
+    let bad = t.cart(&cart, "PUT", "/cart/coupon", Some(json!({"code": "NOPE-NOPE"}))).await;
+    assert_eq!(field_error(&bad, "coupon_code"), "this coupon code is not valid");
+
+    // The automatic promotion grows after the shopper saw 590: checkout says so, then agrees.
+    t.k.update(&t.ctx, "Promotion", uid(&off), obj(json!({"amount": "150"})), None).await.unwrap();
+    let stale = t.checkout(None, &cart, "promo-order-01", json!({"payment_method": "Cash on Delivery", "accept_terms": true, "expected_total": "590"})).await;
+    assert!(matches!(stale, Err(Error::Conflict(ref m)) if m.contains("531")), "{stale:?}");
+    let done = t
+        .checkout(None, &cart, "promo-order-02", json!({"payment_method": "Cash on Delivery", "accept_terms": true, "expected_total": "531"}))
+        .await
+        .expect("checkout");
+    let so = t.find_one("SalesOrder", json!({"number": done["order"]["number"]})).await;
+    let so = t.get("SalesOrder", uid(&so)).await;
+    assert_eq!((dec(&so["rounded_total"]), so["channel"].clone()), (n("531"), json!("Web Shop")), "the order is priced as its cart");
+    let given: Decimal = so["applied_promotions"].as_array().unwrap().iter().map(|a| dec(&a["amount"])).sum();
+    assert_eq!(given, n("250"), "150 off the order, 50 off the tee, 50 of delivery");
+    let code = t.find_one("PromotionCode", json!({"code": "SHIPFREE"})).await;
+    assert_eq!(code["used_count"], json!(1), "counted once, when the order was submitted");
+
+    // Its one use is gone: another cart cannot take it.
+    let (other, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    let used = t.cart(&other, "PUT", "/cart/coupon", Some(json!({"code": "SHIPFREE"}))).await;
+    assert_eq!(field_error(&used, "coupon_code"), "this coupon code is not valid", "used up and unknown sound the same");
+    let view = t.cart_ok(&other, "PUT", "/cart/coupon", Some(json!({"code": "TEE50"}))).await;
+    let view2 = t.cart_ok(&other, "DELETE", "/cart/codes/tee50", None).await;
+    assert!(dec(&view["totals"]["grand_total"]) < dec(&view2["totals"]["grand_total"]) && view2["codes"] == json!([]), "a code comes off again");
+}
+
 async fn refunds() {
     let Shop { t, tenant, mug, tee, .. } = small_shop("refunds").await;
     // ───────────── who is who ─────────────

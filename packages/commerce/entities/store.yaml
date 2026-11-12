@@ -50,9 +50,10 @@
     - {name: max_cart_lines, type: int, default: 50, min: 1, max: 500, label: Maximum Items per Cart}
     - {name: abandon_after_hours, type: int, default: 24, min: 1, max: 8760, label: Carts Count as Abandoned After (Hours)}
     - {name: cart_expiry_days, type: int, default: 30, min: 1, max: 3650, label: Carts Expire After (Days)}
+    - {name: sales_channel, type: data, max_length: 140, default: Web Shop, label: Sales Channel, description: "The channel web carts and orders name, as promotions' Channels list it (empty: Web Shop)"}
     - {name: cancel_unpaid_orders, type: check, default: true, description: "Cancel a web order when its payment request expires unpaid, releasing its reserved stock"}
   form:
     - {label: Store, fields: [store_name, company, currency, price_list, tax_template, display_prices_with_tax, store_url, terms_url]}
     - {label: Stock, fields: [warehouses, fulfilment_warehouse, enforce_stock, show_stock_quantity]}
-    - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders]}
+    - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders, sales_channel]}
     - {label: Limits, collapsible: true, fields: [max_qty_per_line, max_cart_lines, abandon_after_hours, cart_expiry_days]}

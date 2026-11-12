@@ -94,7 +94,7 @@ enum CartOp {
     SetQty(String, Decimal),
     Details(Map<String, Value>),
     Coupon(String),
-    NoCoupon,
+    NoCoupon(Option<String>),
     Shipping(String),
 }
 
@@ -113,7 +113,7 @@ async fn cart_op(k: &Kernel, r: &Req<'_>, op: CartOp) -> Result<Value> {
             CartOp::SetQty(line, q) => cart::set_qty(k, &r.ctx, &mut tx, &store, &cart, line, *q).await?,
             CartOp::Details(body) => cart::set_details(k, &r.ctx, &mut tx, &store, &cart, body).await?,
             CartOp::Coupon(code) => cart::apply_coupon(k, &r.ctx, &mut tx, &store, &cart, code).await?,
-            CartOp::NoCoupon => cart::remove_coupon(k, &r.ctx, &mut tx, &cart).await?,
+            CartOp::NoCoupon(code) => cart::remove_coupon(k, &r.ctx, &mut tx, &cart, code.as_deref()).await?,
             CartOp::Shipping(rule) => cart::set_shipping(k, &r.ctx, &mut tx, &cart, rule).await?,
         };
         let view = cart::view(k, &r.ctx, &mut tx, &store, &cart).await?;
@@ -227,7 +227,8 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         ("DELETE", ["cart", "items", line]) => ok(cart_op(k, r, CartOp::SetQty(line.to_string(), Decimal::ZERO)).await?),
         ("PUT" | "PATCH", ["cart", "details"]) => ok(cart_op(k, r, CartOp::Details(r.body()?)).await?),
         ("PUT", ["cart", "coupon"]) => ok(cart_op(k, r, CartOp::Coupon(text(&r.body()?, "code")?.to_string())).await?),
-        ("DELETE", ["cart", "coupon"]) => ok(cart_op(k, r, CartOp::NoCoupon).await?),
+        ("DELETE", ["cart", "coupon"]) => ok(cart_op(k, r, CartOp::NoCoupon(None)).await?),
+        ("DELETE", ["cart", "codes", code]) => ok(cart_op(k, r, CartOp::NoCoupon(Some(code.to_string()))).await?),
         ("GET", ["cart", "shipping-options"]) => ok(shipping_options(k, r).await?),
         ("PUT", ["cart", "shipping"]) => ok(cart_op(k, r, CartOp::Shipping(text(&r.body()?, "shipping_method")?.to_string())).await?),
         ("POST", ["checkout"]) => {
