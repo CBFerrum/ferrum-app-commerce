@@ -97,3 +97,20 @@
   rules:
     - {name: reviewer_known, check: "doc.reviewer_email != null || doc.customer != null", message: "A review needs the reviewer's email or customer"}
   list: {columns: [website_item, rating, title, reviewer_name, status, verified_purchase], sort: created_at desc}
+
+- name: StockAlert
+  label: Stock Alert
+  kind: document
+  module: commerce
+  title_field: item_title
+  search_fields: [email, item_title]
+  description: "A shopper asked to be told when an out of stock item is back: told once, when it is."
+  fields:
+    - {name: website_item, type: link, to: WebsiteItem, required: true, read_only: true, on_delete: cascade, in_filter: true}
+    - {name: item_title, type: data, read_only: true, max_length: 200, in_list: true}
+    - {name: item_slug, type: data, read_only: true, max_length: 200}
+    - {name: email, type: email, required: true, read_only: true, in_list: true}
+    - {name: status, type: select, options: [Waiting, Sent], default: Waiting, read_only: true, in_list: true, in_filter: true}
+    - {name: sent_at, type: datetime, read_only: true}
+  indexes: [[status, website_item]]
+  list: {columns: [item_title, email, status, created_at], sort: created_at desc}

@@ -1076,6 +1076,40 @@ pub fn decimal_param(raw: Option<&str>, name: &str) -> Result<Option<Decimal>> {
     }
 }
 
+/// A shopper asks to be told when an out of stock item is back: once, by e-mail. The same address asking again
+/// for the same item changes nothing; an item that can be bought now is not asked about; ten waiting alerts an
+/// address is the most.
+pub async fn stock_alert(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: &str, email: &str) -> Result<Value> {
+    let email = email.trim().to_lowercase();
+    if email.len() > 254 || email.split('@').count() != 2 || email.starts_with('@') || email.ends_with('@') || email.chars().any(char::is_whitespace) {
+        return Err(Error::field("email", "is not an e-mail address"));
+    }
+    if ctx.schema.entity("StockAlert").is_none() {
+        return Err(Error::NotFound("stock alerts".into()));
+    }
+    let wi = published_by_slug(k, ctx, tx, slug).await?;
+    let (wid, item) = (id(&wi, "id").ok_or_else(|| Error::NotFound("item".into()))?, id(&wi, "item").ok_or_else(|| Error::NotFound("item".into()))?);
+    let stocked = stock_items(tx, ctx.tenant, &[item]).await?;
+    if !stocked.contains(&item)
+        || !store.enforce_stock
+        || available(tx, ctx.tenant, store, &[item]).await?.get(&item).copied().unwrap_or_default() > Decimal::ZERO
+    {
+        return Err(Error::invalid("this item is in stock: you can order it now"));
+    }
+    let sctx = ferrum_domain::util::sys(ctx);
+    let mine = find(k, &sctx, tx, "StockAlert", vec![Filter::eq("email", email.clone()), Filter::eq("status", "Waiting")], None, 20).await?;
+    if mine.iter().any(|a| id(a, "website_item") == Some(wid)) {
+        return Ok(json!({"status": "Waiting"}));
+    }
+    if mine.len() >= 10 {
+        return Err(Error::invalid("you are waiting for ten items already: we will write when one is back"));
+    }
+    let made =
+        json!({"website_item": wid.to_string(), "item_title": s(&wi, "title").or(s(&wi, "item_name")), "item_slug": slug, "email": email, "status": "Waiting"});
+    k.insert_tx(&sctx, tx, "StockAlert", made.as_object().cloned().unwrap_or_default()).await?;
+    Ok(json!({"status": "Waiting"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

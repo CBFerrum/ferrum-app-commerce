@@ -19,10 +19,26 @@ pub async fn message(
     values: serde_json::Map<String, serde_json::Value>,
     secret: Vec<String>,
 ) -> Result<()> {
+    about(k, tx, ctx, template, "SalesOrder", so, to, values, secret).await
+}
+
+/// The same for a message about another record (a cart, a stock alert).
+#[allow(clippy::too_many_arguments)]
+pub async fn about(
+    k: &Kernel,
+    tx: &mut Tx,
+    ctx: &ferrum_kernel::Ctx,
+    template: &str,
+    entity: &str,
+    so: Uuid,
+    to: Option<&str>,
+    values: serde_json::Map<String, serde_json::Value>,
+    secret: Vec<String>,
+) -> Result<()> {
     let Some(to) = to.map(str::trim).filter(|t| t.contains('@')) else { return Ok(()) };
     let m = ferrum_kernel::messages::Message {
         template: template.into(),
-        entity: Some("SalesOrder".into()),
+        entity: Some(entity.into()),
         record: Some(so),
         to: vec![ferrum_kernel::messages::Recipient::address(to)],
         values,

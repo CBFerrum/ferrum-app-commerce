@@ -367,6 +367,14 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
         paid_id,
     )
     .await?;
+    if paid_for == "SalesOrder" {
+        // The shopper is told their payment arrived (an order's: an invoice's is another app's to tell).
+        let mut values = serde_json::Map::new();
+        values.insert("amount".into(), json!(crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), store.precision)));
+        values.insert("method".into(), json!(store.method(&gateway).map(|m| m.label.clone()).unwrap_or_else(|| gateway.clone())));
+        values.insert("link".into(), json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), &paid_number, paid_id).await?));
+        crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.payment_received", paid_id, s(doc, "payer_email"), values, vec![]).await?;
+    }
     let (topic, key) = if paid_for == "SalesOrder" { ("commerce.order_paid", "sales_order") } else { ("commerce.invoice_paid", "sales_invoice") };
     let event = json!({key: paid_id, "number": paid_number, "payment_request": pr_id, "payment_entry": pe_id, "amount": money(amount),
                        "currency": s(doc, "currency_code"), "gateway": gateway, "email": s(doc, "payer_email")});
@@ -397,6 +405,15 @@ async fn mark_failed(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<
         refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
         let event = json!({"sales_order": so, "number": s(doc, "order_number"), "payment_request": pr_id, "reason": reason, "email": s(doc, "payer_email")});
         outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.payment_failed", Some("SalesOrder"), Some(so), event).await?;
+        // And told, with the link where it can be tried again.
+        let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
+        let mut values = serde_json::Map::new();
+        values.insert("reason".into(), json!(reason));
+        values.insert(
+            "link".into(),
+            json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), s(doc, "order_number").unwrap_or_default(), so).await?),
+        );
+        crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.payment_failed", so, s(doc, "payer_email"), values, vec![]).await?;
     }
     Ok(json!({"status": "Failed"}))
 }
