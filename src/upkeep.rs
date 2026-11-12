@@ -47,6 +47,9 @@ async fn for_tenant(k: &Kernel, tenant: Uuid) -> Result<()> {
     };
     expire_requests(k, &ctx, store.as_ref()).await?;
     if let Some(store) = store {
+        let mut tx = k.db.tenant_tx(tenant).await?;
+        crate::store::mark_delivery_charge(&mut tx, tenant, store.shipping_item).await?;
+        tx.commit().await?;
         carts(k, &ctx, &store).await?;
     }
     Ok(())

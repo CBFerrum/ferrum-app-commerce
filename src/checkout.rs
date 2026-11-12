@@ -177,6 +177,13 @@ async fn verify_lines(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
     let mut wanted: BTreeMap<Uuid, Decimal> = BTreeMap::new();
     for (i, l) in lines.iter().enumerate() {
         let name = s(l, "item_name").unwrap_or("an item").to_string();
+        // A promotion's free item is the promotion's: only its stock is checked.
+        if cart::promoted(l) {
+            if let Some(item) = id(l, "item") {
+                *wanted.entry(item).or_default() += d(l, "qty");
+            }
+            continue;
+        }
         let wi = match id(l, "website_item") {
             Some(w) => cart::website_item(k, ctx, tx, &w.to_string()).await,
             None => Err(Error::NotFound("item".into())),
@@ -231,8 +238,10 @@ async fn verify_lines(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
 }
 
 async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, customer: Uuid, ship_to: Option<Uuid>) -> Result<Doc> {
+    // A promotion's free items are added by the order's own promotions, as they were on the cart.
     let items: Vec<Value> = rows(cart, "items")
         .iter()
+        .filter(|l| !cart::promoted(l))
         .map(|l| {
             // Explicit prices and discounts: the order is priced exactly like the cart was.
             let discount = if l.get("discount_percent").is_none_or(Value::is_null) { money(Decimal::ZERO) } else { money(d(l, "discount_percent")) };
@@ -242,7 +251,7 @@ async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
         .collect();
     let paid_online = d(cart, "rounded_total") > Decimal::ZERO;
     let mut so = Doc::new();
-    for f in ["company", "currency", "conversion_rate", "price_list", "tax_template"] {
+    for f in ["company", "currency", "conversion_rate", "price_list", "tax_template", "channel", "promotion_codes"] {
         so.insert(f.into(), cart.get(f).cloned().unwrap_or(Value::Null));
     }
     set(&mut so, "customer", customer.to_string());
@@ -458,6 +467,7 @@ mod tests {
             abandon_after_hours: 24,
             cart_expiry_days: 30,
             cancel_unpaid_orders: true,
+            channel: "Web Shop".into(),
         }
     }
 
