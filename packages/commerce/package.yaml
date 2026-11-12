@@ -1,5 +1,5 @@
 package: commerce
-version: 0.3.0
+version: 0.4.0
 label: Commerce
 description: Online store on the same items, prices, stock and books - catalog with categories and reviews, carts, guest and customer checkout into sales orders, payment requests for gateway plugins, shipping rules and coupon codes.
 depends: [core, selling, inventory, accounting]
@@ -14,6 +14,8 @@ overlays:
       - {op: add_field, after: po_no, field: {name: commerce_web_order, type: check, label: Web Order, read_only: true, in_filter: true}}
       - {op: add_field, after: commerce_web_order, field: {name: commerce_payment_status, type: select, label: Web Payment, read_only: true, in_filter: true,
           options: [Pending, Paid, Failed, Expired, Cancelled, Not Required, Partly Refunded, Refunded]}}
+      - {op: add_field, after: commerce_payment_status, field: {name: commerce_fulfilment_status, type: select, label: Fulfilment, read_only: true, in_filter: true,
+          options: [Unfulfilled, Partly Fulfilled, Fulfilled], description: "Follows the order's deliveries: shipped in parts, or all of it"}}
       - {op: add_field, after: commerce_payment_status, field: {name: commerce_payment_method, type: data, label: Web Payment Method, read_only: true, max_length: 40, in_filter: true}}
       - {op: add_field, field: {name: commerce_contact_email, type: email, label: Contact Email, read_only: true}}
       - {op: add_field, field: {name: commerce_contact_phone, type: phone, label: Contact Phone, read_only: true}}
@@ -22,12 +24,15 @@ overlays:
       - {op: add_field, field: {name: commerce_shipping_rule, type: link, to: ShippingRule, label: Shipping Method, read_only: true}}
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
+      - {op: add_field, field: {name: commerce_paid_by_card, type: currency, label: Paid by Gift Card, read_only: true, description: "Taken from a gift card at checkout: the order was invoiced then, as stored value pays invoices"}}
+      - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
       - {op: add_action, action: {name: web_ship, label: Ship Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
-          confirm: "Ship everything still to deliver on this order? Stock leaves the warehouse.",
-          params: [{name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
-                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: Create the invoice too, type: select, options: ["Yes", "No"]}]}}
+          confirm: "Ship this order, or the lines chosen? Stock leaves the warehouses.",
+          params: [{name: lines, label: "Lines (empty: everything left)", type: text, description: "A JSON list of {line, qty, warehouse}: the order line's id, how many (empty: all left), and a store warehouse to ship it from (empty: the one the order reserved it in)"},
+                   {name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}]}}
       - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
           confirm: "Create the invoice for this delivered order?"}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
@@ -66,6 +71,8 @@ roles:
       - {entity: ShippingRule, read: true, write: true, create: true, delete: true}
       - {entity: CouponCode, read: true, write: true, create: true, delete: true, export: true, import: true}
       - {entity: PricingRule, read: true, write: true, create: true}
+      - {entity: Promotion, read: true, write: true, create: true}
+      - {entity: PromotionCode, read: true, write: true, create: true, export: true, import: true}
       - {entity: ShoppingCart, read: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
       - {entity: PaymentException, read: true, write: true, export: true}
@@ -119,6 +126,26 @@ roles:
     permissions:
       - {entity: PaymentRequest, read: true, write: true}
       - {entity: OrderRefund, read: true}
+
+messages:
+  - key: commerce.order_shipped
+    label: A shipment of a web order left
+    entity: SalesOrder
+    values: [lines, carrier, tracking_number, tracking_url, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} has shipped"
+          body: "<p>Your order {{ doc.number }} has left us{% if values.lines %}: {% for l in values.lines %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}.</p>{% if values.carrier and values.tracking_number %}<p>{{ values.carrier }} has it, parcel {{ values.tracking_number }}.</p>{% elif values.carrier %}<p>{{ values.carrier }} has it.</p>{% elif values.tracking_number %}<p>Its parcel is {{ values.tracking_number }}.</p>{% endif %}{% if values.tracking_url %}<p>Where the carrier shows it: {{ values.tracking_url }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+  - key: commerce.gift_card_issued
+    label: A gift card bought in the store
+    entity: SalesOrder
+    values: [code, pin, amount, store]
+    languages:
+      en:
+        email:
+          subject: "Your gift card from {{ values.store }}"
+          body: "<p>Here is the gift card you bought with order {{ doc.number }}, holding {{ values.amount }}.</p><p>Its code: <strong>{{ values.code }}</strong>{% if values.pin %}, PIN <strong>{{ values.pin }}</strong>{% endif %}</p><p>Keep this message: we do not keep the code and cannot send it again.</p>"
 
 seed:
   - entity: ReturnReason
