@@ -14,6 +14,8 @@ overlays:
       - {op: add_field, after: po_no, field: {name: commerce_web_order, type: check, label: Web Order, read_only: true, in_filter: true}}
       - {op: add_field, after: commerce_web_order, field: {name: commerce_payment_status, type: select, label: Web Payment, read_only: true, in_filter: true,
           options: [Pending, Paid, Failed, Expired, Cancelled, Not Required, Partly Refunded, Refunded]}}
+      - {op: add_field, after: commerce_payment_status, field: {name: commerce_fulfilment_status, type: select, label: Fulfilment, read_only: true, in_filter: true,
+          options: [Unfulfilled, Partly Fulfilled, Fulfilled], description: "Follows the order's deliveries: shipped in parts, or all of it"}}
       - {op: add_field, after: commerce_payment_status, field: {name: commerce_payment_method, type: data, label: Web Payment Method, read_only: true, max_length: 40, in_filter: true}}
       - {op: add_field, field: {name: commerce_contact_email, type: email, label: Contact Email, read_only: true}}
       - {op: add_field, field: {name: commerce_contact_phone, type: phone, label: Contact Phone, read_only: true}}
@@ -27,9 +29,10 @@ overlays:
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
       - {op: add_action, action: {name: web_ship, label: Ship Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
-          confirm: "Ship everything still to deliver on this order? Stock leaves the warehouse.",
-          params: [{name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
-                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: Create the invoice too, type: select, options: ["Yes", "No"]}]}}
+          confirm: "Ship this order, or the lines chosen? Stock leaves the warehouses.",
+          params: [{name: lines, label: "Lines (empty: everything left)", type: text, description: "A JSON list of {line, qty, warehouse}: the order line's id, how many (empty: all left), and a store warehouse to ship it from (empty: the one the order reserved it in)"},
+                   {name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}]}}
       - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
           confirm: "Create the invoice for this delivered order?"}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
@@ -125,6 +128,15 @@ roles:
       - {entity: OrderRefund, read: true}
 
 messages:
+  - key: commerce.order_shipped
+    label: A shipment of a web order left
+    entity: SalesOrder
+    values: [lines, carrier, tracking_number, tracking_url, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} has shipped"
+          body: "<p>Your order {{ doc.number }} has left us{% if values.lines %}: {% for l in values.lines %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}.</p>{% if values.carrier and values.tracking_number %}<p>{{ values.carrier }} has it, parcel {{ values.tracking_number }}.</p>{% elif values.carrier %}<p>{{ values.carrier }} has it.</p>{% elif values.tracking_number %}<p>Its parcel is {{ values.tracking_number }}.</p>{% endif %}{% if values.tracking_url %}<p>Where the carrier shows it: {{ values.tracking_url }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
   - key: commerce.gift_card_issued
     label: A gift card bought in the store
     entity: SalesOrder

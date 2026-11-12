@@ -1396,6 +1396,84 @@ async fn gift_cards() {
     assert_eq!(dec(&t.get("StoredValueAccount", uid(&account)).await["balance"]), n("472"), "back onto the card that paid");
 }
 
+#[test]
+fn fulfilment_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(fulfilment()).await.unwrap() });
+}
+
+/// An order ships in parts and from two warehouses: each line is reserved where its stock is (so
+/// what the shop showed as available is what ships), the desk ships part of a line now from another
+/// warehouse and the rest later, each shipment its own note with its own tracking and message, and
+/// the order's fulfilment follows; the shipment that completes it invoices it.
+async fn fulfilment() {
+    let Shop { t, cid, stores, products, nos, selling, mug, .. } = small_shop("fulfilment").await;
+    let c = cid.to_string();
+    let annex = t.insert("Warehouse", json!({"warehouse_name": "Annex", "company": c})).await;
+    let cap = uid(&t.insert("Item", json!({"item_code": "CAP", "item_name": "Cap", "item_group": products["id"], "stock_uom": nos["id"]})).await);
+    t.insert("ItemPrice", json!({"item": cap.to_string(), "price_list": selling["id"], "rate": "150"})).await;
+    t.insert("WebsiteItem", json!({"item": cap.to_string(), "published": true})).await;
+    let opening = t
+        .insert(
+            "StockEntry",
+            json!({"company": c, "purpose": "Opening Stock", "items": [
+                {"item": cap.to_string(), "qty": "4", "basic_rate": "60", "target_warehouse": annex["id"]},
+                {"item": mug.to_string(), "qty": "5", "basic_rate": "90", "target_warehouse": annex["id"]}]}),
+        )
+        .await;
+    t.submit("StockEntry", uid(&opening)).await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"warehouses": [{"warehouse": stores["id"]}, {"warehouse": annex["id"]}]})), None)
+        .await
+        .unwrap();
+    assert_eq!(t.available("cap").await, n("4"), "the cap is only in the annex, and the shop counts the annex");
+
+    let placed = place(&t, json!([{"item": "blue-mug", "qty": 3}, {"item": "cap", "qty": 2}]), GUEST, "Cash on Delivery", "ship-parts-01").await;
+    let so = t.get("SalesOrder", placed.so).await;
+    let line = |item: Uuid| so["items"].as_array().unwrap().iter().find(|l| l["item"] == json!(item.to_string())).unwrap().clone();
+    let (mug_line, cap_line) = (line(mug), line(cap));
+    assert_eq!((mug_line["warehouse"].clone(), cap_line["warehouse"].clone()), (stores["id"].clone(), annex["id"].clone()), "each line where its stock is");
+    assert_eq!(so["commerce_fulfilment_status"], json!("Unfulfilled"));
+
+    // Part of the mugs now, from the annex (the desk's choice), with their own tracking.
+    let bad = t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"lines": [{"line": mug_line["id"], "qty": "9"}]})).await;
+    assert!(matches!(&bad, Err(Error::Validation(f)) if f[0].message.contains("at most 3")), "{bad:?}");
+    let first = t
+        .k
+        .run_action(
+            &t.ctx,
+            "SalesOrder",
+            placed.so,
+            "web_ship",
+            json!({"lines": json!([{"line": mug_line["id"], "qty": "1", "warehouse": annex["id"]}]).to_string(), "carrier": "BlueDart", "tracking_number": "BD1"}),
+        )
+        .await
+        .expect("first shipment");
+    assert_eq!((first["fulfilment"].clone(), first["sales_invoice"].clone()), (json!("Partly Fulfilled"), Value::Null), "not invoiced until it is all out");
+    let note = t.get("DeliveryNote", first["delivery_note"]["id"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(note["items"].as_array().unwrap().len(), 1);
+    assert_eq!((note["items"][0]["warehouse"].clone(), dec(&note["items"][0]["qty"])), (annex["id"].clone(), n("1")));
+    assert_eq!(t.get("SalesOrder", placed.so).await["commerce_fulfilment_status"], json!("Partly Fulfilled"));
+
+    // The rest, each line from where the order reserved it.
+    let second = t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"tracking_number": "BD2"})).await.expect("second shipment");
+    assert_eq!(second["fulfilment"], json!("Fulfilled"));
+    assert!(second["sales_invoice"]["id"].is_string(), "the shipment that completes the order invoices it");
+    let note = t.get("DeliveryNote", second["delivery_note"]["id"].as_str().unwrap().parse().unwrap()).await;
+    let from: Vec<(Value, Decimal)> = note["items"].as_array().unwrap().iter().map(|l| (l["warehouse"].clone(), dec(&l["qty"]))).collect();
+    assert!(from.contains(&(stores["id"].clone(), n("2"))) && from.contains(&(annex["id"].clone(), n("2"))), "{from:?}");
+    let so = t.get("SalesOrder", placed.so).await;
+    assert_eq!(so["commerce_fulfilment_status"], json!("Fulfilled"));
+
+    let shipped: Vec<_> = mails(&t, GUEST).await.into_iter().filter(|(s, _)| s.contains("has shipped")).collect();
+    assert_eq!(shipped.len(), 2, "told of each shipment");
+    assert!(shipped[0].1.contains("1 × Blue Mug") && shipped[0].1.contains("parcel BD1"), "{shipped:?}");
+    assert!(shipped[1].1.contains("Its parcel is BD2") && shipped[1].1.contains("Cap"), "{shipped:?}");
+    let order = t.ok(None, "POST", "/orders/lookup", &[], Some(json!({"number": placed.number, "email": GUEST, "token": placed.token}))).await["order"].clone();
+    assert_eq!((order["fulfilment"].clone(), order["shipments"].as_array().map(Vec::len)), (json!("Fulfilled"), Some(2)), "{order}");
+}
+
 async fn refunds() {
     let Shop { t, tenant, mug, tee, .. } = small_shop("refunds").await;
     // ───────────── who is who ─────────────

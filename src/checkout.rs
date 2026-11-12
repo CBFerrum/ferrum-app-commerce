@@ -4,7 +4,7 @@
 //! status come from the server; the client only chooses (payment method, details).
 
 use crate::cart::{self, address_text, goods};
-use crate::catalog::{available, stock_items};
+use crate::catalog::{allocate, available, available_by_warehouse, stock_items};
 use crate::store::Store;
 use crate::{coupon, gift_card, orders, payment, token};
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
@@ -238,15 +238,28 @@ async fn verify_lines(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
 }
 
 async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, customer: Uuid, ship_to: Option<Uuid>) -> Result<Doc> {
+    // Each stock line from a warehouse that holds it (`catalog::allocate`), so what the shop counted
+    // as available is where the line is reserved and shipped from.
+    let lines: Vec<Doc> = rows(cart, "items").into_iter().filter(|l| !cart::promoted(l)).collect();
+    let wanted: Vec<Uuid> = lines.iter().filter_map(|l| id(l, "item")).collect();
+    let stocked = stock_items(tx, ctx.tenant, &wanted).await?;
+    let mut left = available_by_warehouse(tx, ctx.tenant, store, &wanted).await?;
+    let mut from = Vec::new();
+    for l in &lines {
+        from.push(match id(l, "item").filter(|i| stocked.contains(i)) {
+            Some(item) => allocate(store, &mut left, item, d(l, "qty")),
+            None => store.fulfilment_warehouse,
+        });
+    }
     // A promotion's free items are added by the order's own promotions, as they were on the cart.
-    let items: Vec<Value> = rows(cart, "items")
+    let items: Vec<Value> = lines
         .iter()
-        .filter(|l| !cart::promoted(l))
-        .map(|l| {
+        .zip(&from)
+        .map(|(l, warehouse)| {
             // Explicit prices and discounts: the order is priced exactly like the cart was.
             let discount = if l.get("discount_percent").is_none_or(Value::is_null) { money(Decimal::ZERO) } else { money(d(l, "discount_percent")) };
             json!({"item": s(l, "item"), "qty": money(d(l, "qty")), "price_list_rate": money(d(l, "price_list_rate")), "discount_percent": discount,
-                   "warehouse": store.fulfilment_warehouse.to_string()})
+                   "warehouse": warehouse.to_string()})
         })
         .collect();
     let paid_online = d(cart, "rounded_total") > Decimal::ZERO;
@@ -263,6 +276,7 @@ async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
     }
     set(&mut so, "commerce_web_order", true);
     set(&mut so, "commerce_payment_status", if paid_online { "Pending" } else { "Not Required" });
+    set(&mut so, "commerce_fulfilment_status", "Unfulfilled");
     set(&mut so, "commerce_contact_email", json!(s(cart, "email")));
     set(&mut so, "commerce_contact_phone", json!(s(cart, "phone")));
     set(&mut so, "commerce_shipping_address", json!(address_text(cart, "ship")));

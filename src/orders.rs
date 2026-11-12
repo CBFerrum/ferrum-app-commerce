@@ -142,6 +142,7 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
         "date": s(so, "posting_date"),
         "status": s(so, "status"),
         "delivered_percent": m(d(so, "per_delivered")),
+        "fulfilment": crate::ship::fulfilment(d(so, "per_delivered")),
         "payment_status": s(so, "commerce_payment_status"),
         "payment_method": s(so, "commerce_payment_method"),
         "steps": steps(s(so, "commerce_payment_status"), s(so, "commerce_payment_method"), !shipments.is_empty()),

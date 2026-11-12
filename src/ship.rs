@@ -9,7 +9,8 @@ use crate::payment::param_text;
 use crate::store::Store;
 use crate::{orders, token};
 use async_trait::async_trait;
-use ferrum_domain::util::{b, d, elevated, id, rows, s, set};
+use ferrum_domain::util::{b, d, elevated, id, money, rows, s, set};
+use ferrum_kernel::messages::{self, Message, Recipient};
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, HookCtx, Result, outbox};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -54,9 +55,66 @@ async fn invoice(hc: &mut HookCtx<'_>, actor: &Ctx, so: Uuid) -> Result<Value> {
     Ok(json!({"id": sid, "number": s(&posted, "number")}))
 }
 
-/// Ships everything still to deliver on a web order: one delivery note with the carrier and tracking
-/// the desk gave, submitted, and (unless the caller says no) the invoice, which applies the shopper's
-/// payment. Told to the shopper through `commerce.order_shipped` when the note says so.
+/// One line of a shipment the desk chose: an order line, how much of it, and from where.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Pick {
+    line: String,
+    qty: Option<Decimal>,
+    warehouse: Option<Uuid>,
+}
+
+/// `lines` from the desk: a list (or its JSON text) of `{line, qty?, warehouse?}`; none: everything left.
+pub(crate) fn picks(params: &Value) -> Result<Option<Vec<Pick>>> {
+    let raw = match params.get("lines") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(t)) if t.trim().is_empty() => return Ok(None),
+        Some(Value::String(t)) => serde_json::from_str::<Value>(t).map_err(|_| Error::field("lines", "is not a JSON list of lines"))?,
+        Some(v) => v.clone(),
+    };
+    let Value::Array(list) = raw else { return Err(Error::field("lines", "must be a list of {line, qty, warehouse}")) };
+    let mut out = Vec::new();
+    for v in &list {
+        let line = v.get("line").and_then(Value::as_str).ok_or_else(|| Error::field("lines", "each names its order line"))?.to_string();
+        let qty = match v.get("qty") {
+            None | Some(Value::Null) => None,
+            Some(q) => Some(
+                q.as_str()
+                    .map(str::to_string)
+                    .or_else(|| q.as_number().map(|n| n.to_string()))
+                    .and_then(|t| t.trim().parse::<Decimal>().ok())
+                    .filter(|q| *q > Decimal::ZERO)
+                    .ok_or_else(|| Error::field("lines", "a quantity is a number above nothing"))?,
+            ),
+        };
+        let warehouse = match v.get("warehouse").and_then(Value::as_str) {
+            Some(w) => Some(w.parse().map_err(|_| Error::field("lines", "a warehouse is named by its id"))?),
+            None => None,
+        };
+        out.push(Pick { line, qty, warehouse });
+    }
+    if out.is_empty() {
+        return Err(Error::field("lines", "choose what ships"));
+    }
+    Ok(Some(out))
+}
+
+/// A web order's fulfilment as the shopper and the desk read it.
+pub(crate) fn fulfilment(per_delivered: Decimal) -> &'static str {
+    if per_delivered >= Decimal::ONE_HUNDRED {
+        "Fulfilled"
+    } else if per_delivered > Decimal::ZERO {
+        "Partly Fulfilled"
+    } else {
+        "Unfulfilled"
+    }
+}
+
+/// Ships a web order, all that is left or the lines and quantities the desk chose (`lines`), each line
+/// from its own warehouse (the one the order reserved it in, unless the desk names another of the
+/// store's): one delivery note with the carrier and tracking the desk gave, submitted. The shipment
+/// that completes the order invoices it too (unless the caller says no), which applies the shopper's
+/// payment; an order shipped in parts stays open to changes until then. Told to the shopper through
+/// `commerce.order_shipped` and the `commerce.order_shipped` message when the note says so.
 pub async fn web_ship(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Value> {
     guard(hc, so)?;
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
@@ -69,10 +127,36 @@ pub async fn web_ship(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<
     if link.as_deref().is_some_and(|l| !l.starts_with("https://")) {
         return Err(Error::field("tracking_url", "must be an https:// address"));
     }
+    let chosen = picks(params)?;
+    let store = Store::load(hc.kernel, hc.ctx, hc.tx).await?;
+    if let Some(bad) = chosen.iter().flatten().filter_map(|p| p.warehouse).find(|w| !store.warehouses.contains(w)) {
+        return Err(Error::field("lines", format!("{bad} is not one of the store's warehouses")));
+    }
     let actor = elevated(hc.ctx);
     let made = hc.kernel.run_action_tx(&actor, hc.tx, "SalesOrder", so_id, "make_delivery_note", &json!({})).await?;
     let dn = made_id(&made)?;
     let mut patch = Doc::new();
+    if let Some(chosen) = &chosen {
+        let draft = hc.kernel.get_tx(&actor, hc.tx, "DeliveryNote", dn, false).await?;
+        let lines = rows(&draft, "items");
+        let mut kept = Vec::new();
+        for p in chosen {
+            let Some(l) = lines.iter().find(|l| s(l, "so_line") == Some(p.line.as_str())) else {
+                return Err(Error::field("lines", "a line chosen is not one of this order's still to ship"));
+            };
+            let left = d(l, "qty");
+            let qty = p.qty.unwrap_or(left);
+            if qty > left {
+                return Err(Error::field("lines", format!("at most {} of {} is left to ship", left.normalize(), s(l, "item_name").unwrap_or("an item"))));
+            }
+            let mut row = json!({"id": s(l, "id"), "qty": money(qty)});
+            if let Some(w) = p.warehouse {
+                row["warehouse"] = json!(w.to_string());
+            }
+            kept.push(row);
+        }
+        set(&mut patch, "items", Value::Array(kept));
+    }
     set(&mut patch, "commerce_notify", yes(params, "notify"));
     if let Some(c) = carrier {
         set(&mut patch, "transporter", c);
@@ -85,9 +169,12 @@ pub async fn web_ship(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<
     }
     hc.kernel.update_tx(&actor, hc.tx, "DeliveryNote", dn, patch, None).await?;
     let sent = hc.kernel.submit_tx(&actor, hc.tx, "DeliveryNote", dn, None).await?;
-    // An order a gift card paid was invoiced at checkout.
-    let invoiced = if yes(params, "invoice") && d(so, "per_billed") < Decimal::ONE_HUNDRED { Some(invoice(hc, &actor, so_id).await?) } else { None };
-    Ok(json!({"delivery_note": {"id": dn, "number": s(&sent, "number")}, "sales_invoice": invoiced}))
+    let after = hc.kernel.get_tx(&actor, hc.tx, "SalesOrder", so_id, false).await?;
+    // The shipment that completes the order invoices it, unless a gift card's checkout already did.
+    let complete = d(&after, "per_delivered") >= Decimal::ONE_HUNDRED;
+    let invoiced =
+        if complete && yes(params, "invoice") && d(&after, "per_billed") < Decimal::ONE_HUNDRED { Some(invoice(hc, &actor, so_id).await?) } else { None };
+    Ok(json!({"delivery_note": {"id": dn, "number": s(&sent, "number")}, "fulfilment": fulfilment(d(&after, "per_delivered")), "sales_invoice": invoiced}))
 }
 
 /// Invoices a web order that has been delivered.
@@ -145,19 +232,36 @@ impl DocHook for DeliveryHook {
                 "notify": b(doc, "commerce_notify"), "order_link": link, "ship_to": s(&so, "commerce_shipping_address"),
             });
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_shipped", Some("SalesOrder"), Some(so_id), event).await?;
-            if b(doc, "commerce_notify") {
-                let mut lines = vec![format!("Your order {number} has left us.")];
-                match (s(doc, "transporter"), s(doc, "commerce_tracking_number")) {
-                    (Some(c), Some(t)) => lines.push(format!("{c} has it, parcel {t}.")),
-                    (Some(c), None) => lines.push(format!("{c} has it.")),
-                    (None, Some(t)) => lines.push(format!("Its parcel is {t}.")),
-                    (None, None) => {}
+            let mut v = Doc::new();
+            set(&mut v, "commerce_fulfilment_status", fulfilment(d(&so, "per_delivered")));
+            hc.kernel.set_values_tx(&ferrum_domain::util::sys(hc.ctx), hc.tx, "SalesOrder", so_id, v).await?;
+            if b(doc, "commerce_notify")
+                && let Some(to) = s(&so, "commerce_contact_email")
+            {
+                let lines: Vec<Value> = rows(doc, "items")
+                    .iter()
+                    .filter(|l| id(l, "sales_order") == Some(so_id))
+                    .map(|l| json!(format!("{} × {}", d(l, "qty").normalize(), s(l, "item_name").unwrap_or_default())))
+                    .collect();
+                let mut values = serde_json::Map::new();
+                for (k, v) in [
+                    ("lines", Value::Array(lines)),
+                    ("carrier", json!(s(doc, "transporter"))),
+                    ("tracking_number", json!(s(doc, "commerce_tracking_number"))),
+                    ("tracking_url", json!(s(doc, "commerce_tracking_url"))),
+                    ("link", json!(link)),
+                ] {
+                    values.insert(k.into(), v);
                 }
-                if let Some(u) = s(doc, "commerce_tracking_url") {
-                    lines.push(format!("Where the carrier shows it: {u}"));
-                }
-                let to = s(&so, "commerce_contact_email");
-                crate::tell::shopper(hc.kernel, hc.tx, hc.ctx.tenant, to, &format!("Your order {number} has shipped"), &lines, link.as_deref()).await?;
+                let m = Message {
+                    template: "commerce.order_shipped".into(),
+                    entity: Some("SalesOrder".into()),
+                    record: Some(so_id),
+                    to: vec![Recipient::address(to)],
+                    values,
+                    ..Default::default()
+                };
+                messages::send(hc.kernel, hc.tx, hc.ctx, &m).await?;
             }
         }
         Ok(())
@@ -172,5 +276,20 @@ mod tests {
     fn yes_and_no_from_a_form_or_the_desk() {
         assert!(yes(&json!({}), "notify") && yes(&json!({"notify": "Yes"}), "notify") && yes(&json!({"notify": true}), "notify"));
         assert!(!yes(&json!({"notify": "No"}), "notify") && !yes(&json!({"notify": false}), "notify") && !yes(&json!({"notify": " no "}), "notify"));
+    }
+
+    #[test]
+    fn the_desk_chooses_lines_quantities_and_warehouses() {
+        let w = Uuid::now_v7();
+        assert_eq!(picks(&json!({})).unwrap(), None, "nothing chosen: everything left");
+        let text = json!({"lines": format!(r#"[{{"line": "a", "qty": "2"}}, {{"line": "b", "warehouse": "{w}"}}]"#)});
+        assert_eq!(
+            picks(&text).unwrap().unwrap(),
+            vec![Pick { line: "a".into(), qty: Some(Decimal::TWO), warehouse: None }, Pick { line: "b".into(), qty: None, warehouse: Some(w) }]
+        );
+        assert!(
+            picks(&json!({"lines": [{"line": "a", "qty": "0"}]})).is_err() && picks(&json!({"lines": []})).is_err() && picks(&json!({"lines": "{"})).is_err()
+        );
+        assert_eq!((fulfilment(Decimal::ZERO), fulfilment(Decimal::TEN), fulfilment(Decimal::ONE_HUNDRED)), ("Unfulfilled", "Partly Fulfilled", "Fulfilled"));
     }
 }
