@@ -128,6 +128,12 @@ pub struct Store {
     pub languages: Vec<String>,
 }
 
+/// The company Store Settings name; `None` while the store is not set up (a workspace that has just installed Commerce).
+pub async fn company(k: &Kernel, ctx: &Ctx, tx: &mut Tx) -> Result<Option<Uuid>> {
+    let found = k.find_tx(&sys(ctx), tx, "StoreSettings", &[], None, 1).await?;
+    Ok(found.first().and_then(|r| id(r, "company")))
+}
+
 impl Store {
     /// The tenant's store; `NotFound` until Store Settings exist (the storefront is then closed).
     pub async fn load(k: &Kernel, ctx: &Ctx, tx: &mut Tx) -> Result<Store> {

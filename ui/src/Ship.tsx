@@ -3,7 +3,7 @@
 // server says so and nothing is left half done.
 
 import { type FormEvent, useState } from "react";
-import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
+import { api, docPath, refusal, t, isolate } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
 import { isOffline, type Order } from "./queues";
 
@@ -50,7 +50,7 @@ export function ShipDialog({ order, onClose, onDone }: { order: Pick<Order, "id"
       toast(t("{value} shipped", { value: order.number ?? "Order" }));
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

@@ -230,6 +230,13 @@ async fn scenario() {
 
     // ───────────── no store yet: the storefront is closed ─────────────
     assert!(matches!(t.call(None, "GET", "/catalog", &[], None).await, Err(Error::NotFound(_))));
+    // The store's reports do not ask a person for a company id: with no Store Settings (and no company to fall back on) they say so in a sentence.
+    let dates: HashMap<String, String> =
+        [("from_date", "2026-10-14"), ("to_date", "2026-11-12"), ("group_by", "Day")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    match ferrum_domain::reports::run(&t.k, &t.ctx, "web_sales", &dates).await {
+        Err(Error::Invalid(m)) => assert!(m.contains("not set up") && m.contains("Store Settings"), "{m}"),
+        other => panic!("a store that is not set up must say so: {other:?}"),
+    }
 
     // ───────────── company, items, prices, stock, taxes ─────────────
     let inr = t.find_one("Currency", json!({"code": "INR"})).await;
@@ -955,6 +962,11 @@ async fn scenario() {
     let today = chrono::Utc::now().date_naive().to_string();
     let p = [("company", cid.to_string()), ("from_date", today.clone()), ("to_date", today.clone())];
     let params: Vec<(&str, &str)> = p.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    // With Store Settings the company is theirs even when the workspace has several and the caller names none.
+    t.insert("Company", json!({"company_name": "Another Co", "abbr": "AC", "default_currency": inr["id"]})).await;
+    let no_company: Vec<(&str, &str)> = params.iter().copied().filter(|(k, _)| *k != "company").collect();
+    let own = t.report("web_sales", &no_company).await;
+    assert_eq!(own["meta"]["company"], json!("Web Shop Pvt Ltd"), "the store's company, not a company id asked of the person: {own}");
     let by_day = t.report("web_sales", &params).await;
     let web_orders = by_day["totals"]["orders"].as_i64().unwrap();
     assert_eq!(web_orders, 5, "A, C, Rahul's, the race winner and F (E was cancelled): {by_day}");
