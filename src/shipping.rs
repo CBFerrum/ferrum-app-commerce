@@ -19,6 +19,45 @@ pub enum Basis {
 }
 
 #[derive(Debug, Clone)]
+pub struct Place<'a> {
+    pub country: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub postcode: Option<&'a str>,
+}
+
+impl<'a> Place<'a> {
+    #[cfg(test)]
+    pub fn of(country: Option<&'a str>) -> Self {
+        Place { country, region: None, postcode: None }
+    }
+
+    /// Where a cart goes, from what the shopper gave.
+    pub fn of_cart(cart: &'a Doc) -> Self {
+        Place { country: s(cart, "ship_country"), region: s(cart, "ship_state"), postcode: s(cart, "ship_postal_code") }
+    }
+}
+
+fn plain(t: &str) -> String {
+    t.chars().filter(|c| !c.is_whitespace() && *c != '-').collect::<String>().to_uppercase()
+}
+
+/// Whether a postal code falls in a range: numerically when all three are numbers, else by what it starts
+/// with (so `SW1` to `SW9` take `SW5 2AB`). Without an end, the code starts with the start.
+pub(crate) fn in_range(code: &str, from: &str, to: &str) -> bool {
+    let (c, f, t) = (plain(code), plain(from), plain(to));
+    if f.is_empty() && t.is_empty() {
+        return true;
+    }
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if digits(&c) && digits(&f) && (t.is_empty() || digits(&t)) {
+        let (c, f) = (c.parse::<u128>().unwrap_or(0), f.parse::<u128>().unwrap_or(0));
+        return if t.is_empty() { c == f } else { c >= f && c <= t.parse::<u128>().unwrap_or(0) };
+    }
+    let head = |p: &str| c.chars().take(p.chars().count()).collect::<String>();
+    if t.is_empty() { c.starts_with(&f) } else { head(&f) >= f && head(&t) <= t }
+}
+
+#[derive(Debug, Clone)]
 pub struct Rule {
     pub id: Uuid,
     pub label: String,
@@ -28,6 +67,12 @@ pub struct Rule {
     /// `(from inclusive, to exclusive or 0 = open, charge)`.
     pub bands: Vec<(Decimal, Decimal, Decimal)>,
     pub countries: Vec<String>,
+    /// Regions it ships to, each as (country or none, region's name).
+    pub regions: Vec<(Option<String>, String)>,
+    /// Postal code ranges it ships to, each (from, to).
+    pub postal_ranges: Vec<(String, String)>,
+    /// An order at or above this value (the goods after discounts) ships free; 0: never.
+    pub free_over: Decimal,
 }
 
 impl Rule {
@@ -44,13 +89,40 @@ impl Rule {
             amount: d(doc, "amount"),
             bands: rows(doc, "bands").iter().map(|r| (d(r, "from_value"), d(r, "to_value"), d(r, "amount"))).collect(),
             countries: rows(doc, "countries").iter().filter_map(|r| s(r, "country_code").map(str::to_string)).collect(),
+            regions: rows(doc, "regions").iter().filter_map(|r| Some((s(r, "country_code").map(str::to_string), s(r, "region")?.to_string()))).collect(),
+            postal_ranges: rows(doc, "postal_ranges")
+                .iter()
+                .filter_map(|r| Some((s(r, "from_code")?.to_string(), s(r, "to_code").unwrap_or_default().to_string())))
+                .collect(),
+            free_over: d(doc, "free_over"),
         })
     }
 
+    /// Whether the rule ships to a place: its countries, regions and postal ranges (each, when it lists any,
+    /// must include the place).
+    pub fn ships_to(&self, place: &Place) -> bool {
+        if !self.countries.is_empty() && !place.country.is_some_and(|c| self.countries.iter().any(|x| x == c)) {
+            return false;
+        }
+        if !self.regions.is_empty() {
+            let region = place.region.map(|r| r.trim().to_lowercase()).unwrap_or_default();
+            let here = |(country, name): &(Option<String>, String)| {
+                name.trim().to_lowercase() == region && country.as_deref().is_none_or(|c| place.country == Some(c))
+            };
+            if region.is_empty() || !self.regions.iter().any(here) {
+                return false;
+            }
+        }
+        self.postal_ranges.is_empty() || place.postcode.is_some_and(|p| self.postal_ranges.iter().any(|(from, to)| in_range(p, from, to)))
+    }
+
     /// The charge for a destination, cart subtotal and weight; `None` when the rule does not apply.
-    pub fn charge(&self, country: Option<&str>, subtotal: Decimal, weight: Decimal) -> Option<Decimal> {
-        if !self.countries.is_empty() && !country.is_some_and(|c| self.countries.iter().any(|x| x == c)) {
+    pub fn charge(&self, place: &Place, subtotal: Decimal, weight: Decimal) -> Option<Decimal> {
+        if !self.ships_to(place) {
             return None;
+        }
+        if self.free_over > Decimal::ZERO && subtotal >= self.free_over {
+            return Some(Decimal::ZERO);
         }
         let measure = match self.basis {
             Basis::Fixed => return Some(self.amount),
@@ -119,6 +191,16 @@ impl DocHook for ShippingRuleHook {
             })
             .collect();
         set(doc, "countries", Value::Array(countries));
+        let regions: Vec<Value> = rows(doc, "regions")
+            .into_iter()
+            .map(|mut r| {
+                if let Some(code) = s(&r, "country_code").map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
+                    set(&mut r, "country_code", code);
+                }
+                Value::Object(r)
+            })
+            .collect();
+        set(doc, "regions", Value::Array(regions));
         Ok(())
     }
 
@@ -134,6 +216,17 @@ impl DocHook for ShippingRuleHook {
         for (i, r) in rows(doc, "countries").iter().enumerate() {
             if !s(r, "country_code").is_some_and(valid_country) {
                 errors.push(FieldError::new("country_code", "use a two-letter ISO country code").in_row("countries", i));
+            }
+        }
+        for (i, r) in rows(doc, "regions").iter().enumerate() {
+            if s(r, "country_code").is_some_and(|c| !valid_country(&c.to_uppercase())) {
+                errors.push(FieldError::new("country_code", "use a two-letter ISO country code").in_row("regions", i));
+            }
+        }
+        for (i, r) in rows(doc, "postal_ranges").iter().enumerate() {
+            let (from, to) = (plain(s(r, "from_code").unwrap_or_default()), plain(s(r, "to_code").unwrap_or_default()));
+            if !to.is_empty() && from > to && from.len() == to.len() {
+                errors.push(FieldError::new("to_code", "must not be before the start of the range").in_row("postal_ranges", i));
             }
         }
         if !errors.is_empty() {
@@ -169,21 +262,50 @@ mod tests {
             amount: n("50"),
             bands: bands.iter().map(|(a, b, c)| (n(a), n(b), n(c))).collect(),
             countries: countries.iter().map(|c| c.to_string()).collect(),
+            regions: vec![],
+            postal_ranges: vec![],
+            free_over: Decimal::ZERO,
         }
     }
 
     #[test]
     fn bands_are_half_open_and_countries_restrict() {
         let by_amount = rule(Basis::OrderAmount, &[("0", "500", "60"), ("500", "0", "0")], &[]);
-        assert_eq!(by_amount.charge(None, n("499.99"), Decimal::ZERO), Some(n("60")));
-        assert_eq!(by_amount.charge(None, n("500"), Decimal::ZERO), Some(Decimal::ZERO), "free from 500 up");
+        assert_eq!(by_amount.charge(&Place::of(None), n("499.99"), Decimal::ZERO), Some(n("60")));
+        assert_eq!(by_amount.charge(&Place::of(None), n("500"), Decimal::ZERO), Some(Decimal::ZERO), "free from 500 up");
         let by_weight = rule(Basis::TotalWeight, &[("0", "2", "40"), ("2", "10", "90")], &["IN"]);
-        assert_eq!(by_weight.charge(Some("IN"), Decimal::ZERO, n("1.5")), Some(n("40")));
-        assert_eq!(by_weight.charge(Some("IN"), Decimal::ZERO, n("2")), Some(n("90")));
-        assert_eq!(by_weight.charge(Some("IN"), Decimal::ZERO, n("10")), None, "heavier than every band");
-        assert_eq!(by_weight.charge(Some("DE"), Decimal::ZERO, n("1")), None, "not shipped there");
-        assert_eq!(by_weight.charge(None, Decimal::ZERO, n("1")), None, "destination unknown");
-        assert_eq!(rule(Basis::Fixed, &[], &[]).charge(Some("US"), Decimal::ZERO, Decimal::ZERO), Some(n("50")));
+        assert_eq!(by_weight.charge(&Place::of(Some("IN")), Decimal::ZERO, n("1.5")), Some(n("40")));
+        assert_eq!(by_weight.charge(&Place::of(Some("IN")), Decimal::ZERO, n("2")), Some(n("90")));
+        assert_eq!(by_weight.charge(&Place::of(Some("IN")), Decimal::ZERO, n("10")), None, "heavier than every band");
+        assert_eq!(by_weight.charge(&Place::of(Some("DE")), Decimal::ZERO, n("1")), None, "not shipped there");
+        assert_eq!(by_weight.charge(&Place::of(None), Decimal::ZERO, n("1")), None, "destination unknown");
+        assert_eq!(rule(Basis::Fixed, &[], &[]).charge(&Place::of(Some("US")), Decimal::ZERO, Decimal::ZERO), Some(n("50")));
+    }
+
+    #[test]
+    fn zones_by_region_and_postal_range_and_free_over() {
+        let mut zone = rule(Basis::Fixed, &[], &["IN"]);
+        zone.regions = vec![(None, "Karnataka".into()), (Some("IN".into()), "goa".into())];
+        let place = |region: &'static str, post: &'static str| Place { country: Some("IN"), region: Some(region), postcode: Some(post) };
+        assert_eq!(zone.charge(&place(" karnataka ", "560001"), Decimal::ZERO, Decimal::ZERO), Some(n("50")));
+        assert_eq!(zone.charge(&place("Goa", "403001"), Decimal::ZERO, Decimal::ZERO), Some(n("50")));
+        assert_eq!(zone.charge(&place("Kerala", "682001"), Decimal::ZERO, Decimal::ZERO), None, "another region");
+        assert_eq!(zone.charge(&Place::of(Some("IN")), Decimal::ZERO, Decimal::ZERO), None, "no region given");
+        zone.regions.clear();
+        zone.postal_ranges = vec![("560001".into(), "560099".into()), ("4000".into(), String::new())];
+        assert!(
+            zone.ships_to(&place("x", "560 050"))
+                && zone.ships_to(&place("x", "4000"))
+                && !zone.ships_to(&place("x", "560100"))
+                && !zone.ships_to(&place("x", "400001"))
+        );
+        assert!(!zone.ships_to(&Place::of(Some("IN"))), "no postal code given");
+        zone.postal_ranges = vec![("SW1".into(), "SW9".into()), ("EC".into(), String::new())];
+        assert!(in_range("SW5 2AB", "SW1", "SW9") && in_range("ec1a 1bb", "EC", "") && !in_range("N1 9GU", "SW1", "SW9"));
+        zone.postal_ranges.clear();
+        zone.free_over = n("1000");
+        assert_eq!(zone.charge(&Place::of(Some("IN")), n("999.99"), Decimal::ZERO), Some(n("50")));
+        assert_eq!(zone.charge(&Place::of(Some("IN")), n("1000"), Decimal::ZERO), Some(Decimal::ZERO), "free over the threshold");
     }
 
     #[test]

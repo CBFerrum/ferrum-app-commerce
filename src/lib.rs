@@ -15,6 +15,7 @@ mod cart;
 mod catalog;
 mod checkout;
 mod coupon;
+mod edit;
 mod gift_card;
 mod orders;
 mod pages;
@@ -23,12 +24,14 @@ mod refund;
 mod reports;
 mod ship;
 mod shipping;
+mod shopper;
 mod site;
 mod store;
 mod subscriptions;
 mod tell;
 mod token;
 mod upkeep;
+mod variants;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use ferrum_domain::reports::ReportSource;
@@ -50,6 +53,7 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("PaymentRequest", Arc::new(payment::PaymentRequestHook))
         .register("PaymentException", Arc::new(payment::PaymentExceptionHook))
         .register("OrderRefund", Arc::new(refund::OrderRefundHook))
+        .register("ReturnRequest", Arc::new(shopper::ReturnRequestHook))
         .register("DeliveryNote", Arc::new(ship::DeliveryHook))
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))

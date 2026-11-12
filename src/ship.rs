@@ -37,7 +37,7 @@ fn made_id(made: &Value) -> Result<Uuid> {
     made.get("id").and_then(Value::as_str).and_then(|v| v.parse().ok()).ok_or_else(|| Error::internal("an action made no document"))
 }
 
-fn guard(hc: &HookCtx<'_>, so: &Doc) -> Result<()> {
+pub(crate) fn guard(hc: &HookCtx<'_>, so: &Doc) -> Result<()> {
     if !may_run_orders(hc.ctx) {
         return Err(Error::Forbidden("shipping and invoicing web orders is for the store's managers and sales staff".into()));
     }
@@ -52,6 +52,9 @@ async fn invoice(hc: &mut HookCtx<'_>, actor: &Ctx, so: Uuid) -> Result<Value> {
     let made = hc.kernel.run_action_tx(actor, hc.tx, "SalesOrder", so, "make_sales_invoice", &json!({})).await?;
     let sid = made_id(&made)?;
     let posted = hc.kernel.submit_tx(actor, hc.tx, "SalesInvoice", sid, None).await?;
+    // A card holding part of the order is redeemed by its invoice: note what it paid.
+    let store = Store::load(hc.kernel, hc.ctx, hc.tx).await?;
+    crate::gift_card::redeemed(hc.kernel, actor, hc.tx, &store, so).await?;
     Ok(json!({"id": sid, "number": s(&posted, "number")}))
 }
 

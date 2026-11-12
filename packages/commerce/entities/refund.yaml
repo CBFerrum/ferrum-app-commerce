@@ -35,13 +35,16 @@
     - {name: sales_invoice, type: link, to: SalesInvoice, read_only: true, in_filter: true, description: "A payment's refund: the invoice the payment paid"}
     - {name: order_number, type: data, read_only: true, in_list: true}
     - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
-    - {name: kind, type: select, options: [Return, Cancellation, Payment], default: Return, required: true, in_list: true, in_filter: true,
-       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms)"}
-    - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind != 'Payment'", in_filter: true}
+    - {name: kind, type: select, options: [Return, Cancellation, Payment, Adjustment], default: Return, required: true, in_list: true, in_filter: true,
+       description: "Payment: part of a payment going back, worked out by the app that took it (a booking's deposit by its cancellation terms). Adjustment: what an edit took off an order that was already paid"}
+    - {name: reason, type: link, to: ReturnReason, required_if: "doc.kind == 'Return' || doc.kind == 'Cancellation'", in_filter: true}
     - {name: note, type: text, max_length: 2000}
     - {name: lines, type: table, of: OrderRefundLine, visible_if: "doc.kind == 'Return'"}
     - {name: include_shipping, type: check, label: Refund the Delivery Charge Too, visible_if: "doc.kind == 'Return'"}
     - {name: notify_customer, type: check, default: true}
+    - {name: destination, type: select, options: [Original Payment, Store Credit], default: Original Payment, read_only: true, description: "Where it goes: back to the payment, or as store credit (a new code sent to the shopper)"}
+    - {name: restocking_fee_percent, type: percent, default: 0, read_only: true, description: "Kept from what the credit note credits"}
+    - {name: return_request, type: link, to: ReturnRequest, read_only: true, no_copy: true}
     - {name: payment_request, type: link, to: PaymentRequest, read_only: true}
     - {name: gateway, type: data, read_only: true, max_length: 40, in_list: true, in_filter: true}
     - {name: payment_reference, type: data, read_only: true, max_length: 200, description: "The gateway's own reference for the payment being refunded"}
@@ -78,3 +81,50 @@
     - {name: refund_failed, label: Refund Failed, permission: write, hidden: true}
     - {name: post_books, label: Post to the Books, permission: write, condition: "doc.status == 'Refunded' && !doc.booked"}
   list: {columns: [number, order_number, kind, amount, gateway, status], sort: created_at desc}
+
+- name: ReturnRequestLine
+  label: Return Request Line
+  kind: child
+  fields:
+    - {name: sales_order_line, type: data, required: true, max_length: 64, label: Order Line}
+    - {name: item, type: link, to: Item, read_only: true, in_list: true}
+    - {name: item_name, type: data, read_only: true, in_list: true}
+    - {name: qty, type: decimal, required: true, min: "0.000000001", in_list: true}
+
+- name: ReturnRequest
+  label: Return Request
+  kind: document
+  module: commerce
+  company_scoped: true
+  title_field: order_number
+  numbering: {template: "RETURN-{YYYY}-{seq:5}"}
+  search_fields: [order_number, email]
+  description: "A shopper asks to send goods back (from the link in their order confirmation, within the store's window). The desk approves or declines; once the goods are in, Receive Goods makes the refund, which credits the invoice and goes back to the payment or as store credit."
+  fields:
+    - {name: company, type: link, to: Company, required: true, read_only: true, in_filter: true}
+    - {name: sales_order, type: link, to: SalesOrder, required: true, read_only: true, in_list: true, in_filter: true}
+    - {name: order_number, type: data, read_only: true, in_list: true}
+    - {name: customer, type: link, to: Customer, read_only: true, in_filter: true}
+    - {name: email, type: email, read_only: true, in_list: true}
+    - {name: status, type: select, options: [Requested, Approved, Declined, Received, Refunded], default: Requested, read_only: true, in_list: true, in_filter: true}
+    - {name: reason, type: link, to: ReturnReason, read_only: true, in_filter: true}
+    - {name: shopper_note, type: text, read_only: true, max_length: 2000, label: What the Shopper Said}
+    - {name: lines, type: table, of: ReturnRequestLine, read_only: true}
+    - {name: resolution, type: select, options: [Original Payment, Store Credit], default: Original Payment, read_only: true, description: "Where the refund goes, as the store's policy said when it was asked for"}
+    - {name: shipping_paid_by, type: select, options: [Shopper, Store], default: Shopper, read_only: true}
+    - {name: restocking_fee_percent, type: percent, default: 0, read_only: true}
+    - {name: decision_note, type: text, read_only: true, max_length: 2000, no_copy: true, description: "Why it was declined, or what the shopper is told with the approval"}
+    - {name: decided_by, type: email, read_only: true, no_copy: true}
+    - {name: refund, type: link, to: OrderRefund, read_only: true, no_copy: true}
+    - {name: requested_at, type: datetime, read_only: true}
+  indexes: [[sales_order, status]]
+  form:
+    - {label: Request, fields: [sales_order, order_number, customer, email, status, reason, shopper_note, requested_at]}
+    - {label: Goods, fields: [lines]}
+    - {label: Terms, fields: [resolution, shipping_paid_by, restocking_fee_percent, decision_note, decided_by, refund]}
+  actions:
+    - {name: approve_return, label: Approve Return, permission: write, condition: "doc.status == 'Requested'", params: [{name: note, label: "What the shopper is told", type: text}]}
+    - {name: decline_return, label: Decline Return, permission: write, condition: "doc.status == 'Requested'", params: [{name: note, label: Why, type: text, required: true}]}
+    - {name: receive_return, label: Receive Goods, permission: write, condition: "doc.status == 'Approved'",
+       confirm: "The goods are here: ask for the refund (it credits the invoice and goes back as the terms say, once a person approves it)."}
+  list: {columns: [number, order_number, email, status, requested_at], sort: created_at desc}

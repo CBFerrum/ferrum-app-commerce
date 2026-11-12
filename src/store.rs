@@ -50,6 +50,43 @@ pub fn valid_country(code: &str) -> bool {
     code.len() == 2 && code.bytes().all(|c| c.is_ascii_uppercase())
 }
 
+/// What the store lets shoppers do after buying, and on what terms (Store Settings' After-Sales tab). A
+/// workspace from before these settings has none of the fields: it gets the defaults.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// Hours after the order is placed that a shopper may cancel it themselves (0: not at all).
+    pub cancel_hours: i64,
+    /// A shopper's cancellation is refunded without waiting for the desk.
+    pub cancel_auto: bool,
+    /// Days after delivery that a shopper may ask to send goods back (0: not at all).
+    pub return_days: i64,
+    /// The store pays to have goods sent back.
+    pub store_pays_return_shipping: bool,
+    /// Kept from what a return credits, per cent.
+    pub restocking_fee: Decimal,
+    /// Returns go back as store credit rather than to the payment.
+    pub credit_by_default: bool,
+    /// The stored value store credit is made as.
+    pub credit_kind: Option<Uuid>,
+    /// What a carrier says (in its own words) when a parcel is out for delivery.
+    pub out_for_delivery_words: Vec<String>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy {
+            cancel_hours: 24,
+            cancel_auto: true,
+            return_days: 14,
+            store_pays_return_shipping: false,
+            restocking_fee: Decimal::ZERO,
+            credit_by_default: false,
+            credit_kind: None,
+            out_for_delivery_words: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     pub name: String,
@@ -81,6 +118,7 @@ pub struct Store {
     pub channel: String,
     /// The stored value kind taken at checkout and sold as gift cards.
     pub gift_card_kind: Option<Uuid>,
+    pub policy: Policy,
 }
 
 impl Store {
@@ -149,7 +187,47 @@ impl Store {
             cancel_unpaid_orders: b(&doc, "cancel_unpaid_orders"),
             channel: s(&doc, "sales_channel").unwrap_or(WEB_SHOP).to_string(),
             gift_card_kind: id(&doc, "gift_card_kind"),
+            policy: {
+                let was = Policy::default();
+                let count = |f: &str, default: i64| {
+                    doc.get(f).and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|t| t.parse().ok()))).filter(|n| *n >= 0).unwrap_or(default)
+                };
+                Policy {
+                    cancel_hours: count("cancel_window_hours", was.cancel_hours),
+                    cancel_auto: s(&doc, "cancel_refund").map_or(was.cancel_auto, |v| v != "Desk Approves"),
+                    return_days: count("return_window_days", was.return_days),
+                    store_pays_return_shipping: s(&doc, "return_shipping_paid_by") == Some("Store"),
+                    restocking_fee: d(&doc, "restocking_fee_percent").clamp(Decimal::ZERO, Decimal::ONE_HUNDRED),
+                    credit_by_default: s(&doc, "refund_destination") == Some("Store Credit"),
+                    credit_kind: id(&doc, "store_credit_kind"),
+                    out_for_delivery_words: s(&doc, "out_for_delivery_words")
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(|w| w.trim().to_string())
+                        .filter(|w| !w.is_empty())
+                        .collect(),
+                }
+            },
         })
+    }
+
+    /// The store as a recognised customer sees it: their own selling price list where they have one (an
+    /// enabled one in the store's currency), else the store's.
+    pub async fn for_customer(mut self, tx: &mut Tx, tenant: Uuid, customer: Option<Uuid>) -> Result<Store> {
+        let Some(customer) = customer else { return Ok(self) };
+        let own: Option<Uuid> = sqlx::query_scalar(
+            "select p.id from e_customer c join e_price_list p on p.tenant_id = c.tenant_id and p.id = c.default_price_list \
+             where c.tenant_id = $1 and c.id = $2 and coalesce(p.selling, false) and coalesce(p.enabled, true) and (p.currency is null or p.currency = $3)",
+        )
+        .bind(tenant)
+        .bind(customer)
+        .bind(self.currency)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(list) = own {
+            self.price_list = list;
+        }
+        Ok(self)
     }
 
     pub fn method(&self, gateway: &str) -> Option<&PaymentMethod> {
