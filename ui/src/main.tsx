@@ -68,6 +68,7 @@ const router = createBrowserRouter(
         { path: "alerts", lazy: () => import("./Alerts").then((m) => ({ Component: m.Alerts })) },
         { path: "variants", lazy: () => import("./Variants").then((m) => ({ Component: m.Variants })) },
         { path: "variants/:id", lazy: () => import("./Variants").then((m) => ({ Component: m.Variants })) },
+        { path: "words", lazy: () => import("./StoreWords").then((m) => ({ Component: m.Words })) },
         { path: "money", lazy: () => import("./Money").then((m) => ({ Component: m.Money })) },
         { path: "e/:entity", lazy: page("ListView") },
         { path: "e/:entity/:id", lazy: page("FormView") },
