@@ -1,0 +1,152 @@
+// @vitest-environment jsdom
+// The order desk's two dialogs driven in a page: changing an order (the difference before saving, what is
+// sent, the server's refusal) and cancelling one (what goes back payment by payment). Requests and answers
+// are those of the actions in src/edit.rs and src/refund.rs.
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { MemoryRouter } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CancelOrderDialog } from "./CancelOrder";
+import { EditOrderDialog } from "./EditOrder";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const sent: { url: string; body: unknown }[] = [];
+let refuse: string | null = null;
+
+beforeEach(() => {
+  sent.length = 0;
+  refuse = null;
+  document.body.innerHTML = "";
+  HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close ??= function (this: HTMLDialogElement) {
+    this.removeAttribute("open");
+  };
+  vi.stubGlobal("fetch", async (url: string, init: { method?: string; body?: string } = {}) => {
+    if (init.method === "POST") {
+      sent.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+      if (refuse) return new Response(JSON.stringify({ message: refuse }), { status: 422, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ total: "1100", difference: "-250", owed: "0", payment_request: null, refund: "r1", cancelled: true, refunds: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ rows: [{ id: "re1", reason: "Out of stock" }], total: 1 }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+});
+afterEach(() => vi.unstubAllGlobals());
+
+async function mount(element: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const host = document.createElement("div");
+  document.body.append(host);
+  await act(async () => {
+    createRoot(host).render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>{element}</MemoryRouter>
+      </QueryClientProvider>,
+    );
+  });
+  return host;
+}
+const text = () => (document.body.textContent ?? "").replace(/\s+/g, " ");
+const press = async (el: Element | null) => void (await act(async () => (el as HTMLElement).click()));
+const type = async (el: Element | null, value: string) =>
+  void (await act(async () => {
+    const input = el as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }));
+const button = (label: string) => [...document.querySelectorAll("button")].find((b) => b.textContent?.trim().startsWith(label)) ?? null;
+
+const lines = [
+  { id: "a", item: "mug", item_name: "Blue Mug", qty: "2", rate: "250", amount: "500", delivered_qty: "0" },
+  { id: "b", item: "tee", item_name: "Logo Tee", qty: "1", rate: "400", amount: "400", delivered_qty: "1" },
+  { id: "c", item: "ship", item_name: "Shipping", qty: "1", rate: "50", amount: "50", delivered_qty: "0" },
+];
+const stripe = { id: "p1", gateway: "stripe", amount: "1000", status: "Paid", currency_code: "INR", refunded_amount: "0" };
+
+describe("changing an order", () => {
+  const dialog = (over: Record<string, unknown> = {}) => (
+    <EditOrderDialog order={{ id: "o1", number: "SO-1" }} lines={lines} payments={[stripe]} shippingItem="ship" code="INR" onClose={() => {}} onDone={() => {}} {...over} />
+  );
+
+  it("shows the difference and what happens to it before anything is saved, then sends the change", async () => {
+    const done = vi.fn();
+    await mount(dialog({ onDone: done }));
+    expect(text()).toContain("Change SO-1");
+    expect(text()).toContain("Change a quantity, add an item or give a new address.");
+    expect((button("Save the change") as HTMLButtonElement).disabled).toBe(true);
+    // The shipped line cannot be removed; the delivery charge is not edited.
+    expect((document.querySelector('button[aria-label="Remove Logo Tee"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(text()).toContain("Priced again");
+    await type(document.querySelector('input[aria-label="Quantity of Blue Mug"]'), "1");
+    expect(text()).toMatch(/−₹250\.00|-₹250\.00|₹250\.00/);
+    expect(text()).toContain("sent back through Stripe as an adjustment refund");
+    expect(text()).toContain("Before it was ₹900.00, before tax and delivery.");
+    await press(button("Save the change"));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toContain("/actions/web_update_items");
+    expect(sent[0].body).toEqual({ changes: '[{"line":1,"qty":"1"}]', notify: "Yes", approve: "Yes" });
+    expect(done).toHaveBeenCalled();
+  });
+
+  it("says a quantity below what shipped cannot be saved, and shows the server's refusal as it is", async () => {
+    await mount(dialog());
+    await type(document.querySelector('input[aria-label="Quantity of Logo Tee"]'), "0");
+    expect(text()).toContain("1 of this line have shipped: it cannot go below that.");
+    expect((button("Save the change") as HTMLButtonElement).disabled).toBe(true);
+    await type(document.querySelector('input[aria-label="Quantity of Logo Tee"]'), "1");
+    await type(document.querySelector('input[aria-label="Quantity of Blue Mug"]'), "3");
+    refuse = "everything on this order has been delivered or it is closed";
+    await press(button("Save the change"));
+    expect(text()).toContain("everything on this order has been delivered or it is closed");
+    expect((button("Save the change") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("does not offer a change to an order a gift card holds part of", async () => {
+    await mount(dialog({ order: { id: "o1", number: "SO-1", commerce_card_held: "150" } }));
+    expect(text()).toContain("A gift card holds part of this order until the rest is paid");
+    await type(document.querySelector('input[aria-label="Quantity of Blue Mug"]'), "1");
+    expect((button("Save the change") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("cancelling an order", () => {
+  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true, editsCatalog: true };
+  const cancel = (payments: unknown[], over: Record<string, unknown> = {}) => (
+    <CancelOrderDialog order={{ id: "o1", number: "SO-1" }} payments={payments as never} rights={rights} code="INR" onClose={() => {}} onDone={() => {}} {...over} />
+  );
+
+  it("lists what goes back payment by payment, the card's part first, and cancels", async () => {
+    const done = vi.fn();
+    await mount(cancel([stripe, { id: "g1", gateway: "Gift Card", amount: "150", status: "Paid", currency_code: "INR" }, { id: "x", gateway: "stripe", amount: "5", status: "Expired" }], { onDone: done }));
+    const rows = [...document.querySelectorAll("tbody tr")].map((r) => r.textContent ?? "");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain("Gift card");
+    expect(rows[0]).toContain("back onto the gift card now");
+    expect(rows[1]).toContain("through Stripe");
+    expect(text()).toContain("Cancel and send ₹1,150.00 back");
+    await press(button("Cancel and send"));
+    expect(sent[0].url).toContain("/actions/web_cancel");
+    expect(sent[0].body).toEqual({ approve: "Yes" });
+    expect(done).toHaveBeenCalled();
+  });
+
+  it("says an unpaid order is cancelled at once, and what an earlier change left owed", async () => {
+    await mount(cancel([{ id: "i", gateway: "stripe", amount: "300", status: "Initiated" }], { owed: 100 }));
+    expect(text()).toContain("Nothing has been paid on this order. It is cancelled at once");
+    expect(text()).toContain("An earlier change left ₹100.00 owed by the shopper");
+    expect(button("Cancel the order")).not.toBeNull();
+  });
+
+  it("leaves the decision to a manager for someone who may only ask, and shows the refusal", async () => {
+    await mount(cancel([stripe], { rights: { ...rights, decides: false } }));
+    expect(text()).toContain("You ask for these refunds and a manager approves them.");
+    refuse = "part of this order has been delivered or invoiced";
+    await press(button("Cancel and send"));
+    expect(sent[0].body).toEqual({ approve: "No" });
+    expect(text()).toContain("part of this order has been delivered or invoiced");
+  });
+});

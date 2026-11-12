@@ -13,6 +13,8 @@ import { amountText, isOffline, isPaid, nextStep, type Order, statusWords, units
 import { copy, f, invoiceOrder, list, markPaid, soft, trackingLink, useRights } from "./data";
 import { ExceptionRow, RefundRow } from "./Decisions";
 import { type Exception, gatewayName, type Refund } from "./standing";
+import { CancelOrderDialog } from "./CancelOrder";
+import { EditOrderDialog } from "./EditOrder";
 import { RefundDialog } from "./Refund";
 import { ShipDialog } from "./Ship";
 import { INVOICE_STATUS, ORDER_PAYMENT, ORDER_STATUS, REQUEST_PAYMENT } from "./tones";
@@ -40,6 +42,9 @@ interface Full extends Order {
   commerce_notes?: string | null;
   commerce_contact_phone?: string | null;
   commerce_billing_address?: string | null;
+  commerce_amount_owed?: string | number | null;
+  commerce_card_held?: string | number | null;
+  commerce_paid_by_card?: string | number | null;
 }
 
 interface Request {
@@ -214,9 +219,12 @@ function OrderPage({ id }: { id: string }) {
   const rights = useRights();
   const [shipping, setShipping] = useState(false);
   const [refunding, setRefunding] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [busy, setBusy] = useState(false);
   const order = useQuery({ queryKey: ["commerce", "order", id], queryFn: ({ signal }) => api.get<Full>(docPath("SalesOrder", id), { titles: true }, signal) });
+  const shippingItem = useQuery({ queryKey: ["commerce", "shipping-item"], queryFn: ({ signal }) => list<{ shipping_item?: string | null }>("StoreSettings", { fields: "shipping_item", limit: 1 }, signal).then((r) => r.rows[0]?.shipping_item ?? null).catch(() => null) });
   const more = useQuery({ queryKey: ["commerce", "order", id, "related"], enabled: !!order.data, queryFn: ({ signal }) => related(id, signal) });
   const refresh = useCallback(() => void qc.invalidateQueries({ queryKey: ["commerce"] }), [qc]);
   const mine = useCallback((e: { id: string }) => void (e.id === id && refresh()), [id, refresh]);
@@ -244,6 +252,12 @@ function OrderPage({ id }: { id: string }) {
   const code = more.data?.payments[0]?.currency_code ?? o._titles?.currency;
   const say = (v: unknown, c?: string | null) => amountText(v, c ?? code);
   const paidRequest = more.data?.payments.find((p) => p.status === "Paid");
+  // Before anything has shipped an order can be cancelled; until all of it has, it can be changed.
+  const mayChange = rights.ships && !cancelled && Number(o.per_delivered ?? 0) < 100 && o.status !== "Closed";
+  const mayCancel = rights.ships && !cancelled && Number(o.per_delivered ?? 0) === 0 && o.status !== "Closed";
+  const owed = Number(o.commerce_amount_owed ?? 0);
+  const held = Number(o.commerce_card_held ?? 0);
+  const byCard = Number(o.commerce_paid_by_card ?? 0);
   const delivered = Number(o.per_delivered ?? 0) >= 100;
   const billed = Number(o.per_billed ?? 0) >= 100;
   const steps = [
@@ -307,6 +321,16 @@ function OrderPage({ id }: { id: string }) {
           {o.commerce_payment_status && <Badge tone={statusTone(o.commerce_payment_status, ORDER_PAYMENT)}>{isolate(o.commerce_payment_status)}</Badge>}
           <Badge tone={statusTone(o.docstatus === 2 ? "Cancelled" : o.status, ORDER_STATUS)}>{isolate(statusWords(o))}</Badge>
           {primary}
+          {mayChange && (
+            <Button icon="edit" disabled={!more.data} onClick={() => setEditing(true)}>
+              {tr("Change…")}
+            </Button>
+          )}
+          {mayCancel && (
+            <Button disabled={!more.data} onClick={() => setCancelling(true)}>
+              {tr("Cancel order…")}
+            </Button>
+          )}
           {paidRequest && rights.asks && !cancelled && (
             <Button icon="refresh" onClick={() => setRefunding(true)}>
               {tr("Send money back…")}
@@ -362,6 +386,15 @@ function OrderPage({ id }: { id: string }) {
             <strong>{next.step === "none" || next.step === "wait" ? tr("Now:") : tr("Next:")}</strong> {next.step === "ship" && !rights.ships ? tr("A sales user ships this order.") : next.why}
           </p>
         </>
+      )}
+
+      {!cancelled && (owed !== 0 || held > 0 || byCard > 0) && (
+        <div className="stack cm-standing">
+          {owed > 0 && <Alert tone="warning">{tr("After the order was changed, the shopper still owes {amount}. It was asked for or could not be: collect it, or it settles when they pay.", { amount: say(owed) })}</Alert>}
+          {owed < 0 && <Alert tone="warning">{tr("After the order was changed, the store owes the shopper {amount}. It is sent back when a person approves the refund, or settle it with them.", { amount: say(-owed) })}</Alert>}
+          {held > 0 && <Alert tone="info">{tr("A gift card holds {amount} of this order until the rest is paid. Nothing is invoiced before; if the rest is not paid in time, the hold is let go and the order is cancelled.", { amount: say(held) })}</Alert>}
+          {byCard > 0 && held === 0 && <Alert tone="info">{tr("A gift card paid {amount} of this order.", { amount: say(byCard) })}</Alert>}
+        </div>
       )}
 
       <div className="cm-body">
@@ -560,6 +593,34 @@ function OrderPage({ id }: { id: string }) {
           onClose={() => setShipping(false)}
           onDone={() => {
             setShipping(false);
+            refresh();
+          }}
+        />
+      )}
+      {editing && more.data && (
+        <EditOrderDialog
+          order={o}
+          lines={o.items ?? []}
+          payments={more.data.payments}
+          shippingItem={shippingItem.data}
+          code={code}
+          onClose={() => setEditing(false)}
+          onDone={() => {
+            setEditing(false);
+            refresh();
+          }}
+        />
+      )}
+      {cancelling && more.data && (
+        <CancelOrderDialog
+          order={o}
+          payments={more.data.payments}
+          rights={rights}
+          owed={owed}
+          code={code}
+          onClose={() => setCancelling(false)}
+          onDone={() => {
+            setCancelling(false);
             refresh();
           }}
         />

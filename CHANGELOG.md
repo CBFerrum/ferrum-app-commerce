@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.1
+
+The screens the server features of 0.8.0 and 0.9.0 needed. Needs nothing new of the server.
+
+- **The storefront's cart and checkout** (`assets/store.js`): the cart asks where it is going (country, region, postal code) and shows the delivery methods for the place (free ones as Free, and plainly when none reaches it) with the total for it, so the total shown is the total charged; checkout re-works the total as the place is given. Every promotion code on the cart is listed with what it took and which does not apply, and a code can be added and removed in checkout too. A gift card or store credit code (and PIN) is taken at the payment step with what happens to a card that holds less than the total; the order page says what a card paid or holds. The details step asks whether the shopper agrees to a reminder for a cart they leave (`reminder_consent`). An order whose payment failed or ran out offers the same order to be paid again by a method of the shopper's choice; an order changed after it was paid shows what was paid, what it now comes to and a button to pay the difference, and what is on its way back because of the change.
+- **The product page**: the option picker is told what the server knows of every combination: its price and stock, which are sold out and which are not offered together with what is chosen; an item out of stock (or the variant shown) has a box to leave an email to be told when it is back.
+- **Order desk** (`/o/{id}`): **Change…** (quantities, lines added and taken away, a new address) shows the difference and what happens to it before saving (the open request replaced, the shopper asked for it, it sent back, or recorded as owed) and then the server's own figures; **Cancel order…** lists what goes back payment by payment, the gift card's part first, and what each does; what is owed either way and what a gift card holds show on the order.
+- **Returns** (`/returns`): return requests to decide, waiting for the goods, and done, each with the shopper's reason and note, the terms they were given (where the refund goes, who pays return shipping, the restocking fee) and whether it came inside the window; approve and decline with a note, and receive the goods with the refund (less the fee) shown before it is confirmed. **Stock alerts** (`/alerts`) by item. **Variants** (`/variants/{id}`): a builder for Generate Variants (the options and values, the values not sold, every combination before it is made).
+
+Not built: resending a shopper's mail (the server has no action for it), the balance left on a gift card and when a hold lets go (no route or field says them), a preview of an order change from the server (the desk's difference is an estimate until it is saved). The After Sales tab, shipping rules' regions, postal ranges and free over, and the website item's options and disabled options are the generic forms' own. The storefront's words are English, as before.
+
 ## 0.9.0
 
 Needs ERP 0.24 or later (stored value holds, Update Items re-pricing promotions, delivery country and region, carriers). Commerce CM-1, CM-44, CM-49, CM-66, CM-68, CM-69, CM-76 and the three faults 0.8.0 left.
