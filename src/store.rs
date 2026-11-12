@@ -68,6 +68,8 @@ pub struct Policy {
     pub credit_by_default: bool,
     /// The stored value store credit is made as.
     pub credit_kind: Option<Uuid>,
+    /// What a carrier says (in its own words) when a parcel is out for delivery.
+    pub out_for_delivery_words: Vec<String>,
 }
 
 impl Default for Policy {
@@ -80,6 +82,7 @@ impl Default for Policy {
             restocking_fee: Decimal::ZERO,
             credit_by_default: false,
             credit_kind: None,
+            out_for_delivery_words: vec![],
         }
     }
 }
@@ -197,6 +200,12 @@ impl Store {
                     restocking_fee: d(&doc, "restocking_fee_percent").clamp(Decimal::ZERO, Decimal::ONE_HUNDRED),
                     credit_by_default: s(&doc, "refund_destination") == Some("Store Credit"),
                     credit_kind: id(&doc, "store_credit_kind"),
+                    out_for_delivery_words: s(&doc, "out_for_delivery_words")
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(|w| w.trim().to_string())
+                        .filter(|w| !w.is_empty())
+                        .collect(),
                 }
             },
         })

@@ -62,6 +62,10 @@ overlays:
       - {op: add_field, field: {name: commerce_tracking_number, type: data, label: Tracking Number, max_length: 120, description: "Shown to the shopper on the order page"}}
       - {op: add_field, field: {name: commerce_tracking_url, type: url, label: Tracking Link, max_length: 2000}}
       - {op: add_field, field: {name: commerce_notify, type: check, label: Tell the Customer, description: "Sends the shopper the shipping news (the commerce.order_shipped event) when this is submitted"}}
+  - entity: DeliveryNote
+    ops:
+      - {op: add_field, field: {name: commerce_out_notified, type: check, label: Out for Delivery Told, read_only: true, no_copy: true, hidden: true}}
+      - {op: add_field, field: {name: commerce_delivered_notified, type: check, label: Delivered Told, read_only: true, no_copy: true, hidden: true}}
   - entity: PaymentEntry
     ops:
       - {op: add_field, field: {name: commerce_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true}}
@@ -72,7 +76,7 @@ modules:
     label: Commerce
     icon: shopping-bag
     order: 42
-    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnRequest, ReturnReason, ShippingRule, CouponCode, SalesOrder,
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnRequest, StockAlert, ReturnReason, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
 # What a personal-data request exports and erases for a shopper (their email): their carts'
@@ -81,6 +85,7 @@ personal_data:
   - {entity: ShoppingCart, match: email, phone: phone, erase: [email, user_email, phone, contact_name, ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, notes]}
   - {entity: ItemReview, match: reviewer_email, erase: [reviewer_name, reviewer_email]}
   - {entity: ReturnRequest, match: email, erase: [email, shopper_note]}
+  - {entity: StockAlert, match: email, erase: [email]}
   - {entity: PaymentRequest, match: payer_email, retain: "Payment records"}
 roles:
   - name: Website Manager
@@ -100,6 +105,7 @@ roles:
       - {entity: PaymentException, read: true, write: true, export: true}
       - {entity: OrderRefund, read: true, write: true, create: true, export: true}
       - {entity: ReturnRequest, read: true, write: true, export: true}
+      - {entity: StockAlert, read: true, export: true}
       - {entity: ReturnReason, read: true, write: true, create: true, delete: true}
       - {entity: SalesOrder, read: true, export: true}
       - {entity: DeliveryNote, read: true}
@@ -182,6 +188,61 @@ messages:
           subject: "Your order {{ doc.number }} was changed"
           body: "<p>We changed your order {{ doc.number }}. It now comes to {{ values.total }}.</p>{% if values.owed %}<p>{{ values.owed }} is still to pay{% if values.pay_now %}: you can pay it from your order page{% endif %}.</p>{% endif %}{% if values.refund %}<p>{{ values.refund }} will go back to you.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
 
+  - key: commerce.payment_received
+    label: A payment for a web order arrived
+    entity: SalesOrder
+    values: [amount, method, link]
+    languages:
+      en:
+        email:
+          subject: "Payment received for order {{ doc.number }}"
+          body: "<p>We have received your payment of {{ values.amount }} ({{ values.method }}) for order {{ doc.number }}. Thank you.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+  - key: commerce.payment_failed
+    label: A payment for a web order failed
+    entity: SalesOrder
+    values: [reason, link]
+    languages:
+      en:
+        email:
+          subject: "Your payment for order {{ doc.number }} did not go through"
+          body: "<p>Your payment for order {{ doc.number }} did not go through{% if values.reason %}: {{ values.reason }}{% endif %}. Nothing was taken.</p>{% if values.link %}<p>You can try again from your order page: <a href=\"{{ values.link }}\">pay for your order</a>.</p>{% endif %}"
+  - key: commerce.out_for_delivery
+    label: A parcel is out for delivery
+    entity: SalesOrder
+    values: [carrier, tracking_number, tracking_url, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} is out for delivery"
+          body: "<p>Your order {{ doc.number }} is out for delivery{% if values.carrier %} with {{ values.carrier }}{% endif %}.</p>{% if values.tracking_url %}<p>Where the carrier shows it: {{ values.tracking_url }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+  - key: commerce.order_delivered
+    label: A parcel was delivered
+    entity: SalesOrder
+    values: [carrier, tracking_number, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} was delivered"
+          body: "<p>The carrier reports that your order {{ doc.number }} was delivered.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a>, where you can ask to send something back.</p>{% endif %}"
+  - key: commerce.back_in_stock
+    label: An item a shopper asked about is back in stock
+    entity: StockAlert
+    values: [title, link]
+    languages:
+      en:
+        email:
+          subject: "{{ values.title }} is back in stock"
+          body: "<p>You asked us to tell you when {{ values.title }} is back: it is.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">See it in the store</a></p>{% endif %}"
+  - key: commerce.cart_reminder
+    label: A reminder of a cart left behind
+    entity: ShoppingCart
+    category: promotional
+    values: [store, link]
+    languages:
+      en:
+        email:
+          subject: "You left something in your cart at {{ values.store }}"
+          body: "<p>You left {{ doc.item_count }} item(s) in your cart at {{ values.store }}.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">Go back to your cart</a></p>{% endif %}{% if opt_out %}<p><a href=\"{{ opt_out }}\">Stop these reminders</a></p>{% endif %}"
   - key: commerce.order_placed
     label: A web order was placed
     entity: SalesOrder
