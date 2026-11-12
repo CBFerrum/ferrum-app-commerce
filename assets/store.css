@@ -421,6 +421,35 @@ button[aria-busy="true"]::before {
   color: var(--muted);
   text-decoration: line-through;
 }
+.pick.na {
+  border-style: dashed;
+}
+.pick-extra {
+  margin-inline-start: 8px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 400;
+}
+.combo {
+  margin: 4px 0 12px;
+}
+.alert-box {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.alert-box h2 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+.alert-box label {
+  display: grid;
+  gap: 4px;
+  max-width: 22rem;
+  margin: 12px 0;
+  font-size: 0.92rem;
+}
 .add {
   display: flex;
   flex-wrap: wrap;
@@ -769,4 +798,38 @@ footer a {
   .add {
     display: none;
   }
+}
+
+/* The cart and checkout: where it goes, codes, a gift card, a payment to try again. */
+.place .fields,
+.card-pay .fields {
+  max-width: 40rem;
+}
+.codes {
+  margin: 12px 0;
+}
+.codes ul {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.codes .took li {
+  font-size: 0.92rem;
+}
+.explain {
+  margin-top: 8px;
+}
+.explain summary {
+  cursor: pointer;
+  color: var(--primary);
+}
+.notice.error {
+  color: var(--danger);
+}
+.place-note {
+  grid-column: 1 / -1;
+  font-size: 0.88rem;
+}
+.retry form {
+  max-width: 32rem;
 }
