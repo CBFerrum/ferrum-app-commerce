@@ -41,6 +41,8 @@
     - {name: ship_state, type: data, max_length: 100, label: Shipping State}
     - {name: ship_postal_code, type: data, max_length: 20, label: Shipping Postal Code}
     - {name: ship_country, type: data, max_length: 2, label: Shipping Country, in_filter: true}
+    - {name: delivery_country, type: data, max_length: 2, read_only: true, hidden: true, description: "Where the goods go, as country rules read it before any Address exists: the shipping country the shopper gave"}
+    - {name: delivery_region, type: data, max_length: 100, read_only: true, hidden: true, description: "The shipping state or province the shopper gave"}
     - {name: billing_same_as_shipping, type: check, default: true}
     - {name: bill_address_line1, type: data, max_length: 200, label: Billing Address Line 1}
     - {name: bill_address_line2, type: data, max_length: 200, label: Billing Address Line 2}
@@ -49,6 +51,7 @@
     - {name: bill_postal_code, type: data, max_length: 20, label: Billing Postal Code}
     - {name: bill_country, type: data, max_length: 2, label: Billing Country}
     - {name: notes, type: text, max_length: 2000, label: Order Notes}
+    - {name: reminder_consent, type: check, label: May Remind About This Cart, description: "The shopper agreed, at checkout, to be reminded of a cart they leave: an abandoned cart is told to them, and other apps' campaigns may act on it"}
     - {name: posting_date, type: date, read_only: true, label: Priced On}
     - {name: currency, type: link, to: Currency, read_only: true}
     - {name: conversion_rate, type: decimal, read_only: true}
@@ -89,5 +92,5 @@
     - {label: Billing Address, collapsible: true, fields: [billing_same_as_shipping, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, bill_country]}
     - {label: Pricing, fields: [posting_date, currency, conversion_rate, price_list, tax_template, taxes, coupon_code, coupon, coupon_rule, channel, promotion_codes, applied_promotions, shipping_rule, shipping_amount, total_weight_kg]}
     - {label: Totals, fields: [item_count, total, total_discount, net_total, total_taxes, grand_total, rounding_adjustment, rounded_total, base_grand_total]}
-    - {label: Order, fields: [sales_order, payment_request, ordered_at, notes]}
+    - {label: Order, fields: [sales_order, payment_request, ordered_at, notes, reminder_consent]}
   list: {columns: [email, status, item_count, grand_total, last_activity], sort: last_activity desc}

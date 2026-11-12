@@ -136,7 +136,7 @@ fn explain(e: &Error) -> String {
 
 /// A refusal of ERP's (on the credit note it drafts) as one sentence on the refund, not on fields of
 /// a document the person never opened.
-fn for_person(e: Error) -> Error {
+pub(crate) fn for_person(e: Error) -> Error {
     match e {
         Error::Validation(_) => Error::invalid(explain(&e)),
         other => other,
@@ -145,26 +145,14 @@ fn for_person(e: Error) -> Error {
 
 // ───────────────────────────── reading the books ─────────────────────────────
 
-/// What the order's other refunds hold of its payment.
-async fn held(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Result<Decimal> {
-    Ok(sqlx::query_scalar::<_, Decimal>(sqlx::AssertSqlSafe(format!(
-        "select coalesce(sum(amount), 0) from e_order_refund where tenant_id = $1 and sales_order = $2 and status in {HOLDING} and ($3::uuid is null or id <> $3)"
-    )))
-    .bind(tenant)
-    .bind(so)
-    .bind(except)
-    .fetch_one(&mut **tx)
-    .await?)
-}
-
 #[derive(Default, Clone, Copy)]
-struct Claims {
-    all: Decimal,
-    restocked: Decimal,
+pub(crate) struct Claims {
+    pub all: Decimal,
+    pub restocked: Decimal,
 }
 
 /// Units already asked to come back, per order line.
-async fn claims(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Result<HashMap<String, Claims>> {
+pub(crate) async fn claims(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Result<HashMap<String, Claims>> {
     let found: Vec<(String, Decimal, Decimal)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select l.sales_order_line, sum(l.qty), coalesce(sum(l.qty) filter (where r.booked and coalesce(l.restock, false)), 0) \
          from e_order_refund__lines l join e_order_refund r on r.tenant_id = l.tenant_id and r.id = l.parent_id \
@@ -260,6 +248,31 @@ async fn payments_made(tx: &mut Tx, tenant: Uuid, so: Uuid) -> Result<i64> {
         .await?)
 }
 
+/// Paid payments of an order that no cancellation yet asks to send back.
+async fn unclaimed_payments(tx: &mut Tx, tenant: Uuid, so: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "select count(*) from e_payment_request r where r.tenant_id = $1 and r.sales_order = $2 and r.status = 'Paid' and r.docstatus = 1 \
+         and not exists (select 1 from e_order_refund f where f.tenant_id = r.tenant_id and f.payment_request = r.id and f.kind = 'Cancellation' and f.status in {HOLDING})"
+    )))
+    .bind(tenant)
+    .bind(so)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// The cancellations of an order other than `this` that are not finished: (id, gateway, status).
+async fn sibling_cancellations(tx: &mut Tx, tenant: Uuid, so: Uuid, this: Uuid) -> Result<Vec<(Uuid, String, String)>> {
+    Ok(sqlx::query_as(
+        "select id, coalesce(gateway, ''), status from e_order_refund where tenant_id = $1 and sales_order = $2 and kind = 'Cancellation' and id <> $3 \
+         and status in ('Requested', 'Approved', 'Refund Failed', 'Refunded') order by created_at",
+    )
+    .bind(tenant)
+    .bind(so)
+    .bind(this)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
 // ───────────────────────────── planning a return ─────────────────────────────
 
 /// A line someone chose to send back.
@@ -280,12 +293,14 @@ fn asked_lines(doc: &Doc) -> Vec<Asked> {
 /// What a return does to the books: the invoice lines to credit and the delivery note lines to
 /// restock, and the lines to show.
 struct Plan {
+    /// Kept from what the credit notes credit, per cent (a restocking fee).
+    fee: Decimal,
     shown: Vec<Value>,
     credit: Vec<(Uuid, Vec<(Uuid, Decimal)>)>,
     restock: Vec<(Uuid, Vec<(Uuid, Decimal)>)>,
 }
 
-async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: bool, except: Option<Uuid>) -> Result<Plan> {
+async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: bool, except: Option<Uuid>, fee: Decimal) -> Result<Plan> {
     let tenant = hc.ctx.tenant;
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     if asked.is_empty() {
@@ -355,13 +370,13 @@ async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: 
     if !errors.is_empty() {
         return Err(Error::Validation(errors));
     }
-    Ok(Plan { shown, credit: group(credit), restock: group(restock) })
+    Ok(Plan { fee, shown, credit: group(credit), restock: group(restock) })
 }
 
 /// The credit note for part of an invoice, as a draft: ERP's own `make_credit_note` (which carries
 /// what is still returnable, each line naming the invoice line it gives back in `return_line`) cut
 /// down to the lines and quantities that come back.
-async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &[(Uuid, Decimal)]) -> Result<Doc> {
+async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &[(Uuid, Decimal)], fee: Decimal) -> Result<Doc> {
     let si = get(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
     let made = hc.kernel.run_action_tx(actor, hc.tx, "SalesInvoice", invoice, "make_credit_note", &json!({})).await?;
     let note = made.get("id").and_then(Value::as_str).and_then(|v| v.parse::<Uuid>().ok()).ok_or_else(|| Error::internal("no credit note was made"))?;
@@ -374,7 +389,13 @@ async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &
             let number = s(&si, "number").unwrap_or("the invoice");
             return Err(Error::invalid(format!("{} on {number} has already been credited in full", name.as_deref().unwrap_or("a line"))));
         };
-        kept.push(json!({"id": now.get("id"), "qty": money(-*q)}));
+        let mut row = json!({"id": now.get("id"), "qty": money(-*q)});
+        if fee > Decimal::ZERO {
+            // A restocking fee: the note credits what is left of each line's price after it.
+            let hundred = Decimal::ONE_HUNDRED;
+            row["discount_percent"] = money(hundred - (hundred - d(now, "discount_percent")) * (hundred - fee) / hundred);
+        }
+        kept.push(row);
     }
     let mut patch = Doc::new();
     set(&mut patch, "items", Value::Array(kept));
@@ -408,7 +429,7 @@ async fn estimate(hc: &mut HookCtx<'_>, plan: &Plan) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
     let mut failed = None;
     for (invoice, picks) in &plan.credit {
-        match credit_draft(hc, &actor, *invoice, picks).await {
+        match credit_draft(hc, &actor, *invoice, picks, plan.fee).await {
             Ok(note) => total += d(&note, "rounded_total").abs(),
             Err(e) => {
                 failed = Some(for_person(e));
@@ -491,13 +512,13 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
         Some(item) => invoice_rooms(hc.tx, tenant, so_id, None, Some(item)).await?.first().map(|r| r.qty > Decimal::ZERO).unwrap_or(false),
         None => false,
     };
-    let can_cancel = !started(&so) && held(hc.tx, tenant, so_id, None).await?.is_zero() && payments_made(hc.tx, tenant, so_id).await? == 1;
+    let can_cancel = !started(&so) && unclaimed_payments(hc.tx, tenant, so_id).await? > 0;
     let estimate = if cancel {
         json!({"amount": money(if can_cancel { paid } else { Decimal::ZERO }), "errors": if can_cancel { json!([]) } else { json!(["Part of this order was delivered or invoiced, or its payment is already being sent back."]) }})
     } else if asked.is_empty() {
         Value::Null
     } else {
-        match plan_return(hc, &so, asked, shipping, None).await {
+        match plan_return(hc, &so, asked, shipping, None, Decimal::ZERO).await {
             Ok(p) => match estimate(hc, &p).await {
                 Ok(amount) => json!({"amount": money(amount), "errors": []}),
                 Err(Error::Invalid(why)) => json!({"amount": money(Decimal::ZERO), "errors": [why]}),
@@ -544,11 +565,9 @@ async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
             if started(&so) {
                 return Err(Error::field("kind", "part of this order was delivered or invoiced: send back the goods instead"));
             }
-            if held(hc.tx, hc.ctx.tenant, so_id, None).await? > Decimal::ZERO {
+            // An order paid two ways (a gift card and another) is cancelled by one refund for each.
+            if unclaimed_payments(hc.tx, hc.ctx.tenant, so_id).await? == 0 {
                 return Err(Error::invalid("this payment is already being sent back"));
-            }
-            if payments_made(hc.tx, hc.ctx.tenant, so_id).await? > 1 {
-                return Err(Error::field("kind", "this order was paid two ways (a gift card and another): it is not cancelled with one refund"));
             }
             set(doc, "lines", Value::Array(vec![]));
             set(doc, "include_shipping", false);
@@ -556,7 +575,7 @@ async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
         }
         _ => {
             let asked: Vec<Asked> = asked_lines(doc);
-            let plan = plan_return(hc, &so, &asked, b(doc, "include_shipping"), None).await?;
+            let plan = plan_return(hc, &so, &asked, b(doc, "include_shipping"), None, d(doc, "restocking_fee_percent")).await?;
             let amount = estimate(hc, &plan).await?;
             let lines: Vec<Value> = plan.shown;
             set(doc, "lines", Value::Array(lines));
@@ -612,6 +631,7 @@ impl DocHook for OrderRefundHook {
             let what = match s(doc, "kind") {
                 Some("Cancellation") => "cancelled order",
                 Some("Payment") => "payment",
+                Some("Adjustment") => "changed order",
                 _ => "return",
             };
             let body = format!(
@@ -645,8 +665,16 @@ impl DocHook for OrderRefundHook {
                 set(&mut v, "approved_by", hc.ctx.email.clone());
                 set(&mut v, "approved_at", crate::now_str());
                 hc.kernel.set_values_tx(&sctx, hc.tx, "OrderRefund", refund, v).await?;
-                // No gateway carries a gift card's refund out: it goes back onto the card now.
-                if s(doc, "gateway") == Some(GIFT_CARD) {
+                // No gateway carries a gift card's refund out: it goes back onto the card now, unless the
+                // order's other payment is still on its way back: that goes through a provider and can fail,
+                // so the card is given its value back only once it has gone (see `finish`).
+                if s(doc, "gateway") == Some(GIFT_CARD) || s(doc, "destination") == Some("Store Credit") {
+                    if s(doc, "kind") == Some("Cancellation")
+                        && let Some(so) = id(doc, "sales_order")
+                        && sibling_cancellations(hc.tx, hc.ctx.tenant, so, refund).await?.iter().any(|(_, g, st)| g != GIFT_CARD && st != "Refunded")
+                    {
+                        return Ok(Some(json!({"status": "Approved", "waiting": "the order's other payment is being sent back first"})));
+                    }
                     let approved = get(hc.kernel, hc.ctx, hc.tx, "OrderRefund", refund).await?;
                     return finish(hc, &approved, None, None).await.map(Some);
                 }
@@ -657,10 +685,26 @@ impl DocHook for OrderRefundHook {
                 if !matches!(status.as_str(), "Requested" | "Refund Failed") {
                     return Err(Error::Conflict(format!("this refund is {status}")));
                 }
-                let mut v = Doc::new();
-                set(&mut v, "status", "Declined");
-                set(&mut v, "decision_note", json!(param_text(params, "note", 2000)?));
-                hc.kernel.set_values_tx(&sctx, hc.tx, "OrderRefund", refund, v).await?;
+                let note = param_text(params, "note", 2000)?;
+                // A cancellation of an order paid two ways is one decision: declined for one payment, it is declined
+                // for the other, unless that has already gone back (the order then stays cancelled by hand).
+                let mut also = Vec::new();
+                if s(doc, "kind") == Some("Cancellation")
+                    && let Some(so) = id(doc, "sales_order")
+                {
+                    for (sib, _, st) in sibling_cancellations(hc.tx, hc.ctx.tenant, so, refund).await? {
+                        if st == "Refunded" {
+                            return Err(Error::invalid("the order's other payment has already gone back: finish this one too, or refund it another way"));
+                        }
+                        also.push(sib);
+                    }
+                }
+                for r in std::iter::once(refund).chain(also) {
+                    let mut v = Doc::new();
+                    set(&mut v, "status", "Declined");
+                    set(&mut v, "decision_note", json!(note));
+                    hc.kernel.set_values_tx(&sctx, hc.tx, "OrderRefund", r, v).await?;
+                }
                 json!({"status": "Declined"})
             }
             "mark_refunded" => {
@@ -704,6 +748,9 @@ impl DocHook for OrderRefundHook {
                 if let Some(so) = id(doc, "sales_order") {
                     refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
                 }
+                if failed.is_none() {
+                    release_waiting_card(hc, doc).await?;
+                }
                 json!({"booked": failed.is_none(), "error": failed})
             }
             _ => return Ok(None),
@@ -727,6 +774,81 @@ fn the_gateway(ctx: &Ctx, doc: &Doc) -> Result<()> {
         Some(plugin) => Err(Error::Forbidden(format!("plugin '{plugin}' cannot act on refunds of '{gateway}'"))),
         None => Err(Error::Forbidden("this is reported by the gateway".into())),
     }
+}
+
+// ───────────────────────────── cancelling an order ─────────────────────────────
+
+/// The reason a cancellation carries when nobody chose one: the seeded one, made when the workspace has
+/// not been given it yet.
+async fn cancel_reason(hc: &mut HookCtx<'_>) -> Result<Uuid> {
+    reason_named(hc, "Cancelled before it shipped").await
+}
+
+/// The reason called `name`, made (never restocking) when the workspace has not been given it yet.
+pub(crate) async fn reason_named(hc: &mut HookCtx<'_>, name: &str) -> Result<Uuid> {
+    let sctx = sys(hc.ctx);
+    if let Some(found) =
+        ferrum_domain::util::find(hc.kernel, &sctx, hc.tx, "ReturnReason", vec![ferrum_kernel::Filter::eq("reason", name)], None, 1).await?.first()
+    {
+        return id(found, "id").ok_or_else(|| Error::internal("reason without id"));
+    }
+    let made = hc.kernel.insert_tx(&sctx, hc.tx, "ReturnReason", json!({"reason": name, "restock": false}).as_object().cloned().unwrap_or_default()).await?;
+    id(&made, "id").ok_or_else(|| Error::internal("reason without id"))
+}
+
+/// Cancels a web order nothing of which has gone out: one that nothing was paid on is cancelled at once
+/// (its requests close and a gift card's held value is let go); a paid one is cancelled by a refund for
+/// each payment (a gift card's first), so the card gets its value back and the provider's part goes back
+/// through its own path, and the order is cancelled when the last has gone. `approve` decides the refunds
+/// as it asks for them: a card alone is then back in this transaction; a provider's refund is carried out by
+/// the gateway and can fail, and then it is a refund in the state "Refund Failed" that a person retries.
+pub async fn cancel_order(hc: &mut HookCtx<'_>, so: &Doc, reason: Option<Uuid>, note: Option<String>, approve: bool) -> Result<Value> {
+    let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
+    if d(so, "docstatus") != Decimal::ONE {
+        return Err(Error::invalid("this order was cancelled already"));
+    }
+    if started(so) {
+        return Err(Error::invalid("part of this order has been delivered or invoiced: it can no longer be cancelled, the goods can be sent back instead"));
+    }
+    let sctx = sys(hc.ctx);
+    let to_send = unclaimed_payments(hc.tx, hc.ctx.tenant, so_id).await?;
+    if payments_made(hc.tx, hc.ctx.tenant, so_id).await? == 0 {
+        hc.kernel.cancel_tx(&sctx, hc.tx, "SalesOrder", so_id, None).await?;
+        return Ok(json!({"cancelled": true, "refunds": []}));
+    }
+    if to_send == 0 {
+        return Err(Error::invalid("this order's payment is already being sent back"));
+    }
+    let reason = match reason {
+        Some(r) => r,
+        None => cancel_reason(hc).await?,
+    };
+    let mut made = Vec::new();
+    for _ in 0..to_send {
+        let refund = json!({"sales_order": so_id.to_string(), "kind": "Cancellation", "reason": reason.to_string(), "note": note, "notify_customer": true});
+        let draft = hc.kernel.insert_tx(&sctx, hc.tx, "OrderRefund", refund.as_object().cloned().unwrap_or_default()).await?;
+        made.push(id(&draft, "id").ok_or_else(|| Error::internal("refund without id"))?);
+    }
+    if approve {
+        for r in &made {
+            hc.kernel.run_action_tx(&sctx, hc.tx, "OrderRefund", *r, "approve_refund", &json!({})).await?;
+        }
+    }
+    let mut out = Vec::new();
+    for r in &made {
+        let doc = get(hc.kernel, &sctx, hc.tx, "OrderRefund", *r).await?;
+        out.push(json!({"id": r.to_string(), "gateway": s(&doc, "gateway"), "status": s(&doc, "status"), "amount": money(d(&doc, "amount"))}));
+    }
+    let after = get(hc.kernel, &sctx, hc.tx, "SalesOrder", so_id).await?;
+    Ok(json!({"cancelled": d(&after, "docstatus") == Decimal::TWO, "refunds": out}))
+}
+
+/// The desk's "Cancel Web Order".
+pub async fn web_cancel(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Value> {
+    crate::ship::guard(hc, so)?;
+    let reason = param_text(params, "reason", 36)?.map(|r| r.parse::<Uuid>().map_err(|_| Error::field("reason", "choose one of the reasons"))).transpose()?;
+    let approve = !matches!(param_text(params, "approve", 10)?.as_deref().map(str::to_ascii_lowercase).as_deref(), Some("no"));
+    cancel_order(hc, so, reason, param_text(params, "note", 2000)?, approve).await
 }
 
 // ───────────────────────────── the money is out ─────────────────────────────
@@ -764,6 +886,7 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
     match id(doc, "sales_order") {
         Some(so) => {
             refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
+            crate::edit::refresh_owed(hc.kernel, &sctx, hc.tx, so).await?;
             let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
             let event = json!({
                 "sales_order": so, "number": s(doc, "order_number"), "refund": refund, "kind": s(doc, "kind"), "amount": money(amount), "currency": s(doc, "currency_code"),
@@ -772,10 +895,11 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_refunded", Some("SalesOrder"), Some(so), event).await?;
             if b(doc, "notify_customer") {
                 let number = s(doc, "order_number").unwrap_or_default();
-                let sent = crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), 2);
-                let lines = [format!("{sent} is on its way back to you for order {number}.")];
-                let to = s(&order, "commerce_contact_email");
-                crate::tell::shopper(hc.kernel, hc.tx, hc.ctx.tenant, to, &format!("{sent} refunded for order {number}"), &lines, None).await?;
+                let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
+                let mut values = serde_json::Map::new();
+                values.insert("amount".into(), json!(crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), store.precision)));
+                values.insert("link".into(), json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), number, so).await?));
+                crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.order_refunded", so, s(&order, "commerce_contact_email"), values, vec![]).await?;
             }
         }
         None => {
@@ -788,7 +912,29 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.payment_refunded", Some("SalesInvoice"), invoice, event).await?;
         }
     }
+    if failed.is_none() {
+        release_waiting_card(hc, doc).await?;
+        if let Some(request) = id(doc, "return_request") {
+            crate::shopper::refunded(hc.kernel, hc.ctx, hc.tx, request).await?;
+        }
+    }
     Ok(json!({"status": "Refunded", "booked": failed.is_none(), "booking_error": failed}))
+}
+
+/// The card's part of an order cancelled two ways goes back last, once the provider's part has gone and is
+/// booked: the card refund that waited for it is finished now.
+async fn release_waiting_card(hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
+    let (Some(refund), Some(so)) = (id(doc, "id"), id(doc, "sales_order")) else { return Ok(()) };
+    if s(doc, "kind") != Some("Cancellation") || s(doc, "gateway") == Some(GIFT_CARD) {
+        return Ok(());
+    }
+    for (sib, gateway, st) in sibling_cancellations(hc.tx, hc.ctx.tenant, so, refund).await? {
+        if gateway == GIFT_CARD && st == "Approved" {
+            let waiting = get(hc.kernel, hc.ctx, hc.tx, "OrderRefund", sib).await?;
+            Box::pin(finish(hc, &waiting, None, None)).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Posts the books for a refunded refund, all or nothing. A refusal leaves it for a person (and
@@ -838,9 +984,19 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
         return Ok(out);
     }
     let so_id = id(refund, "sales_order").ok_or_else(|| Error::internal("refund without order"))?;
+    // What an edit of the order took off it: the payment's surplus goes back, no goods and no credit note.
+    if s(refund, "kind") == Some("Adjustment") {
+        let entry = money_out(hc, &actor, refund, &pe, &[pe_id]).await?;
+        set(&mut out, "journal_entry", entry.to_string());
+        return Ok(out);
+    }
     if s(refund, "kind") == Some("Cancellation") {
         // A gift card's payment cancelled gives its value back to the card; its checkout invoice goes too.
         hc.kernel.cancel_tx(&actor, hc.tx, "PaymentEntry", pe_id, None).await?;
+        // An order paid two ways is cancelled by the last of its payments to go back.
+        if payments_made(hc.tx, hc.ctx.tenant, so_id).await? > 0 {
+            return Ok(out);
+        }
         let invoices: Vec<Uuid> = sqlx::query_scalar(
             "select distinct v.id from e_sales_invoice v join e_sales_invoice__items i on i.tenant_id = v.tenant_id and i.parent_id = v.id \
              where v.tenant_id = $1 and i.sales_order = $2 and v.docstatus = 1 and not coalesce(v.is_return, false)",
@@ -857,7 +1013,7 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     }
     let so = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?;
     let asked = asked_lines(refund);
-    let plan = plan_return(hc, &so, &asked, b(refund, "include_shipping"), id(refund, "id")).await?;
+    let plan = plan_return(hc, &so, &asked, b(refund, "include_shipping"), id(refund, "id"), d(refund, "restocking_fee_percent")).await?;
     for (note, picks) in &plan.restock {
         let made = return_note(hc, &actor, *note, picks).await?;
         if out.get("delivery_note").is_none() {
@@ -866,7 +1022,7 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     }
     let mut credits = Vec::new();
     for (invoice, picks) in &plan.credit {
-        let draft = credit_draft(hc, &actor, *invoice, picks).await?;
+        let draft = credit_draft(hc, &actor, *invoice, picks, plan.fee).await?;
         let note = id(&draft, "id").ok_or_else(|| Error::internal("credit note without id"))?;
         hc.kernel.submit_tx(&actor, hc.tx, "SalesInvoice", note, None).await?;
         credits.push(note);
@@ -874,7 +1030,10 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     if let Some(first) = credits.first() {
         set(&mut out, "credit_note", first.to_string());
     }
-    if s(refund, "gateway") == Some(GIFT_CARD) {
+    if s(refund, "destination") == Some("Store Credit") {
+        let entry = as_store_credit(hc, &actor, refund, &credits).await?;
+        set(&mut out, "payment_entry", entry.to_string());
+    } else if s(refund, "gateway") == Some(GIFT_CARD) {
         let entry = onto_card(hc, &actor, refund, &pe, &credits).await?;
         set(&mut out, "payment_entry", entry.to_string());
     } else {
@@ -996,6 +1155,37 @@ async fn onto_card(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let made = id(&draft, "id").ok_or_else(|| Error::internal("payment entry without id"))?;
     hc.kernel.submit_tx(actor, hc.tx, "PaymentEntry", made, None).await?;
     Ok(made)
+}
+
+/// A return refunded as store credit: the credit note's credit put onto a new store credit account (ERP's
+/// stored value), whose code goes to the shopper once, as a secret value of its message.
+async fn as_store_credit(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, credits: &[Uuid]) -> Result<Uuid> {
+    let store = Store::load(hc.kernel, &sys(hc.ctx), hc.tx).await?;
+    let kind = store.policy.credit_kind.ok_or_else(|| Error::invalid("the store sets no store credit to refund to: refund it to the payment"))?;
+    let note = credits.first().ok_or_else(|| Error::invalid("there is no credit note to put onto store credit"))?;
+    let key = format!("commerce:store-credit:{}", id(refund, "id").unwrap_or_default());
+    let out = ferrum_app_erp::stored_value::refund(hc.kernel, actor, hc.tx, kind, *note, None, None, Some(d(refund, "amount")), &key).await?;
+    let payment =
+        out.get("payment").and_then(Value::as_str).and_then(|p| p.parse::<Uuid>().ok()).ok_or_else(|| Error::internal("the store credit was not paid"))?;
+    if let (Some(so), Some(code)) = (id(refund, "sales_order"), out.get("code").and_then(Value::as_str)) {
+        let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
+        let mut values = serde_json::Map::new();
+        values.insert("code".into(), json!(code));
+        values.insert("amount".into(), json!(crate::pages::money(&store.currency_code, &d(refund, "amount").to_string(), store.precision)));
+        values.insert("store".into(), json!(store.name));
+        crate::tell::message(
+            hc.kernel,
+            hc.tx,
+            &sys(hc.ctx),
+            "commerce.store_credit_issued",
+            so,
+            s(&order, "commerce_contact_email"),
+            values,
+            vec!["code".into()],
+        )
+        .await?;
+    }
+    Ok(payment)
 }
 
 /// Closes the order when nothing is left to ship once the returned goods are counted: otherwise the

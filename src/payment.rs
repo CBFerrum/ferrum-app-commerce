@@ -30,13 +30,30 @@ pub async fn create_request(
     return_url: Option<String>,
 ) -> Result<Option<Doc>> {
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
-    let by_card = crate::gift_card::paid(tx, ctx.tenant, so_id).await?;
+    let by_card = crate::gift_card::covered(k, ctx, tx, so_id).await?;
     let amount = d(so, "rounded_total") - by_card;
     if amount <= Decimal::ZERO {
         let status = if by_card > Decimal::ZERO { "Paid" } else { "Not Required" };
         set_order_status(k, ctx, tx, so_id, status, Some(&method.gateway)).await?;
         return Ok(None);
     }
+    open_request(k, ctx, tx, store, so, method, return_url, amount).await.map(Some)
+}
+
+/// A request for `amount` of an order, through `method`: the rest of the order after a card, or what an
+/// edit left it owing.
+#[allow(clippy::too_many_arguments)]
+pub async fn open_request(
+    k: &Kernel,
+    ctx: &Ctx,
+    tx: &mut Tx,
+    store: &Store,
+    so: &Doc,
+    method: &PaymentMethod,
+    return_url: Option<String>,
+    amount: Decimal,
+) -> Result<Doc> {
+    let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let cur = id(so, "currency").ok_or_else(|| Error::internal("order without currency"))?;
     let (code, _) = currency(k, ctx, tx, cur).await?;
     let number = s(so, "number").unwrap_or_default().to_string();
@@ -52,8 +69,14 @@ pub async fn create_request(
     set(&mut pr, "currency_code", code);
     set(&mut pr, "amount", money(amount));
     set(&mut pr, "status", "Initiated");
-    if method.expiry_minutes > 0 {
-        let at = crate::now() + chrono::Duration::minutes(method.expiry_minutes);
+    // Never open longer than the value a card holds for it: a payment that arrived after the hold let go
+    // would leave the card's part unpaid.
+    let until = crate::gift_card::held_until(tx, ctx.tenant, so_id).await?;
+    let at = (method.expiry_minutes > 0).then(|| crate::now() + chrono::Duration::minutes(method.expiry_minutes));
+    if let Some(at) = match (at, until) {
+        (Some(a), Some(u)) => Some(a.min(u)),
+        (a, u) => a.or(u),
+    } {
         set(&mut pr, "expires_at", at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     }
     set(&mut pr, "return_url", json!(return_url));
@@ -62,7 +85,7 @@ pub async fn create_request(
     let pr_id = id(&draft, "id").ok_or_else(|| Error::internal("payment request without id"))?;
     let submitted = k.submit_tx(ctx, tx, "PaymentRequest", pr_id, None).await?;
     set_order_status(k, ctx, tx, so_id, "Pending", Some(&method.gateway)).await?;
-    Ok(Some(submitted))
+    Ok(submitted)
 }
 
 /// Creates and submits a request to pay what is outstanding on a submitted sales invoice (a
@@ -329,6 +352,9 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     hc.kernel.set_values_tx(&sctx, hc.tx, "PaymentRequest", pr_id, v).await?;
     if paid_for == "SalesOrder" {
         refresh_order(hc.kernel, &sctx, hc.tx, paid_id).await?;
+        // The rest of an order a gift card holds part of: now it is paid, it is invoiced and the card redeemed.
+        crate::gift_card::settle(hc.kernel, &sctx, hc.tx, &store, paid_id).await?;
+        crate::edit::refresh_owed(hc.kernel, &sctx, hc.tx, paid_id).await?;
         crate::gift_card::send_sold(hc.kernel, &sctx, hc.tx, &store, paid_id).await?;
     }
     let paid_number = s(&paying, "number").unwrap_or_default().to_string();
@@ -341,6 +367,14 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
         paid_id,
     )
     .await?;
+    if paid_for == "SalesOrder" {
+        // The shopper is told their payment arrived (an order's: an invoice's is another app's to tell).
+        let mut values = serde_json::Map::new();
+        values.insert("amount".into(), json!(crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), store.precision)));
+        values.insert("method".into(), json!(store.method(&gateway).map(|m| m.label.clone()).unwrap_or_else(|| gateway.clone())));
+        values.insert("link".into(), json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), &paid_number, paid_id).await?));
+        crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.payment_received", paid_id, s(doc, "payer_email"), values, vec![]).await?;
+    }
     let (topic, key) = if paid_for == "SalesOrder" { ("commerce.order_paid", "sales_order") } else { ("commerce.invoice_paid", "sales_invoice") };
     let event = json!({key: paid_id, "number": paid_number, "payment_request": pr_id, "payment_entry": pe_id, "amount": money(amount),
                        "currency": s(doc, "currency_code"), "gateway": gateway, "email": s(doc, "payer_email")});
@@ -371,6 +405,15 @@ async fn mark_failed(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<
         refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
         let event = json!({"sales_order": so, "number": s(doc, "order_number"), "payment_request": pr_id, "reason": reason, "email": s(doc, "payer_email")});
         outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.payment_failed", Some("SalesOrder"), Some(so), event).await?;
+        // And told, with the link where it can be tried again.
+        let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
+        let mut values = serde_json::Map::new();
+        values.insert("reason".into(), json!(reason));
+        values.insert(
+            "link".into(),
+            json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), s(doc, "order_number").unwrap_or_default(), so).await?),
+        );
+        crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.payment_failed", so, s(doc, "payer_email"), values, vec![]).await?;
     }
     Ok(json!({"status": "Failed"}))
 }
@@ -574,6 +617,10 @@ impl DocHook for WebOrderHook {
             "web_ship" => crate::ship::web_ship(hc, doc, params).await?,
             "web_invoice" => crate::ship::web_invoice(hc, doc).await?,
             "web_tracking_link" => crate::ship::tracking_link(hc, doc).await?,
+            "web_cancel" => crate::refund::web_cancel(hc, doc, params).await?,
+            "web_update_items" => crate::edit::web_update_items(hc, doc, params).await?,
+            "web_shopper_cancel" => crate::shopper::cancel(hc, doc, params).await?,
+            "web_shopper_return" => crate::shopper::request_return(hc, doc, params).await?,
             _ => return Ok(None),
         }))
     }
@@ -611,6 +658,13 @@ impl DocHook for WebOrderHook {
         .await?;
         if let Some(coupon) = id(doc, "commerce_coupon") {
             crate::coupon::release(hc.tx, hc.ctx.tenant, coupon).await?;
+        }
+        // ERP lets go of value held for a cancelled order; the order forgets it was held.
+        if d(doc, "commerce_card_held") > Decimal::ZERO {
+            let mut v = Doc::new();
+            set(&mut v, "commerce_card_held", money(Decimal::ZERO));
+            set(&mut v, "commerce_card_hold", Value::Null);
+            hc.kernel.set_values_tx(&sys(hc.ctx), hc.tx, "SalesOrder", so, v).await?;
         }
         refresh_order(hc.kernel, &sys(hc.ctx), hc.tx, so).await
     }

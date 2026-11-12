@@ -193,8 +193,8 @@ async fn catalog(k: &Kernel, r: &Req<'_>) -> Result<Value> {
     let sort = Sort::parse(r.query("sort"))?;
     let limit = r.limit(24, catalog::MAX_PAGE)?;
     let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
-    let store = Store::load(k, &r.ctx, &mut tx).await?;
     let customer = customer_of(k, r, &mut tx).await?;
+    let store = Store::load(k, &r.ctx, &mut tx).await?.for_customer(&mut tx, r.ctx.tenant, customer).await?;
     let (items, next) = catalog::cards(k, &r.ctx, &mut tx, &store, &f, sort, limit, r.query("cursor"), customer).await?;
     tx.commit().await?;
     Ok(json!({"items": items, "next_cursor": next, "currency": store.currency_code}))
@@ -211,6 +211,19 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
             let out = with_retry(|| async {
                 let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
                 let out = catalog::submit_review(k, &r.ctx, &mut tx, slug, &body, r.user).await?;
+                tx.commit().await?;
+                Ok(out)
+            })
+            .await?;
+            Ok((201, out))
+        }
+        ("POST", ["items", slug, "stock-alert"]) => {
+            let body = r.body()?;
+            let email = text(&body, "email")?.to_string();
+            let out = with_retry(|| async {
+                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+                let store = Store::load(k, &r.ctx, &mut tx).await?;
+                let out = catalog::stock_alert(k, &r.ctx, &mut tx, &store, slug, &email).await?;
                 tx.commit().await?;
                 Ok(out)
             })
@@ -327,6 +340,7 @@ async fn read_route(k: &Kernel, r: &Req<'_>, segs: &[&str]) -> Result<Value> {
         ("GET", ["categories"]) => json!({"categories": catalog::category_tree(&mut tx, r.ctx.tenant).await?}),
         ("GET", ["items", slug]) => {
             let customer = customer_of(k, r, &mut tx).await?;
+            let store = store.clone().for_customer(&mut tx, r.ctx.tenant, customer).await?;
             catalog::item_page(k, &r.ctx, &mut tx, &store, slug, customer).await?
         }
         ("GET", ["items", slug, "reviews"]) => {

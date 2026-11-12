@@ -92,7 +92,7 @@ async fn crm_records(k: &Kernel, ctx: &Ctx, tx: &mut Tx, customer: Uuid, cart: &
 /// country, ignoring case and spaces), else a new one, the new customer's primary. It is set on the
 /// cart as well as on the order, so both are priced for the same delivery region. None when the
 /// tenant has no Address entity or it cannot be made: the order never fails because of it.
-async fn ship_to_address(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, customer: Uuid, primary: bool) -> Option<Uuid> {
+pub(crate) async fn ship_to_address(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, customer: Uuid, primary: bool) -> Option<Uuid> {
     ctx.schema.entity("Address")?;
     let norm = |v: Option<&str>| v.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     let country = |v: Option<&str>| ferrum_domain::countries::code_for(v.unwrap_or_default()).map_or_else(|| norm(v), str::to_lowercase);
@@ -461,9 +461,18 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     });
     outbox::enqueue(tx, ctx.tenant, "commerce.order_placed", Some("SalesOrder"), Some(so_id), event).await?;
     let amount = crate::pages::money(&store.currency_code, &d(&so, "rounded_total").to_string(), store.precision);
-    let mut lines = vec![format!("Thank you for your order {number} at {}: {amount}, paid by {method_label}.", store.name)];
-    lines.extend(method.as_ref().and_then(|m| m.instructions.clone()));
-    crate::tell::shopper(k, tx, ctx.tenant, s(&cart, "email"), &format!("Your order {number} at {}", store.name), &lines, order_link.as_deref()).await?;
+    // What the shopper may do next (cancel, return) is a signed link, kept sealed while the mail waits.
+    let manage = crate::shopper::manage_link(k, ctx, tx, &store, so_id, s(&cart, "email")).await;
+    let mut values = Map::new();
+    values.insert("store".into(), json!(store.name));
+    values.insert("total".into(), json!(amount));
+    values.insert("method".into(), json!(method_label));
+    values.insert("instructions".into(), json!(method.as_ref().and_then(|m| m.instructions.clone())));
+    values.insert("link".into(), json!(order_link));
+    values.insert("manage_start".into(), json!(manage.as_ref().map(|m| m.0.clone())));
+    values.insert("manage_token".into(), json!(manage.as_ref().map(|m| m.1.clone())));
+    let secret = if manage.is_some() { vec!["manage_token".to_string()] } else { vec![] };
+    crate::tell::message(k, tx, ctx, "commerce.order_placed", so_id, s(&cart, "email"), values, secret).await?;
     response(k, ctx, tx, &store, so_id).await
 }
 
@@ -511,6 +520,7 @@ mod tests {
             cancel_unpaid_orders: true,
             channel: "Web Shop".into(),
             gift_card_kind: None,
+            policy: crate::store::Policy::default(),
         }
     }
 

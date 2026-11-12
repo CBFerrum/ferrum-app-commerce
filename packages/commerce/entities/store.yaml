@@ -53,8 +53,17 @@
     - {name: gift_card_kind, type: link, to: StoredValueKind, label: Gift Cards, description: "The stored value the shop takes at checkout and sells as gift cards (an item that names it); empty: no gift cards"}
     - {name: sales_channel, type: data, max_length: 140, default: Web Shop, label: Sales Channel, description: "The channel web carts and orders name, as promotions' Channels list it (empty: Web Shop)"}
     - {name: cancel_unpaid_orders, type: check, default: true, description: "Cancel a web order when its payment request expires unpaid, releasing its reserved stock"}
+    - {name: cancel_window_hours, type: int, default: 24, min: 0, max: 8760, label: "Shoppers May Cancel for (Hours)", description: "After an order is placed, a shopper may cancel it themselves from the link in their confirmation, while it has not shipped: 0 = not at all"}
+    - {name: cancel_refund, type: select, options: [Automatic, Desk Approves], default: Automatic, label: Refund of a Cancellation, description: "Automatic: what was paid goes back at once; Desk Approves: the refund waits for a person"}
+    - {name: return_window_days, type: int, default: 14, min: 0, max: 365, label: "Shoppers May Ask to Return for (Days)", description: "After the goods were delivered a shopper may ask to send them back, from the same link: 0 = not at all. The desk approves or declines"}
+    - {name: return_shipping_paid_by, type: select, options: [Shopper, Store], default: Shopper, label: Return Shipping Paid By}
+    - {name: restocking_fee_percent, type: percent, default: 0, label: Restocking Fee, description: "Kept from what a return credits, per cent of the goods' price"}
+    - {name: refund_destination, type: select, options: [Original Payment, Store Credit], default: Original Payment, label: Returns Are Refunded To}
+    - {name: out_for_delivery_words, type: data, max_length: 300, label: Carrier Words for Out for Delivery, description: "What a carrier says when a parcel is out for delivery, in its own words, separated by commas (as its tracking reports them): the shopper is then told. Empty: not told"}
+    - {name: store_credit_kind, type: link, to: StoredValueKind, label: Store Credit, description: "The stored value a return is refunded as when the store refunds to store credit; empty: back to the payment"}
   form:
     - {label: Store, fields: [store_name, company, currency, price_list, tax_template, display_prices_with_tax, store_url, terms_url]}
     - {label: Stock, fields: [warehouses, fulfilment_warehouse, enforce_stock, show_stock_quantity]}
     - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders, sales_channel, gift_card_kind]}
+    - {label: After Sales, fields: [cancel_window_hours, cancel_refund, return_window_days, return_shipping_paid_by, restocking_fee_percent, refund_destination, store_credit_kind, out_for_delivery_words]}
     - {label: Limits, collapsible: true, fields: [max_qty_per_line, max_cart_lines, abandon_after_hours, cart_expiry_days]}

@@ -12,6 +12,20 @@
   fields:
     - {name: country_code, type: data, required: true, max_length: 2, in_list: true, description: ISO 3166-1 alpha-2}
 
+- name: ShippingRuleRegion
+  label: Shipping Rule Region
+  kind: child
+  fields:
+    - {name: country_code, type: data, max_length: 2, in_list: true, description: "ISO 3166-1 alpha-2; empty: the region of any of the rule's countries"}
+    - {name: region, type: data, required: true, max_length: 100, in_list: true, description: "State or province, as the shopper gives it (any case)"}
+
+- name: ShippingRulePostalRange
+  label: Shipping Rule Postal Range
+  kind: child
+  fields:
+    - {name: from_code, type: data, required: true, max_length: 20, in_list: true, description: "First postal code of the range, or its start (SW1)"}
+    - {name: to_code, type: data, max_length: 20, in_list: true, description: "Last postal code (numbers compare as numbers, letters by what a code starts with); empty: only codes that start with the first"}
+
 - name: ShippingRule
   label: Shipping Rule
   kind: master
@@ -25,6 +39,9 @@
     - {name: amount, type: currency, min: "0", label: Fixed Charge, visible_if: "doc.basis == 'Fixed'"}
     - {name: bands, type: table, of: ShippingRuleBand, visible_if: "doc.basis != 'Fixed'", description: "Bands may not overlap; a cart outside every band cannot use this rule"}
     - {name: countries, type: table, of: ShippingRuleCountry, description: "Empty: every country the store ships to"}
+    - {name: regions, type: table, of: ShippingRuleRegion, description: "Empty: every region of the countries. Otherwise only these"}
+    - {name: postal_ranges, type: table, of: ShippingRulePostalRange, description: "Empty: every postal code. Otherwise only codes in these ranges"}
+    - {name: free_over, type: currency, min: "0", default: 0, label: Free Over, description: "An order whose goods come to this much or more ships free by this rule (0: never)"}
     - {name: sort_order, type: int, default: 0}
     - {name: description, type: text, max_length: 1000}
   list: {columns: [label, basis, enabled, sort_order], sort: label asc}

@@ -1,5 +1,5 @@
 package: commerce
-version: 0.4.0
+version: 0.5.0
 label: Commerce
 description: Online store on the same items, prices, stock and books - catalog with categories and reviews, carts, guest and customer checkout into sales orders, payment requests for gateway plugins, shipping rules and coupon codes.
 depends: [core, selling, inventory, accounting]
@@ -25,6 +25,9 @@ overlays:
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
       - {op: add_field, field: {name: commerce_paid_by_card, type: currency, label: Paid by Gift Card, read_only: true, description: "Taken from a gift card at checkout: the order was invoiced then, as stored value pays invoices"}}
+      - {op: add_field, field: {name: commerce_amount_owed, type: currency, label: Owed After a Change, read_only: true, description: "After the order was changed: what the shopper still owes (positive) or the store owes them (negative); nothing when settled"}}
+      - {op: add_field, field: {name: commerce_card_held, type: currency, label: Held on Gift Card, read_only: true, description: "A gift card covers part of the order: this much is held on it until the rest is paid; nothing is invoiced before"}}
+      - {op: add_field, field: {name: commerce_card_hold, type: data, label: Gift Card Hold, read_only: true, hidden: true, max_length: 40}}
       - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
@@ -35,12 +38,34 @@ overlays:
                    {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}]}}
       - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
           confirm: "Create the invoice for this delivered order?"}}
+      - {op: add_action, action: {name: web_cancel, label: Cancel Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered == 0.0 && doc.status != 'Closed'",
+          confirm: "Cancel this order that has not shipped? What was paid goes back: a gift card's part onto the card, the rest through the payment it came by.",
+          params: [{name: reason, label: Reason, type: link, to: ReturnReason}, {name: note, label: Note, type: text},
+                   {name: approve, label: "Send the money back now", type: select, options: ["Yes", "No"], description: "No: the refunds wait for a person to approve them"}]}}
+      - {op: add_action, action: {name: web_update_items, label: Update Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
+          confirm: "Change this order? Promotions are priced again; what the shopper now owes is asked for, or what they are owed is sent back.",
+          params: [{name: changes, label: "Lines to change", type: text, description: "A JSON list: {line, qty} (the line's number on the order; qty 0 removes it) or {item, qty} to add an item"},
+                   {name: address, label: "New shipping address", type: text, description: "A JSON object: {line1, line2, city, state, postal_code, country}. Tax follows where the order now goes"},
+                   {name: note, label: Note, type: text},
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: approve, label: "Send a refund of the difference now", type: select, options: ["Yes", "No"]}]}}
+      # What a shopper does from the signed link in their order confirmation (a link names these actions; a guest
+      # holds no role): src/shopper.rs checks the order, the store's windows and says what is wrong in words.
+      - {op: add_action, action: {name: web_shopper_cancel, label: Cancel My Order, docstatus: [1], permission: read,
+          confirm: "Cancel this order? What you paid goes back to you.",
+          params: [{name: reason, label: Why are you cancelling?, type: text}]}}
+      - {op: add_action, action: {name: web_shopper_return, label: Return Something, docstatus: [1], permission: read,
+          params: [{name: lines, label: What are you sending back, type: text, description: "Leave empty to send back everything delivered; otherwise the item's number on your order and how many, as 1x2, 3 (the first item twice, the third once)"},
+                   {name: reason, label: Why, type: data}, {name: note, label: Anything we should know, type: text}]}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
   - entity: DeliveryNote
     ops:
       - {op: add_field, field: {name: commerce_tracking_number, type: data, label: Tracking Number, max_length: 120, description: "Shown to the shopper on the order page"}}
       - {op: add_field, field: {name: commerce_tracking_url, type: url, label: Tracking Link, max_length: 2000}}
       - {op: add_field, field: {name: commerce_notify, type: check, label: Tell the Customer, description: "Sends the shopper the shipping news (the commerce.order_shipped event) when this is submitted"}}
+  - entity: DeliveryNote
+    ops:
+      - {op: add_field, field: {name: commerce_out_notified, type: check, label: Out for Delivery Told, read_only: true, no_copy: true, hidden: true}}
+      - {op: add_field, field: {name: commerce_delivered_notified, type: check, label: Delivered Told, read_only: true, no_copy: true, hidden: true}}
   - entity: PaymentEntry
     ops:
       - {op: add_field, field: {name: commerce_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true}}
@@ -51,7 +76,7 @@ modules:
     label: Commerce
     icon: shopping-bag
     order: 42
-    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnReason, ShippingRule, CouponCode, SalesOrder,
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnRequest, StockAlert, ReturnReason, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
 # What a personal-data request exports and erases for a shopper (their email): their carts'
@@ -59,6 +84,8 @@ modules:
 personal_data:
   - {entity: ShoppingCart, match: email, phone: phone, erase: [email, user_email, phone, contact_name, ship_address_line1, ship_address_line2, ship_city, ship_state, ship_postal_code, bill_address_line1, bill_address_line2, bill_city, bill_state, bill_postal_code, notes]}
   - {entity: ItemReview, match: reviewer_email, erase: [reviewer_name, reviewer_email]}
+  - {entity: ReturnRequest, match: email, erase: [email, shopper_note]}
+  - {entity: StockAlert, match: email, erase: [email]}
   - {entity: PaymentRequest, match: payer_email, retain: "Payment records"}
 roles:
   - name: Website Manager
@@ -77,6 +104,8 @@ roles:
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
       - {entity: PaymentException, read: true, write: true, export: true}
       - {entity: OrderRefund, read: true, write: true, create: true, export: true}
+      - {entity: ReturnRequest, read: true, write: true, export: true}
+      - {entity: StockAlert, read: true, export: true}
       - {entity: ReturnReason, read: true, write: true, create: true, delete: true}
       - {entity: SalesOrder, read: true, export: true}
       - {entity: DeliveryNote, read: true}
@@ -99,6 +128,7 @@ roles:
       - {entity: PaymentRequest, read: true}
       - {entity: PaymentException, read: true}
       - {entity: OrderRefund, read: true, create: true}
+      - {entity: ReturnRequest, read: true}
       - {entity: ReturnReason, read: true}
       - {entity: WebsiteItem, read: true}
       - {entity: ItemCategory, read: true}
@@ -110,6 +140,7 @@ roles:
       - {entity: ShoppingCart, read: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
       - {entity: OrderRefund, read: true, write: true, create: true, export: true}
+      - {entity: ReturnRequest, read: true, write: true, export: true}
       - {entity: ReturnReason, read: true}
       - {entity: WebsiteItem, read: true}
       - {entity: ItemCategory, read: true}
@@ -147,6 +178,135 @@ messages:
           subject: "Your gift card from {{ values.store }}"
           body: "<p>Here is the gift card you bought with order {{ doc.number }}, holding {{ values.amount }}.</p><p>Its code: <strong>{{ values.code }}</strong>{% if values.pin %}, PIN <strong>{{ values.pin }}</strong>{% endif %}</p><p>Keep this message: we do not keep the code and cannot send it again.</p>"
 
+  - key: commerce.order_changed
+    label: A web order was changed
+    entity: SalesOrder
+    values: [total, owed, refund, pay_now, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} was changed"
+          body: "<p>We changed your order {{ doc.number }}. It now comes to {{ values.total }}.</p>{% if values.owed %}<p>{{ values.owed }} is still to pay{% if values.pay_now %}: you can pay it from your order page{% endif %}.</p>{% endif %}{% if values.refund %}<p>{{ values.refund }} will go back to you.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+
+  - key: commerce.payment_received
+    label: A payment for a web order arrived
+    entity: SalesOrder
+    values: [amount, method, link]
+    languages:
+      en:
+        email:
+          subject: "Payment received for order {{ doc.number }}"
+          body: "<p>We have received your payment of {{ values.amount }} ({{ values.method }}) for order {{ doc.number }}. Thank you.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+  - key: commerce.payment_failed
+    label: A payment for a web order failed
+    entity: SalesOrder
+    values: [reason, link]
+    languages:
+      en:
+        email:
+          subject: "Your payment for order {{ doc.number }} did not go through"
+          body: "<p>Your payment for order {{ doc.number }} did not go through{% if values.reason %}: {{ values.reason }}{% endif %}. Nothing was taken.</p>{% if values.link %}<p>You can try again from your order page: <a href=\"{{ values.link }}\">pay for your order</a>.</p>{% endif %}"
+  - key: commerce.out_for_delivery
+    label: A parcel is out for delivery
+    entity: SalesOrder
+    values: [carrier, tracking_number, tracking_url, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} is out for delivery"
+          body: "<p>Your order {{ doc.number }} is out for delivery{% if values.carrier %} with {{ values.carrier }}{% endif %}.</p>{% if values.tracking_url %}<p>Where the carrier shows it: {{ values.tracking_url }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+  - key: commerce.order_delivered
+    label: A parcel was delivered
+    entity: SalesOrder
+    values: [carrier, tracking_number, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} was delivered"
+          body: "<p>The carrier reports that your order {{ doc.number }} was delivered.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a>, where you can ask to send something back.</p>{% endif %}"
+  - key: commerce.back_in_stock
+    label: An item a shopper asked about is back in stock
+    entity: StockAlert
+    values: [title, link]
+    languages:
+      en:
+        email:
+          subject: "{{ values.title }} is back in stock"
+          body: "<p>You asked us to tell you when {{ values.title }} is back: it is.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">See it in the store</a></p>{% endif %}"
+  - key: commerce.cart_reminder
+    label: A reminder of a cart left behind
+    entity: ShoppingCart
+    category: promotional
+    values: [store, link]
+    languages:
+      en:
+        email:
+          subject: "You left something in your cart at {{ values.store }}"
+          body: "<p>You left {{ doc.item_count }} item(s) in your cart at {{ values.store }}.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">Go back to your cart</a></p>{% endif %}{% if opt_out %}<p><a href=\"{{ opt_out }}\">Stop these reminders</a></p>{% endif %}"
+  - key: commerce.order_placed
+    label: A web order was placed
+    entity: SalesOrder
+    values: [store, total, method, instructions, link, manage_start, manage_token]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} at {{ values.store }}"
+          body: "<p>Thank you for your order {{ doc.number }} at {{ values.store }}: {{ values.total }}, paid by {{ values.method }}.</p>{% if values.instructions %}<p>{{ values.instructions }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}{% if values.manage_token %}<p><a href=\"{{ values.manage_start }}{{ values.manage_token }}\">Cancel the order or send something back</a></p>{% endif %}"
+  - key: commerce.order_refunded
+    label: Money was sent back for a web order
+    entity: SalesOrder
+    values: [amount, link]
+    languages:
+      en:
+        email:
+          subject: "{{ values.amount }} refunded for order {{ doc.number }}"
+          body: "<p>{{ values.amount }} is on its way back to you for order {{ doc.number }}.</p>{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a></p>{% endif %}"
+  - key: commerce.order_cancelled
+    label: A shopper cancelled an order
+    entity: SalesOrder
+    values: [refund_waits, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} was cancelled"
+          body: "<p>Your order {{ doc.number }} has been cancelled, as you asked.</p>{% if values.refund_waits %}<p>What you paid goes back to you once we have approved the refund; we will write again when it does.</p>{% else %}<p>What you paid is on its way back to you.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a></p>{% endif %}"
+  - key: commerce.return_requested
+    label: A shopper asked to return goods
+    entity: SalesOrder
+    values: [number, lines]
+    languages:
+      en:
+        email:
+          subject: "We have your return request {{ values.number }}"
+          body: "<p>We have your request to send back{% for l in values.lines %}{% if loop.first %}: {% endif %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %} from order {{ doc.number }}.</p><p>We will look at it and write to you with what to do next.</p>"
+  - key: commerce.return_approved
+    label: A return was approved
+    entity: SalesOrder
+    values: [number, note, store_pays_shipping, fee]
+    languages:
+      en:
+        email:
+          subject: "Your return {{ values.number }} is approved"
+          body: "<p>You can send back the goods from order {{ doc.number }}.</p>{% if values.store_pays_shipping %}<p>We pay for the return shipping.</p>{% else %}<p>Please send them at your own cost.</p>{% endif %}{% if values.fee %}<p>{{ values.fee }}% of the goods' price is kept as a restocking fee.</p>{% endif %}{% if values.note %}<p>{{ values.note }}</p>{% endif %}<p>Once they reach us, the refund follows and we write to you again.</p>"
+  - key: commerce.return_declined
+    label: A return was declined
+    entity: SalesOrder
+    values: [number, note, store_pays_shipping, fee]
+    languages:
+      en:
+        email:
+          subject: "Your return {{ values.number }} was not approved"
+          body: "<p>We are sorry: we cannot take back the goods from order {{ doc.number }}.</p>{% if values.note %}<p>{{ values.note }}</p>{% endif %}"
+  - key: commerce.store_credit_issued
+    label: Store credit given for a return
+    entity: SalesOrder
+    values: [code, amount, store]
+    languages:
+      en:
+        email:
+          subject: "Your store credit from {{ values.store }}"
+          body: "<p>For your return from order {{ doc.number }} we have given you {{ values.amount }} of store credit.</p><p>Its code: <strong>{{ values.code }}</strong></p><p>Keep this message: we do not keep the code and cannot send it again.</p>"
+
 seed:
   - entity: ReturnReason
     key: [reason]
@@ -157,4 +317,5 @@ seed:
       - {reason: Not as described}
       - {reason: Arrived too late}
       - {reason: Cancelled before it shipped, restock: false}
+      - {reason: Order changed, restock: false}
       - {reason: Other}

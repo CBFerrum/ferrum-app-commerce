@@ -5,7 +5,7 @@
 
 use crate::catalog::{self, available, stock_items, stock_view};
 use crate::coupon;
-use crate::shipping::{Rule, enabled_rules};
+use crate::shipping::{Place, Rule, enabled_rules};
 use crate::store::{Store, valid_country};
 use crate::token;
 use async_trait::async_trait;
@@ -159,7 +159,13 @@ fn reset_prices(doc: &mut Doc) {
 /// Prices the cart from scratch: store defaults, goods lines through the pricing engine, the
 /// coupon (dropped when it lapsed), the shipping line, and the cart totals.
 pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &mut Doc) -> Result<()> {
-    let store = Store::load(k, ctx, tx).await?;
+    // A recognised customer (the cart's, or the signed-in shopper's) is priced from their own price list.
+    let customer = match (id(doc, "customer"), s(doc, "user_email")) {
+        (Some(c), _) => Some(c),
+        (None, Some(email)) => crate::orders::linked_customers(k, ctx, tx, email).await?.into_iter().next(),
+        _ => None,
+    };
+    let store = Store::load(k, ctx, tx).await?.for_customer(tx, ctx.tenant, customer).await?;
     let today = crate::today().to_string();
     set(doc, "company", store.company.to_string());
     set(doc, "currency", store.currency.to_string());
@@ -167,6 +173,12 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
     set(doc, "tax_template", json!(store.tax_template.map(|t| t.to_string())));
     set(doc, "set_warehouse", store.fulfilment_warehouse.to_string());
     set(doc, "channel", store.channel.clone());
+    // Where it goes, as country rules read it, as soon as the shopper has said (before any Address exists):
+    // the total shown is the total charged.
+    if id(doc, "ship_to").is_none() {
+        set(doc, "delivery_country", json!(s(doc, "ship_country")));
+        set(doc, "delivery_region", json!(s(doc, "ship_state")));
+    }
     set(doc, "posting_date", today.clone());
     set(doc, "conversion_rate", Value::Null);
     set(doc, "last_activity", crate::now_str());
@@ -229,8 +241,8 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
     // Shipping: the chosen rule if it still applies, else the only one that does.
     let subtotal: Decimal = goods(doc).iter().map(|l| d(l, "amount")).sum();
     let rules = enabled_rules(k, ctx, tx).await?;
-    let country = s(doc, "ship_country").map(str::to_string);
-    let applicable: Vec<(&Rule, Decimal)> = rules.iter().filter_map(|r| r.charge(country.as_deref(), subtotal, weight).map(|c| (r, c))).collect();
+    let place = Place::of_cart(doc);
+    let applicable: Vec<(&Rule, Decimal)> = rules.iter().filter_map(|r| r.charge(&place, subtotal, weight).map(|c| (r, c))).collect();
     let chosen =
         id(doc, "shipping_rule").and_then(|rid| applicable.iter().find(|(r, _)| r.id == rid)).or(if applicable.len() == 1 { applicable.first() } else { None });
     set(doc, "shipping_rule", json!(chosen.map(|(r, _)| r.id.to_string())));
@@ -500,6 +512,13 @@ pub async fn set_details(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart
             "notes" => {
                 patch.insert("notes".into(), text(v, "notes", 2000)?);
             }
+            // The shopper's consent to be reminded of a cart they leave (the abandoned cart reminder, and the
+            // event other apps may act on); given or withdrawn here, at the details step of checkout.
+            "reminder_consent" => {
+                if ctx.schema.entity("ShoppingCart").is_some_and(|e| e.field("reminder_consent").is_some()) {
+                    patch.insert("reminder_consent".into(), json!(v.as_bool().ok_or_else(|| Error::field(key, "must be true or false"))?));
+                }
+            }
             "billing_same_as_shipping" => {
                 patch.insert("billing_same_as_shipping".into(), json!(v.as_bool().ok_or_else(|| Error::field(key, "must be true or false"))?));
             }
@@ -534,6 +553,20 @@ pub async fn set_details(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart
                 }
             }
             other => return Err(Error::field(other, "unknown field")),
+        }
+    }
+    // A known customer's orders go to an Address of theirs, and ERP resolves one for any document of a customer:
+    // so that the cart is priced for the place just given (not the address they used last), it is that place's
+    // Address (the one that says the same, else made, as at checkout).
+    if let Some(customer) = id(cart, "customer")
+        && patch.keys().any(|k| k.starts_with("ship_"))
+    {
+        let mut shape = cart.clone();
+        shape.extend(patch.clone());
+        if ["ship_address_line1", "ship_city", "ship_country"].iter().all(|f| s(&shape, f).is_some())
+            && let Some(place) = crate::checkout::ship_to_address(k, ctx, tx, &shape, customer, false).await
+        {
+            patch.insert("ship_to".into(), json!(place.to_string()));
         }
     }
     save(k, ctx, tx, cart, patch).await
@@ -597,8 +630,8 @@ pub async fn remove_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, code:
 pub async fn shipping_options(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc) -> Result<Vec<(Rule, Decimal)>> {
     let subtotal: Decimal = goods(cart).iter().map(|l| d(l, "amount")).sum();
     let weight = d(cart, "total_weight_kg");
-    let country = s(cart, "ship_country");
-    Ok(enabled_rules(k, ctx, tx).await?.into_iter().filter_map(|r| r.charge(country, subtotal, weight).map(|c| (r, c))).collect())
+    let place = Place::of_cart(cart);
+    Ok(enabled_rules(k, ctx, tx).await?.into_iter().filter_map(|r| r.charge(&place, subtotal, weight).map(|c| (r, c))).collect())
 }
 
 pub async fn set_shipping(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, rule: &str) -> Result<Doc> {

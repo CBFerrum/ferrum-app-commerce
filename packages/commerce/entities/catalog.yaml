@@ -43,6 +43,13 @@
     - {name: option, type: data, required: true, max_length: 60, in_list: true, description: "What varies, e.g. Size or Colour"}
     - {name: value, type: data, required: true, max_length: 60, in_list: true, description: "This variant's choice, e.g. M or Red"}
 
+- name: WebsiteItemDisabledOption
+  label: Website Item Disabled Option
+  kind: child
+  fields:
+    - {name: option, type: data, required: true, max_length: 60, in_list: true, description: "What varies, e.g. Size"}
+    - {name: value, type: data, required: true, max_length: 60, in_list: true, description: "The value the store does not sell, e.g. XL: every combination that has it stays unpublished"}
+
 - name: WebsiteItem
   label: Website Item
   kind: master
@@ -58,6 +65,7 @@
     - {name: ranking, type: int, default: 0, in_list: true, description: Higher ranks list first}
     - {name: variant_of, type: link, to: WebsiteItem, in_list: true, in_filter: true, on_delete: restrict, description: "Makes this item a variant (a size, a colour) of another store item: shoppers choose it on that item's page. A variant is an item of its own, with its own price, stock and code."}
     - {name: options, type: table, of: WebsiteItemOption, visible_if: "doc.variant_of != null", description: "What makes this variant different: Size M, Colour Red. Every variant of an item names the same options."}
+    - {name: disabled_options, type: table, of: WebsiteItemDisabledOption, visible_if: "doc.variant_of == null", description: "Option values the store does not sell: the combinations that have one are kept unpublished"}
     - {name: short_description, type: text, max_length: 1000}
     - {name: long_description, type: markdown, max_length: 100000}
     - {name: images, type: table, of: WebsiteItemImage}
@@ -70,12 +78,17 @@
     - {name: rating_average, type: decimal, read_only: true, precision: 2, no_copy: true}
     - {name: review_count, type: int, read_only: true, no_copy: true}
   form:
-    - {label: Item, fields: [item, item_code, title, slug, published, ranking, variant_of, options]}
+    - {label: Item, fields: [item, item_code, title, slug, published, ranking, variant_of, options, disabled_options]}
     - {label: Content, fields: [short_description, long_description, images]}
     - {label: Placement, fields: [categories, related_items]}
     - {label: Shipping and Limits, fields: [weight_kg, max_qty]}
     - {label: SEO, collapsible: true, fields: [seo_title, seo_description]}
     - {label: Reviews, collapsible: true, fields: [rating_average, review_count]}
+  actions:
+    - {name: generate_variants, label: Generate Variants, permission: write, condition: "doc.variant_of == null",
+       confirm: "Make the combinations as ERP's item variants (the missing ones), each with a website item and the price of this one?",
+       params: [{name: options, label: Options, type: text, required: true, description: "What it comes in, as JSON: {\"Size\": [\"S\", \"M\", \"L\"], \"Colour\": [\"Red\", \"Blue\"]}"},
+                {name: disabled, label: "Values not sold", type: text, description: "Values the store does not sell, as JSON: {\"Size\": [\"L\"]}; their combinations are made unpublished"}]}
   list: {columns: [title, item, slug, published, ranking], sort: title asc}
 
 - name: ItemReview
@@ -97,3 +110,20 @@
   rules:
     - {name: reviewer_known, check: "doc.reviewer_email != null || doc.customer != null", message: "A review needs the reviewer's email or customer"}
   list: {columns: [website_item, rating, title, reviewer_name, status, verified_purchase], sort: created_at desc}
+
+- name: StockAlert
+  label: Stock Alert
+  kind: document
+  module: commerce
+  title_field: item_title
+  search_fields: [email, item_title]
+  description: "A shopper asked to be told when an out of stock item is back: told once, when it is."
+  fields:
+    - {name: website_item, type: link, to: WebsiteItem, required: true, read_only: true, on_delete: cascade, in_filter: true}
+    - {name: item_title, type: data, read_only: true, max_length: 200, in_list: true}
+    - {name: item_slug, type: data, read_only: true, max_length: 200}
+    - {name: email, type: email, required: true, read_only: true, in_list: true}
+    - {name: status, type: select, options: [Waiting, Sent], default: Waiting, read_only: true, in_list: true, in_filter: true}
+    - {name: sent_at, type: datetime, read_only: true}
+  indexes: [[status, website_item]]
+  list: {columns: [item_title, email, status, created_at], sort: created_at desc}
