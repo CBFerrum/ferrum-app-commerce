@@ -148,6 +148,20 @@ describe("an order", () => {
     expect(html).not.toContain("Waiting for");
   });
 
+  it("offers to change and cancel an order that has not shipped, and says what it owes and what a card holds", () => {
+    const todo = { ...full, per_delivered: "0", per_billed: "0", status: "To Deliver and Bill", commerce_amount_owed: "120", commerce_card_held: "150", items: (full.items as { delivered_qty: string }[]).map((l) => ({ ...l, delivered_qty: "0" })) };
+    const qc = client([[["commerce", "order", "o1"], todo], [["commerce", "order", "o1", "related"], { ...related, deliveries: [], invoices: [], refunds: [] }]]);
+    const html = plain(draw(qc, "/o/o1", "/o/:id", <OrderRoute />));
+    expect(html).toContain("Change…");
+    expect(html).toContain("Cancel order…");
+    expect(html).toContain("the shopper still owes");
+    expect(html).toContain("A gift card holds");
+    // Shipped in full: nothing to cancel, nothing to change.
+    const sent = plain(draw(client([[["commerce", "order", "o1"], full], [["commerce", "order", "o1", "related"], related]]), "/o/o1", "/o/:id", <OrderRoute />));
+    expect(sent).not.toContain("Cancel order…");
+    expect(sent).not.toContain("Change…");
+  });
+
   it("is not for an order that did not come from the web", () => {
     const qc = client([[["commerce", "order", "o1"], order({ commerce_web_order: false })]]);
     expect(plain(draw(qc, "/o/o1", "/o/:id", <OrderRoute />))).toContain("This is not a web order");

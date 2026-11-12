@@ -751,6 +751,39 @@
   }
 }
 
+/* ── changing and cancelling an order, the returns desk, the variants builder ── */
+
+.cm-standing {
+  margin-block: 1rem;
+}
+
+.cm-row3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+}
+
+.cm-qty {
+  width: 6rem;
+}
+
+.cm-table tr[data-removed] td:not(:last-child) {
+  text-decoration: line-through;
+  color: var(--muted-foreground);
+}
+
+.cm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-block: 0.5rem;
+}
+
+.cm-matrix td[data-off] {
+  color: var(--muted-foreground);
+  text-decoration: line-through;
+}
+
 /* ── printed: the pick list and the order, without the controls ── */
 
 @media print {
