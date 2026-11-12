@@ -326,6 +326,7 @@ CHANGELOG.md  what changed in each version
 |---|---|
 | **0.7.20** | The redesigned interface: the upgraded design system, shaped loading, told-apart states. |
 | **0.7.21** | Orders carry the shopper's delivery address as a structured ship-to (country code, region), for tax rules of any country. |
+| **0.7.22** | Rebuilt on the tuned design system: better menu icons, a lighter first page, a visible scroll cue, cleaner print. |
 | **0.7.19** | A second or third partial refund with ERP 0.15's credit notes. |
 | **0.7.18** | Its reports' names in Arabic and Hindi. |
 | **0.7.17** | Its names in Arabic and Hindi; the last English sentences translated. |
