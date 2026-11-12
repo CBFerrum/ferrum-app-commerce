@@ -602,6 +602,8 @@ impl DocHook for WebOrderHook {
             "web_tracking_link" => crate::ship::tracking_link(hc, doc).await?,
             "web_cancel" => crate::refund::web_cancel(hc, doc, params).await?,
             "web_update_items" => crate::edit::web_update_items(hc, doc, params).await?,
+            "web_shopper_cancel" => crate::shopper::cancel(hc, doc, params).await?,
+            "web_shopper_return" => crate::shopper::request_return(hc, doc, params).await?,
             _ => return Ok(None),
         }))
     }

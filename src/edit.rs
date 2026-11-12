@@ -326,7 +326,7 @@ pub async fn web_update_items(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) ->
         values.insert("refund".into(), json!((difference < Decimal::ZERO).then(|| fmt(difference))));
         values.insert("pay_now".into(), json!(requested.is_string()));
         values.insert("link".into(), json!(tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), &number, so_id).await?));
-        tell::message(hc.kernel, hc.tx, hc.ctx, "commerce.order_changed", so_id, s(&after, "commerce_contact_email"), values).await?;
+        tell::message(hc.kernel, hc.tx, hc.ctx, "commerce.order_changed", so_id, s(&after, "commerce_contact_email"), values, vec![]).await?;
     }
     summary.insert("total".into(), money(total));
     summary.insert("difference".into(), money(difference));

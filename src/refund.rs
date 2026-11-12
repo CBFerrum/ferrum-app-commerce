@@ -146,13 +146,13 @@ pub(crate) fn for_person(e: Error) -> Error {
 // ───────────────────────────── reading the books ─────────────────────────────
 
 #[derive(Default, Clone, Copy)]
-struct Claims {
-    all: Decimal,
-    restocked: Decimal,
+pub(crate) struct Claims {
+    pub all: Decimal,
+    pub restocked: Decimal,
 }
 
 /// Units already asked to come back, per order line.
-async fn claims(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Result<HashMap<String, Claims>> {
+pub(crate) async fn claims(tx: &mut Tx, tenant: Uuid, so: Uuid, except: Option<Uuid>) -> Result<HashMap<String, Claims>> {
     let found: Vec<(String, Decimal, Decimal)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select l.sales_order_line, sum(l.qty), coalesce(sum(l.qty) filter (where r.booked and coalesce(l.restock, false)), 0) \
          from e_order_refund__lines l join e_order_refund r on r.tenant_id = l.tenant_id and r.id = l.parent_id \
@@ -293,12 +293,14 @@ fn asked_lines(doc: &Doc) -> Vec<Asked> {
 /// What a return does to the books: the invoice lines to credit and the delivery note lines to
 /// restock, and the lines to show.
 struct Plan {
+    /// Kept from what the credit notes credit, per cent (a restocking fee).
+    fee: Decimal,
     shown: Vec<Value>,
     credit: Vec<(Uuid, Vec<(Uuid, Decimal)>)>,
     restock: Vec<(Uuid, Vec<(Uuid, Decimal)>)>,
 }
 
-async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: bool, except: Option<Uuid>) -> Result<Plan> {
+async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: bool, except: Option<Uuid>, fee: Decimal) -> Result<Plan> {
     let tenant = hc.ctx.tenant;
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     if asked.is_empty() {
@@ -368,13 +370,13 @@ async fn plan_return(hc: &mut HookCtx<'_>, so: &Doc, asked: &[Asked], shipping: 
     if !errors.is_empty() {
         return Err(Error::Validation(errors));
     }
-    Ok(Plan { shown, credit: group(credit), restock: group(restock) })
+    Ok(Plan { fee, shown, credit: group(credit), restock: group(restock) })
 }
 
 /// The credit note for part of an invoice, as a draft: ERP's own `make_credit_note` (which carries
 /// what is still returnable, each line naming the invoice line it gives back in `return_line`) cut
 /// down to the lines and quantities that come back.
-async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &[(Uuid, Decimal)]) -> Result<Doc> {
+async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &[(Uuid, Decimal)], fee: Decimal) -> Result<Doc> {
     let si = get(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
     let made = hc.kernel.run_action_tx(actor, hc.tx, "SalesInvoice", invoice, "make_credit_note", &json!({})).await?;
     let note = made.get("id").and_then(Value::as_str).and_then(|v| v.parse::<Uuid>().ok()).ok_or_else(|| Error::internal("no credit note was made"))?;
@@ -387,7 +389,13 @@ async fn credit_draft(hc: &mut HookCtx<'_>, actor: &Ctx, invoice: Uuid, picks: &
             let number = s(&si, "number").unwrap_or("the invoice");
             return Err(Error::invalid(format!("{} on {number} has already been credited in full", name.as_deref().unwrap_or("a line"))));
         };
-        kept.push(json!({"id": now.get("id"), "qty": money(-*q)}));
+        let mut row = json!({"id": now.get("id"), "qty": money(-*q)});
+        if fee > Decimal::ZERO {
+            // A restocking fee: the note credits what is left of each line's price after it.
+            let hundred = Decimal::ONE_HUNDRED;
+            row["discount_percent"] = money(hundred - (hundred - d(now, "discount_percent")) * (hundred - fee) / hundred);
+        }
+        kept.push(row);
     }
     let mut patch = Doc::new();
     set(&mut patch, "items", Value::Array(kept));
@@ -421,7 +429,7 @@ async fn estimate(hc: &mut HookCtx<'_>, plan: &Plan) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
     let mut failed = None;
     for (invoice, picks) in &plan.credit {
-        match credit_draft(hc, &actor, *invoice, picks).await {
+        match credit_draft(hc, &actor, *invoice, picks, plan.fee).await {
             Ok(note) => total += d(&note, "rounded_total").abs(),
             Err(e) => {
                 failed = Some(for_person(e));
@@ -510,7 +518,7 @@ async fn plan_in(hc: &mut HookCtx<'_>, so_id: Uuid, asked: &[Asked], shipping: b
     } else if asked.is_empty() {
         Value::Null
     } else {
-        match plan_return(hc, &so, asked, shipping, None).await {
+        match plan_return(hc, &so, asked, shipping, None, Decimal::ZERO).await {
             Ok(p) => match estimate(hc, &p).await {
                 Ok(amount) => json!({"amount": money(amount), "errors": []}),
                 Err(Error::Invalid(why)) => json!({"amount": money(Decimal::ZERO), "errors": [why]}),
@@ -567,7 +575,7 @@ async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
         }
         _ => {
             let asked: Vec<Asked> = asked_lines(doc);
-            let plan = plan_return(hc, &so, &asked, b(doc, "include_shipping"), None).await?;
+            let plan = plan_return(hc, &so, &asked, b(doc, "include_shipping"), None, d(doc, "restocking_fee_percent")).await?;
             let amount = estimate(hc, &plan).await?;
             let lines: Vec<Value> = plan.shown;
             set(doc, "lines", Value::Array(lines));
@@ -660,7 +668,7 @@ impl DocHook for OrderRefundHook {
                 // No gateway carries a gift card's refund out: it goes back onto the card now, unless the
                 // order's other payment is still on its way back: that goes through a provider and can fail,
                 // so the card is given its value back only once it has gone (see `finish`).
-                if s(doc, "gateway") == Some(GIFT_CARD) {
+                if s(doc, "gateway") == Some(GIFT_CARD) || s(doc, "destination") == Some("Store Credit") {
                     if s(doc, "kind") == Some("Cancellation")
                         && let Some(so) = id(doc, "sales_order")
                         && sibling_cancellations(hc.tx, hc.ctx.tenant, so, refund).await?.iter().any(|(_, g, st)| g != GIFT_CARD && st != "Refunded")
@@ -828,10 +836,10 @@ pub async fn cancel_order(hc: &mut HookCtx<'_>, so: &Doc, reason: Option<Uuid>, 
     }
     let mut out = Vec::new();
     for r in &made {
-        let doc = get(hc.kernel, hc.ctx, hc.tx, "OrderRefund", *r).await?;
+        let doc = get(hc.kernel, &sctx, hc.tx, "OrderRefund", *r).await?;
         out.push(json!({"id": r.to_string(), "gateway": s(&doc, "gateway"), "status": s(&doc, "status"), "amount": money(d(&doc, "amount"))}));
     }
-    let after = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?;
+    let after = get(hc.kernel, &sctx, hc.tx, "SalesOrder", so_id).await?;
     Ok(json!({"cancelled": d(&after, "docstatus") == Decimal::TWO, "refunds": out}))
 }
 
@@ -887,10 +895,11 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_refunded", Some("SalesOrder"), Some(so), event).await?;
             if b(doc, "notify_customer") {
                 let number = s(doc, "order_number").unwrap_or_default();
-                let sent = crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), 2);
-                let lines = [format!("{sent} is on its way back to you for order {number}.")];
-                let to = s(&order, "commerce_contact_email");
-                crate::tell::shopper(hc.kernel, hc.tx, hc.ctx.tenant, to, &format!("{sent} refunded for order {number}"), &lines, None).await?;
+                let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
+                let mut values = serde_json::Map::new();
+                values.insert("amount".into(), json!(crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), store.precision)));
+                values.insert("link".into(), json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), number, so).await?));
+                crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.order_refunded", so, s(&order, "commerce_contact_email"), values, vec![]).await?;
             }
         }
         None => {
@@ -905,6 +914,9 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
     }
     if failed.is_none() {
         release_waiting_card(hc, doc).await?;
+        if let Some(request) = id(doc, "return_request") {
+            crate::shopper::refunded(hc.kernel, hc.ctx, hc.tx, request).await?;
+        }
     }
     Ok(json!({"status": "Refunded", "booked": failed.is_none(), "booking_error": failed}))
 }
@@ -1001,7 +1013,7 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     }
     let so = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so_id).await?;
     let asked = asked_lines(refund);
-    let plan = plan_return(hc, &so, &asked, b(refund, "include_shipping"), id(refund, "id")).await?;
+    let plan = plan_return(hc, &so, &asked, b(refund, "include_shipping"), id(refund, "id"), d(refund, "restocking_fee_percent")).await?;
     for (note, picks) in &plan.restock {
         let made = return_note(hc, &actor, *note, picks).await?;
         if out.get("delivery_note").is_none() {
@@ -1010,7 +1022,7 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     }
     let mut credits = Vec::new();
     for (invoice, picks) in &plan.credit {
-        let draft = credit_draft(hc, &actor, *invoice, picks).await?;
+        let draft = credit_draft(hc, &actor, *invoice, picks, plan.fee).await?;
         let note = id(&draft, "id").ok_or_else(|| Error::internal("credit note without id"))?;
         hc.kernel.submit_tx(&actor, hc.tx, "SalesInvoice", note, None).await?;
         credits.push(note);
@@ -1018,7 +1030,10 @@ async fn post_books(hc: &mut HookCtx<'_>, refund: &Doc) -> Result<Doc> {
     if let Some(first) = credits.first() {
         set(&mut out, "credit_note", first.to_string());
     }
-    if s(refund, "gateway") == Some(GIFT_CARD) {
+    if s(refund, "destination") == Some("Store Credit") {
+        let entry = as_store_credit(hc, &actor, refund, &credits).await?;
+        set(&mut out, "payment_entry", entry.to_string());
+    } else if s(refund, "gateway") == Some(GIFT_CARD) {
         let entry = onto_card(hc, &actor, refund, &pe, &credits).await?;
         set(&mut out, "payment_entry", entry.to_string());
     } else {
@@ -1140,6 +1155,37 @@ async fn onto_card(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let made = id(&draft, "id").ok_or_else(|| Error::internal("payment entry without id"))?;
     hc.kernel.submit_tx(actor, hc.tx, "PaymentEntry", made, None).await?;
     Ok(made)
+}
+
+/// A return refunded as store credit: the credit note's credit put onto a new store credit account (ERP's
+/// stored value), whose code goes to the shopper once, as a secret value of its message.
+async fn as_store_credit(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, credits: &[Uuid]) -> Result<Uuid> {
+    let store = Store::load(hc.kernel, &sys(hc.ctx), hc.tx).await?;
+    let kind = store.policy.credit_kind.ok_or_else(|| Error::invalid("the store sets no store credit to refund to: refund it to the payment"))?;
+    let note = credits.first().ok_or_else(|| Error::invalid("there is no credit note to put onto store credit"))?;
+    let key = format!("commerce:store-credit:{}", id(refund, "id").unwrap_or_default());
+    let out = ferrum_app_erp::stored_value::refund(hc.kernel, actor, hc.tx, kind, *note, None, None, Some(d(refund, "amount")), &key).await?;
+    let payment =
+        out.get("payment").and_then(Value::as_str).and_then(|p| p.parse::<Uuid>().ok()).ok_or_else(|| Error::internal("the store credit was not paid"))?;
+    if let (Some(so), Some(code)) = (id(refund, "sales_order"), out.get("code").and_then(Value::as_str)) {
+        let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
+        let mut values = serde_json::Map::new();
+        values.insert("code".into(), json!(code));
+        values.insert("amount".into(), json!(crate::pages::money(&store.currency_code, &d(refund, "amount").to_string(), store.precision)));
+        values.insert("store".into(), json!(store.name));
+        crate::tell::message(
+            hc.kernel,
+            hc.tx,
+            &sys(hc.ctx),
+            "commerce.store_credit_issued",
+            so,
+            s(&order, "commerce_contact_email"),
+            values,
+            vec!["code".into()],
+        )
+        .await?;
+    }
+    Ok(payment)
 }
 
 /// Closes the order when nothing is left to ship once the returned goods are counted: otherwise the
