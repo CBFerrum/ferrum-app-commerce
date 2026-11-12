@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 pub const MANUAL: &str = "Manual";
 pub const CASH_ON_DELIVERY: &str = "Cash on Delivery";
+/// The channel of a store that names none (a workspace from before Sales Channel).
+pub const WEB_SHOP: &str = "Web Shop";
 
 #[derive(Debug, Clone)]
 pub struct PaymentMethod {
@@ -75,6 +77,10 @@ pub struct Store {
     pub abandon_after_hours: i64,
     pub cart_expiry_days: i64,
     pub cancel_unpaid_orders: bool,
+    /// The channel carts and orders name, as promotions list it.
+    pub channel: String,
+    /// The stored value kind taken at checkout and sold as gift cards.
+    pub gift_card_kind: Option<Uuid>,
 }
 
 impl Store {
@@ -141,6 +147,8 @@ impl Store {
             abandon_after_hours: int("abandon_after_hours", 24),
             cart_expiry_days: int("cart_expiry_days", 30),
             cancel_unpaid_orders: b(&doc, "cancel_unpaid_orders"),
+            channel: s(&doc, "sales_channel").unwrap_or(WEB_SHOP).to_string(),
+            gift_card_kind: id(&doc, "gift_card_kind"),
         })
     }
 
@@ -166,6 +174,7 @@ impl Store {
             "payment_methods": self.payment_methods.iter().map(PaymentMethod::view).collect::<Vec<_>>(),
             "max_qty_per_line": self.max_qty_per_line.normalize().to_string(),
             "max_cart_lines": self.max_cart_lines,
+            "gift_cards": self.gift_card_kind.is_some(),
         })
     }
 }
@@ -257,6 +266,25 @@ impl DocHook for SettingsHook {
         }
         Err(Error::Validation(errors))
     }
+
+    async fn after_save(&self, hc: &mut HookCtx<'_>, doc: &Doc, _old: Option<&Doc>) -> Result<()> {
+        mark_delivery_charge(hc.tx, hc.ctx.tenant, id(doc, "shipping_item")).await
+    }
+}
+
+/// The store's shipping item is a delivery charge, so promotions treat it as one (only free delivery
+/// takes it off). Run on saving the settings and by the upkeep, so a store from before needs nothing.
+pub async fn mark_delivery_charge(tx: &mut Tx, tenant: Uuid, item: Option<Uuid>) -> Result<()> {
+    if let Some(item) = item {
+        sqlx::query(
+            "update e_item set is_delivery_charge = true, updated_at = now() where tenant_id = $1 and id = $2 and not coalesce(is_delivery_charge, false)",
+        )
+        .bind(tenant)
+        .bind(item)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Website Managers, who hear about new web orders and payments.

@@ -30,9 +30,11 @@ pub async fn create_request(
     return_url: Option<String>,
 ) -> Result<Option<Doc>> {
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
-    let amount = d(so, "rounded_total");
+    let by_card = crate::gift_card::paid(tx, ctx.tenant, so_id).await?;
+    let amount = d(so, "rounded_total") - by_card;
     if amount <= Decimal::ZERO {
-        set_order_status(k, ctx, tx, so_id, "Not Required", Some(&method.gateway)).await?;
+        let status = if by_card > Decimal::ZERO { "Paid" } else { "Not Required" };
+        set_order_status(k, ctx, tx, so_id, status, Some(&method.gateway)).await?;
         return Ok(None);
     }
     let cur = id(so, "currency").ok_or_else(|| Error::internal("order without currency"))?;
@@ -153,10 +155,15 @@ pub async fn refresh_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid) -> Resu
 /// The status behind `refresh_order`: `requests` are (status, amount), newest first; `sent` is what
 /// refunds have returned.
 pub(crate) fn web_status(requests: &[(String, Decimal)], sent: Decimal) -> Option<&'static str> {
-    if let Some((_, paid)) = requests.iter().find(|(st, _)| st == "Paid") {
+    // The rest of an order a gift card paid part of, still to pay.
+    if requests.first().is_some_and(|(st, _)| st == "Initiated") && sent.is_zero() {
+        return Some("Pending");
+    }
+    let paid: Decimal = requests.iter().filter(|(st, _)| st == "Paid").map(|(_, a)| *a).sum();
+    if requests.iter().any(|(st, _)| st == "Paid") {
         return Some(if sent <= Decimal::ZERO {
             "Paid"
-        } else if sent >= *paid {
+        } else if sent >= paid {
             "Refunded"
         } else {
             "Partly Refunded"
@@ -322,6 +329,7 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     hc.kernel.set_values_tx(&sctx, hc.tx, "PaymentRequest", pr_id, v).await?;
     if paid_for == "SalesOrder" {
         refresh_order(hc.kernel, &sctx, hc.tx, paid_id).await?;
+        crate::gift_card::send_sold(hc.kernel, &sctx, hc.tx, &store, paid_id).await?;
     }
     let paid_number = s(&paying, "number").unwrap_or_default().to_string();
     notify_managers(
@@ -509,7 +517,7 @@ impl DocHook for PaymentRequestHook {
         if d(doc, "amount") <= Decimal::ZERO {
             return Err(Error::field("amount", "must be greater than zero"));
         }
-        if !s(doc, "gateway").is_some_and(valid_gateway) {
+        if !s(doc, "gateway").is_some_and(|g| valid_gateway(g) || g == crate::gift_card::GIFT_CARD) {
             return Err(Error::field("gateway", "use a gateway plugin's name, Manual or Cash on Delivery"));
         }
         // A request pays a web order or, without one, an invoice.
@@ -729,6 +737,12 @@ mod tests {
         );
         // A paid request anywhere in the list wins over a newer failed one.
         assert_eq!(web_status(&[("Failed".into(), Decimal::from(100)), ("Paid".into(), Decimal::from(100))], Decimal::ZERO), Some("Paid"));
+        // A gift card paid part: the rest is still to pay; once paid, what went back counts against both.
+        let split = |rest: &str, sent: i64| web_status(&[(rest.into(), Decimal::from(31)), ("Paid".into(), Decimal::from(500))], Decimal::from(sent));
+        assert_eq!(
+            (split("Initiated", 0), split("Paid", 0), split("Paid", 500), split("Paid", 531)),
+            (Some("Pending"), Some("Paid"), Some("Partly Refunded"), Some("Refunded"))
+        );
     }
 
     #[test]

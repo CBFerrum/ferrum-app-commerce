@@ -10,6 +10,7 @@ use crate::store::{Store, valid_country};
 use crate::token;
 use async_trait::async_trait;
 use ferrum_app_erp::pricing::{Side, calculate};
+use ferrum_app_erp::promotion;
 use ferrum_domain::util::{b, d, get, id, money, round, rows, s, set};
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, FieldError, HookCtx, Kernel, Result, Tx};
 use ferrum_meta::EffEntity;
@@ -18,7 +19,10 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const PRICE_FIELDS: [&str; 7] = ["price_list_rate", "discount_percent", "rate", "amount", "net_amount", "base_net_amount", "item_tax_rates"];
+const PRICE_FIELDS: [&str; 8] =
+    ["price_list_rate", "discount_percent", "promotion_percent", "rate", "amount", "net_amount", "base_net_amount", "item_tax_rates"];
+/// Promotion codes one cart may carry at once.
+const MAX_CODES: usize = 10;
 const ADDRESS_PARTS: [&str; 6] = ["line1", "line2", "city", "state", "postal_code", "country"];
 
 /// Goods lines (everything but the shipping charge).
@@ -31,6 +35,16 @@ fn address_field(prefix: &str, part: &str) -> String {
         "line1" | "line2" => format!("{prefix}_address_{part}"),
         other => format!("{prefix}_{other}"),
     }
+}
+
+/// A line a promotion added (a free item): priced and removed by the promotion, not by the shopper.
+pub fn promoted(line: &Doc) -> bool {
+    s(line, "added_by_promotion").is_some()
+}
+
+/// The promotion codes on a cart, as kept (capitals, commas between).
+pub fn codes(cart: &Doc) -> Vec<String> {
+    s(cart, "promotion_codes").unwrap_or_default().split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect()
 }
 
 /// Multi-line postal form of the cart's shipping (`ship`) or billing (`bill`) address.
@@ -119,6 +133,7 @@ fn zero_totals(doc: &mut Doc) {
         set(doc, f, money(Decimal::ZERO));
     }
     set(doc, "taxes", Value::Array(vec![]));
+    set(doc, "applied_promotions", Value::Array(vec![]));
 }
 
 fn clear_coupon(doc: &mut Doc) {
@@ -150,6 +165,8 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
     set(doc, "currency", store.currency.to_string());
     set(doc, "price_list", store.price_list.to_string());
     set(doc, "tax_template", json!(store.tax_template.map(|t| t.to_string())));
+    set(doc, "set_warehouse", store.fulfilment_warehouse.to_string());
+    set(doc, "channel", store.channel.clone());
     set(doc, "posting_date", today.clone());
     set(doc, "conversion_rate", Value::Null);
     set(doc, "last_activity", crate::now_str());
@@ -184,6 +201,14 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
         if lapsed {
             clear_coupon(doc);
         }
+    }
+
+    // Promotion codes that no longer open a promotion (used up, switched off) stop applying, as a
+    // lapsed coupon does; ERP counts the uses when the order is submitted.
+    let given = codes(doc);
+    if !given.is_empty() {
+        let (good, _) = promotion::check_codes(k, ctx, tx, &given).await?;
+        set(doc, "promotion_codes", json!(good.iter().map(|c| c.code.as_str()).collect::<Vec<_>>().join(",")));
     }
 
     if goods(doc).is_empty() {
@@ -223,6 +248,9 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
         );
         set(doc, "items", Value::Array(items.into_iter().map(Value::Object).collect()));
         calculate(k, ctx, tx, ent, doc, Side::Selling).await?;
+        // What the shopper pays for delivery: the line's amount, after a free-delivery promotion.
+        let line = rows(doc, "items").into_iter().find(|l| b(l, "is_shipping")).map(|l| d(&l, "amount")).unwrap_or_default();
+        set(doc, "shipping_amount", money(line));
     }
 
     let lines = goods(doc);
@@ -511,13 +539,31 @@ pub async fn set_details(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart
     save(k, ctx, tx, cart, patch).await
 }
 
+/// A code the shopper gives: the store's own coupon (one per cart, as before) or one of ERP's
+/// promotion codes (several), priced by the same promotions as any sales order.
 pub async fn apply_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, code: &str) -> Result<Doc> {
     let code = coupon::normalize_code(code);
     let unknown = || Error::field("coupon_code", "this coupon code is not valid");
     if !coupon::valid_code(&code) {
         return Err(unknown());
     }
-    let c = coupon::by_code(k, ctx, tx, &code).await?.ok_or_else(unknown)?;
+    let Some(c) = coupon::by_code(k, ctx, tx, &code).await? else {
+        let mut given = codes(cart);
+        if given.contains(&code) {
+            return Ok(cart.clone());
+        }
+        // An unknown code and a used-up one get the same answer.
+        if promotion::check_codes(k, ctx, tx, std::slice::from_ref(&code)).await?.0.is_empty() {
+            return Err(unknown());
+        }
+        if given.len() >= MAX_CODES {
+            return Err(Error::field("coupon_code", format!("a cart takes at most {MAX_CODES} codes")));
+        }
+        given.push(code);
+        let mut patch = Doc::new();
+        patch.insert("promotion_codes".into(), json!(given.join(",")));
+        return save(k, ctx, tx, cart, patch).await;
+    };
     let rule = id(&c, "pricing_rule").ok_or_else(unknown)?;
     let today = crate::today().to_string();
     coupon::check(tx, ctx.tenant, &c, list_subtotal(cart, store.precision), id(cart, "customer"), s(cart, "email"), cart_id(cart)?, &today).await?;
@@ -534,9 +580,16 @@ pub async fn apply_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, car
     Ok(updated)
 }
 
-pub async fn remove_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc) -> Result<Doc> {
+/// Takes a code off the cart: the one given, or (none given) the store's coupon.
+pub async fn remove_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, code: Option<&str>) -> Result<Doc> {
     let mut patch = Doc::new();
-    clear_coupon(&mut patch);
+    match code.map(coupon::normalize_code) {
+        Some(c) if s(cart, "coupon_code") != Some(c.as_str()) => {
+            let left: Vec<String> = codes(cart).into_iter().filter(|x| *x != c).collect();
+            patch.insert("promotion_codes".into(), json!(left.join(",")));
+        }
+        _ => clear_coupon(&mut patch),
+    }
     save(k, ctx, tx, cart, patch).await
 }
 
@@ -593,8 +646,9 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
         .iter()
         .map(|l| {
             let wi = id(l, "website_item");
-            // An item unpublished (or deleted) since it was added: checkout refuses the line.
-            let (slug, title, sold) = wi.and_then(|w| meta.get(&w)).cloned().unwrap_or_default();
+            // An item unpublished (or deleted) since it was added: checkout refuses the line. A free
+            // item a promotion added comes and goes with the promotion.
+            let (slug, title, sold) = wi.and_then(|w| meta.get(&w)).cloned().unwrap_or((None, None, promoted(l)));
             let item = id(l, "item").unwrap_or_default();
             let (in_stock, qty) = stock_view(store, stock.contains(&item), avail.get(&item).copied().unwrap_or_default());
             let enough = !stock.contains(&item) || !store.enforce_stock || avail.get(&item).copied().unwrap_or_default() >= d(l, "qty");
@@ -607,6 +661,8 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
                 "list_price": m(d(l, "price_list_rate")),
                 "price": m(d(l, "rate")),
                 "discount_percent": m(d(l, "discount_percent")),
+                "promotion_percent": m(d(l, "promotion_percent")),
+                "added_by_promotion": promoted(l),
                 "amount": m(d(l, "amount")),
                 "available": sold,
                 "in_stock": in_stock && enough,
@@ -627,6 +683,16 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
         .map(|t| json!({"description": s(t, "description"), "amount": m(if b(t, "deduct") { -d(t, "tax_amount") } else { d(t, "tax_amount") })}))
         .collect();
     let subtotal: Decimal = lines.iter().map(|l| d(l, "amount")).sum();
+    let applied = rows(cart, "applied_promotions");
+    let mut promotions: Vec<(String, Decimal)> = Vec::new();
+    for a in &applied {
+        let title = s(a, "title").unwrap_or_default().to_string();
+        match promotions.iter_mut().find(|(t, _)| *t == title) {
+            Some((_, sum)) => *sum += d(a, "amount"),
+            None => promotions.push((title, d(a, "amount"))),
+        }
+    }
+    let code_views: Vec<Value> = codes(cart).iter().map(|c| json!({"code": c, "applied": applied.iter().any(|a| s(a, "code") == Some(c.as_str()))})).collect();
     let rules_exist = shipping_rules_exist(tx, ctx.tenant).await?;
     let status = match s(cart, "status") {
         Some("Abandoned") | None => "Open",
@@ -638,6 +704,8 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
         "items": line_views,
         "item_count": m(d(cart, "item_count")),
         "coupon": s(cart, "coupon_code").map(|c| json!({"code": c})),
+        "codes": code_views,
+        "promotions": promotions.iter().map(|(t, a)| json!({"title": t, "amount": m(*a)})).collect::<Vec<_>>(),
         "shipping": shipping,
         "email": s(cart, "email"),
         "phone": s(cart, "phone"),
