@@ -15,6 +15,7 @@ mod cart;
 mod catalog;
 mod checkout;
 mod coupon;
+mod edit;
 mod gift_card;
 mod orders;
 mod pages;

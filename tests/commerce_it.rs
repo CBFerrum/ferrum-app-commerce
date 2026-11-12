@@ -2264,3 +2264,91 @@ async fn subscriptions() {
 fn sid(doc: &Doc) -> String {
     doc["id"].as_str().unwrap().to_string()
 }
+
+#[test]
+fn order_edits_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(order_edits()).await.unwrap() });
+}
+
+/// The desk changes an order before it is fulfilled: quantities, lines, the address. An unpaid order's
+/// request is replaced; a paid one is asked for the difference, or sent it back; the shopper is told; what
+/// has shipped cannot be taken off.
+async fn order_edits() {
+    let Shop { t, tenant, cid, tee, .. } = shop_with("order-edits", &["commerce", "crm"]).await;
+    let output_tax = t.find_one("Account", json!({"account_name": "Output Tax", "company": cid.to_string()})).await;
+    let reduced = t
+        .insert(
+            "TaxTemplate",
+            json!({"title": "VAT 5%", "company": cid.to_string(), "kind": "Sales",
+                   "rows": [{"charge_type": "On Net Total", "account": output_tax["id"], "description": "VAT", "rate": "5"}]}),
+        )
+        .await;
+    ferrum_app_erp::localization::add(Arc::new(RegionTax(Mutex::new(Some(tenant)), uid(&reduced))));
+    let fakepay = gateway(&t, "fakepay").await;
+    let edit = |so: Uuid, params: Value| {
+        let t = &t;
+        async move { t.k.run_action(&t.ctx, "SalesOrder", so, "web_update_items", params).await }
+    };
+
+    // ───────────── unpaid: the request is replaced by one for the new total ─────────────
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 2}]), "edit@example.com", "fakepay", "edit-a-0001").await;
+    assert_eq!(a.total, n("649"), "(500 + 50) at 18%");
+    let done = edit(a.so, json!({"changes": r#"[{"line": 1, "qty": "1"}]"#})).await.expect("edited");
+    assert_eq!((dec(&done["total"]), dec(&done["difference"])), (n("354"), n("-295")));
+    assert_eq!(t.get("PaymentRequest", a.request.unwrap()).await["status"], json!("Cancelled"), "the request for the old total is closed");
+    let request = uid(&t.find_one("PaymentRequest", json!({"sales_order": a.so.to_string(), "status": "Initiated"})).await);
+    assert_eq!(dec(&t.get("PaymentRequest", request).await["amount"]), n("354"));
+    let told = mails(&t, "edit@example.com").await;
+    assert!(told.iter().any(|(s, h)| s.contains("was changed") && h.contains("354")), "{told:?}");
+    assert_eq!(t.available("blue-mug").await, n("9"), "the mug taken off is free again");
+    pay(&t, &t.ctx, request, n("354"), "fp_edit_1").await;
+
+    // ───────────── paid, then more: asked for the difference through the same method ─────────────
+    let more = edit(a.so, json!({"changes": format!(r#"[{{"item": "{tee}", "qty": 1}}]"#)})).await.expect("added");
+    assert_eq!((dec(&more["total"]), dec(&more["difference"])), (n("826"), n("472")), "(250 + 400 + 50) at 18%");
+    let again = uid(&t.find_one("PaymentRequest", json!({"sales_order": a.so.to_string(), "status": "Initiated"})).await);
+    assert_eq!((dec(&t.get("PaymentRequest", again).await["amount"]), t.get("PaymentRequest", again).await["gateway"].clone()), (n("472"), json!("fakepay")));
+    assert_eq!(dec(&t.get("SalesOrder", a.so).await["commerce_amount_owed"]), n("0"), "asked for, so not left owing");
+    pay(&t, &t.ctx, again, n("472"), "fp_edit_2").await;
+    assert_eq!(t.get("SalesOrder", a.so).await["commerce_payment_status"], json!("Paid"));
+
+    // ───────────── paid, then less: sent back through the gateway, booked when it has gone ─────────────
+    let less = edit(a.so, json!({"changes": r#"[{"line": 3, "qty": "0"}]"#})).await.expect("removed (the delivery charge is line 2)");
+    assert_eq!(dec(&less["difference"]), n("-472"));
+    let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string(), "kind": "Adjustment"})).await;
+    assert_eq!((refund["status"].clone(), dec(&refund["amount"]), refund["gateway"].clone()), (json!("Approved"), n("472"), json!("fakepay")));
+    t.k.run_action(&fakepay, "OrderRefund", uid(&refund), "refund_done", json!({"refund_reference": "re_edit"})).await.expect("sent back");
+    let refund = t.get("OrderRefund", uid(&refund)).await;
+    assert_eq!((refund["status"].clone(), refund["booked"].clone()), (json!("Refunded"), json!(true)), "{refund:?}");
+    assert_eq!(dec(&t.get("SalesOrder", a.so).await["commerce_amount_owed"]), n("0"));
+    assert_eq!(t.get("SalesOrder", a.so).await["commerce_payment_status"], json!("Partly Refunded"));
+
+    // ───────────── part shipped: what has gone cannot come off; the rest can change ─────────────
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 1}, {"item": "logo-tee", "qty": 2}]), "part@example.com", "Cash on Delivery", "edit-b-0001").await;
+    let so = t.get("SalesOrder", b.so).await;
+    let tee_line = so["items"].as_array().unwrap().iter().find(|l| l["item_name"] == json!("Logo Tee")).unwrap()["id"].as_str().unwrap().to_string();
+    t.k.run_action(&t.ctx, "SalesOrder", b.so, "web_ship", json!({"lines": format!(r#"[{{"line": "{tee_line}", "qty": "1"}}]"#), "notify": "No"}))
+        .await
+        .expect("shipped");
+    let number_of = |name: &str| so["items"].as_array().unwrap().iter().position(|l| l["item_name"] == json!(name)).unwrap() + 1;
+    let refused = edit(b.so, json!({"changes": format!(r#"[{{"line": {}, "qty": "0"}}]"#, number_of("Logo Tee"))})).await.unwrap_err().to_string();
+    assert!(refused.contains("delivered") || refused.contains("shipped") || refused.contains("billed"), "refused in words: {refused}");
+    edit(b.so, json!({"changes": format!(r#"[{{"line": {}, "qty": "0"}}]"#, number_of("Blue Mug"))})).await.expect("the mug that has not shipped can come off");
+    assert_eq!(t.get("SalesOrder", b.so).await["commerce_fulfilment_status"], json!("Partly Fulfilled"));
+
+    // ───────────── the address: tax follows where it now goes ─────────────
+    let c = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "move@example.com", "fakepay", "edit-c-0001").await;
+    assert_eq!(c.total, n("354"));
+    let moved = edit(c.so, json!({"address": {"line1": "5 Marine Drive", "city": "Mumbai", "state": "Maharashtra", "postal_code": "400001", "country": "IN"}}))
+        .await
+        .expect("moved");
+    assert_eq!(dec(&moved["total"]), n("315"), "300 at 5% where the rule says");
+    let so = t.get("SalesOrder", c.so).await;
+    assert!(so["commerce_shipping_address"].as_str().unwrap().contains("Marine Drive"));
+    let place_now = t.find_one("Address", json!({"id": so["ship_to"]})).await;
+    assert_eq!(place_now["state"], json!("Maharashtra"));
+    let refused = edit(c.so, json!({"address": {"line1": "1 Rue", "city": "Paris", "country": "FR"}})).await.unwrap_err().to_string();
+    assert!(refused.contains("ship"), "{refused}");
+}

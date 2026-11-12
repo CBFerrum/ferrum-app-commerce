@@ -878,6 +878,7 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
     match id(doc, "sales_order") {
         Some(so) => {
             refresh_order(hc.kernel, &sctx, hc.tx, so).await?;
+            crate::edit::refresh_owed(hc.kernel, &sctx, hc.tx, so).await?;
             let order = get(hc.kernel, hc.ctx, hc.tx, "SalesOrder", so).await?;
             let event = json!({
                 "sales_order": so, "number": s(doc, "order_number"), "refund": refund, "kind": s(doc, "kind"), "amount": money(amount), "currency": s(doc, "currency_code"),

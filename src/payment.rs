@@ -354,6 +354,7 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
         refresh_order(hc.kernel, &sctx, hc.tx, paid_id).await?;
         // The rest of an order a gift card holds part of: now it is paid, it is invoiced and the card redeemed.
         crate::gift_card::settle(hc.kernel, &sctx, hc.tx, &store, paid_id).await?;
+        crate::edit::refresh_owed(hc.kernel, &sctx, hc.tx, paid_id).await?;
         crate::gift_card::send_sold(hc.kernel, &sctx, hc.tx, &store, paid_id).await?;
     }
     let paid_number = s(&paying, "number").unwrap_or_default().to_string();
@@ -600,6 +601,7 @@ impl DocHook for WebOrderHook {
             "web_invoice" => crate::ship::web_invoice(hc, doc).await?,
             "web_tracking_link" => crate::ship::tracking_link(hc, doc).await?,
             "web_cancel" => crate::refund::web_cancel(hc, doc, params).await?,
+            "web_update_items" => crate::edit::web_update_items(hc, doc, params).await?,
             _ => return Ok(None),
         }))
     }
