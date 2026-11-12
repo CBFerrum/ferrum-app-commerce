@@ -25,6 +25,7 @@ overlays:
       - {op: add_field, field: {name: commerce_coupon, type: link, to: CouponCode, label: Coupon, read_only: true}}
       - {op: add_field, field: {name: commerce_notes, type: text, label: Customer Notes, read_only: true}}
       - {op: add_field, field: {name: commerce_paid_by_card, type: currency, label: Paid by Gift Card, read_only: true, description: "Taken from a gift card at checkout: the order was invoiced then, as stored value pays invoices"}}
+      - {op: add_field, field: {name: commerce_amount_owed, type: currency, label: Owed After a Change, read_only: true, description: "After the order was changed: what the shopper still owes (positive) or the store owes them (negative); nothing when settled"}}
       - {op: add_field, field: {name: commerce_card_held, type: currency, label: Held on Gift Card, read_only: true, description: "A gift card covers part of the order: this much is held on it until the rest is paid; nothing is invoiced before"}}
       - {op: add_field, field: {name: commerce_card_hold, type: data, label: Gift Card Hold, read_only: true, hidden: true, max_length: 40}}
       - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
@@ -41,6 +42,12 @@ overlays:
           confirm: "Cancel this order that has not shipped? What was paid goes back: a gift card's part onto the card, the rest through the payment it came by.",
           params: [{name: reason, label: Reason, type: link, to: ReturnReason}, {name: note, label: Note, type: text},
                    {name: approve, label: "Send the money back now", type: select, options: ["Yes", "No"], description: "No: the refunds wait for a person to approve them"}]}}
+      - {op: add_action, action: {name: web_update_items, label: Update Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
+          confirm: "Change this order? Promotions are priced again; what the shopper now owes is asked for, or what they are owed is sent back.",
+          params: [{name: changes, label: "Lines to change", type: text, description: "A JSON list: {line, qty} (the line's number on the order; qty 0 removes it) or {item, qty} to add an item"},
+                   {name: address, label: "New shipping address", type: text, description: "A JSON object: {line1, line2, city, state, postal_code, country}. Tax follows where the order now goes"},
+                   {name: note, label: Note, type: text},
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: approve, label: "Send a refund of the difference now", type: select, options: ["Yes", "No"]}]}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
   - entity: DeliveryNote
     ops:
@@ -153,6 +160,16 @@ messages:
           subject: "Your gift card from {{ values.store }}"
           body: "<p>Here is the gift card you bought with order {{ doc.number }}, holding {{ values.amount }}.</p><p>Its code: <strong>{{ values.code }}</strong>{% if values.pin %}, PIN <strong>{{ values.pin }}</strong>{% endif %}</p><p>Keep this message: we do not keep the code and cannot send it again.</p>"
 
+  - key: commerce.order_changed
+    label: A web order was changed
+    entity: SalesOrder
+    values: [total, owed, refund, pay_now, link]
+    languages:
+      en:
+        email:
+          subject: "Your order {{ doc.number }} was changed"
+          body: "<p>We changed your order {{ doc.number }}. It now comes to {{ values.total }}.</p>{% if values.owed %}<p>{{ values.owed }} is still to pay{% if values.pay_now %}: you can pay it from your order page{% endif %}.</p>{% endif %}{% if values.refund %}<p>{{ values.refund }} will go back to you.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}"
+
 seed:
   - entity: ReturnReason
     key: [reason]
@@ -163,4 +180,5 @@ seed:
       - {reason: Not as described}
       - {reason: Arrived too late}
       - {reason: Cancelled before it shipped, restock: false}
+      - {reason: Order changed, restock: false}
       - {reason: Other}
