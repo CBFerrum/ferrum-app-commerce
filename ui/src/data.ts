@@ -59,6 +59,8 @@ export interface Rights {
   seesReturns: boolean;
   /** Approves, declines and receives return requests. */
   decidesReturns: boolean;
+  /** Changes the catalog: makes a product's variants. */
+  editsCatalog: boolean;
 }
 
 export function useRights(): Rights {
@@ -68,6 +70,7 @@ export function useRights(): Rights {
   const exceptionMeta = useEntityMeta("PaymentException");
   const returnMeta = useEntityMeta("ReturnRequest");
   const returns = returnMeta.data?.permissions;
+  const itemMeta = useEntityMeta("WebsiteItem");
   const refunds = refundMeta.data?.permissions;
   const requests = requestMeta.data?.permissions;
   const exceptions = exceptionMeta.data?.permissions;
@@ -81,6 +84,7 @@ export function useRights(): Rights {
     seesMoney: can(refunds, "read") || can(exceptions, "read"),
     seesReturns: can(returns, "read"),
     decidesReturns: can(returns, "write"),
+    editsCatalog: can(itemMeta.data?.permissions, "write"),
   };
 }
 

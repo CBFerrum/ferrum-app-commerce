@@ -779,6 +779,7 @@
   margin-block: 0.5rem;
 }
 
+.chip[data-off] > span:first-child,
 .cm-matrix td[data-off] {
   color: var(--muted-foreground);
   text-decoration: line-through;

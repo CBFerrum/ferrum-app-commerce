@@ -182,7 +182,7 @@ describe("the return and refund dialog", () => {
     estimate: null,
   };
   const asked = JSON.stringify({ sales_order: "o1", kind: "Return", include_shipping: false, lines: [] });
-  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true };
+  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true, editsCatalog: true };
 
   it("offers the lines that can come back, with what is left of each, and what it comes to", () => {
     const qc = client([[["commerce", "reasons"], [{ id: "re1", reason: "Changed their mind", restock: true }]], [["commerce", "refund-plan", asked], plan]]);
@@ -246,7 +246,7 @@ describe("shipping an order", () => {
 });
 
 describe("a refund card", () => {
-  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true };
+  const rights = { ready: true, ships: true, asks: true, decides: true, takesPayment: true, settles: true, seesMoney: true, seesReturns: true, decidesReturns: true, editsCatalog: true };
   const card = (r: Record<string, unknown>, who = rights) =>
     plain(
       renderToStaticMarkup(
