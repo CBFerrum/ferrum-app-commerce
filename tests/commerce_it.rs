@@ -2409,6 +2409,34 @@ async fn after_sales() {
     let page = t.k.link_page(slug, &link_a).await.unwrap().expect("a page");
     let offered = page.actions.iter().map(|a| a.1.clone()).collect::<Vec<_>>().join(", ");
     assert!(offered.contains("Cancel My Order") && offered.contains("Return Something"), "the link offers both: {offered}");
+    // What was bought, line by line, and the store's terms in the workspace's own words with its settings filled in.
+    assert_eq!(page.tables.len(), 1, "the lines are shown: {:?}", page.tables);
+    let (what, columns, lines) = &page.tables[0];
+    assert!(!what.is_empty() && columns.len() == 4 && lines.iter().any(|r| r[0] == "Blue Mug" && r[1] == "2"), "{:?}", page.tables);
+    let terms = page.fields.iter().find(|(l, _)| l.contains("Terms")).map(|f| f.1.clone()).expect("the terms are on the page");
+    assert!(
+        terms.contains("within 24 hours")
+            && terms.contains("within 14 days")
+            && terms.contains("10%")
+            && terms.contains("Store")
+            && terms.contains("Original Payment"),
+        "{terms}"
+    );
+    let ends: chrono::DateTime<chrono::Utc> = {
+        let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+        let at = sqlx::query_scalar("select min(expires_at) from action_link where tenant_id = $1 and record_id = $2")
+            .bind(t.ctx.tenant)
+            .bind(a.so)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        at
+    };
+    assert!(
+        ends > chrono::Utc::now() + chrono::Duration::days(40) && ends < chrono::Utc::now() + chrono::Duration::days(46),
+        "the longest window: a return 14 days after a delivery that may be a month off: {ends}"
+    );
     let out = use_link(&link_a, "web_shopper_cancel", json!({"reason": "bought twice"})).await.expect("cancelled").expect("an answer");
     assert_eq!(out["refunds"].as_array().unwrap().len(), 1, "{out}");
     let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await;
@@ -2417,6 +2445,8 @@ async fn after_sales() {
     assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(2));
     let told: Vec<String> = mails(&t, "cancel@example.com").await.into_iter().map(|m| m.0).collect();
     assert!(told.iter().any(|s| s.contains("was cancelled")) && told.iter().any(|s| s.contains("refunded for order")), "{told:?}");
+    let said = mails(&t, "cancel@example.com").await.into_iter().find(|m| m.0.contains("was cancelled")).unwrap().1;
+    assert!(said.contains(&a.total.normalize().to_string()) && said.contains("Card"), "the mail says how much goes back and where: {said}");
     assert!(use_link(&link_a, "web_shopper_cancel", json!({})).await.is_err(), "a cancelled order cannot be cancelled again");
 
     // ───────────── the window: a cancellation too late is refused in words ─────────────
@@ -2465,7 +2495,9 @@ async fn after_sales() {
     for part in ["We have your return request", "is approved", "refunded for order"] {
         assert!(told.iter().any(|s| s.contains(part)), "{part} in {told:?}");
     }
-    let declined = use_link(&link_b, "web_shopper_return", json!({"lines": "2x1"})).await.expect("the tee asked for");
+    let declined = use_link(&link_b, "web_shopper_return", json!({"lines": "logo tee x1"})).await.expect("the tee asked for, by its name");
+    let unknown = use_link(&link_b, "web_shopper_return", json!({"lines": "Teapot"})).await.unwrap_err().to_string();
+    assert!(unknown.contains("no item called Teapot"), "{unknown}");
     let tee_request = uid(&t.find_one("ReturnRequest", json!({"sales_order": b.so.to_string(), "status": "Requested"})).await);
     let _ = declined;
     assert!(t.k.run_action(&t.ctx, "ReturnRequest", tee_request, "decline_return", json!({})).await.is_err(), "a decline says why");
@@ -2603,7 +2635,8 @@ async fn shopper_mails() {
             json!({"connection_name": "Test", "company": cid.to_string(), "test": true,
                    "description": {"rate": {"url": "https://carrier.example/rates", "rates_at": "/rates", "service_at": "/service", "amount_at": "/amount", "currency_at": "/currency"},
                                    "label": {"url": "https://carrier.example/label", "tracking_at": "/tracking", "label_url_at": "/label"},
-                                   "track": {"url": "https://carrier.example/track", "status_at": "/status", "statuses": {"DELIVERED": "Delivered"}}}}),
+                                   "track": {"url": "https://carrier.example/track", "status_at": "/status", "statuses": {"DELIVERED": "Delivered"}}},
+                   "fixtures": {"track": {"status": "DELIVERED"}}}),
         )
         .await;
     let shipment = t
@@ -2754,7 +2787,7 @@ async fn old_workspace() {
     let slug = "old-workspace";
     let Shop { t, .. } = small_shop(slug).await;
     t.sql("delete from e_return_reason").await;
-    t.sql("update e_store_settings set cancel_window_hours = null, cancel_refund = null, return_window_days = null, return_shipping_paid_by = null, restocking_fee_percent = null, refund_destination = null, store_credit_kind = null, out_for_delivery_words = null").await;
+    t.sql("update e_store_settings set cancel_window_hours = null, cancel_refund = null, return_window_days = null, return_shipping_paid_by = null, restocking_fee_percent = null, refund_destination = null, store_credit_kind = null, out_for_delivery_words = null, after_sales_text = null, store_languages = null, resend_per_day = null").await;
     let fakepay = gateway(&t, "fakepay").await;
 
     // The desk cancels a paid order: the reason it needs is made when it is not there.
@@ -2788,4 +2821,506 @@ async fn old_workspace() {
     assert_eq!(t.count("OrderRefund", json!({"sales_order": c.so.to_string(), "kind": "Adjustment"})).await, 1);
     t.sql("update e_shopping_cart set last_activity = now() - interval '3 days' where status = 'Open'").await;
     ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+
+    // The pages are English with no setting for languages, the shopper's link shows the order without terms to say, and
+    // the desk's mail again falls back to three a day.
+    let (lang, _, words) = words_of(&page_in(&t, "/cart", &[], Some("hi")).await.2);
+    assert_eq!((lang.as_str(), words["cart.empty"].clone()), ("en", json!("Your cart is empty")));
+    let page = t.k.link_page(slug, &manage_token(&t, "old-b@example.com", 0).await).await.unwrap().expect("a page");
+    assert!(page.fields.iter().all(|(l, _)| !l.contains("Terms")) && page.tables.len() == 1, "{:?}", page.fields);
+    t.k.run_action(&t.ctx, "SalesOrder", c.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
+    t.k.run_action(&t.ctx, "SalesOrder", c.so, "web_resend_mail", json!({"mail": "Shipped"})).await.expect("sent again");
+}
+
+/// A shop whose gift card holds 500: sold through the store and its code taken from the mail, as a shopper
+/// would have it. Returns the shop, the kind's id, the code and the account.
+async fn card_shop(slug: &str) -> (Shop, Uuid, String, Uuid) {
+    let shop = small_shop(slug).await;
+    let Shop { t, cid, products, nos, selling, .. } = &shop;
+    let c = cid.to_string();
+    let current = t.find_one("Account", json!({"account_name": "Current Liabilities", "company": c})).await;
+    let liability = t.insert("Account", json!({"account_name": "Gift Cards", "company": c, "parent_account": current["id"], "root_type": "Liability"})).await;
+    let goodwill = t.find_one("Account", json!({"account_name": "Administrative Expenses", "company": c})).await;
+    let kind = t
+        .insert("StoredValueKind", json!({"kind_name": "Gift Card", "company": c, "liability_account": liability["id"], "adjustment_account": goodwill["id"]}))
+        .await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"gift_card_kind": sid(&kind)})), None).await.unwrap();
+    let card_item = t
+        .insert(
+            "Item",
+            json!({"item_code": "GIFT500", "item_name": "Gift Card 500", "item_group": products["id"], "stock_uom": nos["id"], "is_stock_item": false,
+                   "stored_value_kind": sid(&kind)}),
+        )
+        .await;
+    t.insert("ItemPrice", json!({"item": sid(&card_item), "price_list": selling["id"], "rate": "500"})).await;
+    t.insert("WebsiteItem", json!({"item": sid(&card_item), "published": true})).await;
+    let kind = uid(&kind);
+    let (code, account) = buy_card(t, "card-buy-0001").await;
+    (shop, kind, code, account)
+}
+
+/// Another card of 500, bought and paid for through the store: its code from the mail and its account.
+async fn buy_card(t: &T, key: &str) -> (String, Uuid) {
+    let giver = format!("{key}@giver.example.com");
+    let before = t.count("StoredValueAccount", json!({})).await;
+    let bought = place(t, json!([{"item": "gift-card-500", "qty": 1}]), &giver, "fakepay", key).await;
+    pay(t, &t.ctx, bought.request.unwrap(), bought.total, &format!("fp_{key}")).await;
+    let sent: Vec<_> = opened_mails(t, &giver).await.into_iter().filter(|(s, _)| s.contains("gift card")).collect();
+    let code = sent[0].1.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
+    assert_eq!(t.count("StoredValueAccount", json!({})).await, before + 1);
+    let q = ListQuery { sort: Some("created_at desc".into()), limit: Some(1), ..Default::default() };
+    let account = t.k.list(&t.ctx, "StoredValueAccount", &q).await.unwrap().rows[0].clone();
+    assert_eq!(dec(&account["balance"]), n("500"));
+    (code, uid(&account))
+}
+
+/// An order the way 0.8.0 left one a gift card paid part of: invoiced at checkout, the card redeemed
+/// against the invoice, and the rest still to pay (`rest` is the request of the rest, made by the caller).
+async fn paid_part_the_old_way(t: &T, kind: Uuid, code: &str, placed: &Placed) {
+    // The request for the whole of it, which an earlier release never made.
+    t.k.cancel(&t.ctx, "PaymentRequest", placed.request.unwrap(), None).await.expect("the whole request goes");
+    let made = t.k.run_action(&t.ctx, "SalesOrder", placed.so, "make_sales_invoice", json!({})).await.expect("invoiced");
+    let si: Uuid = made["id"].as_str().unwrap().parse().unwrap();
+    t.submit("SalesInvoice", si).await;
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    let out = ferrum_app_erp::stored_value::redeem(&t.k, &t.ctx, &mut tx, kind, code, None, si, None, None, &format!("old-way-{}", placed.so))
+        .await
+        .expect("redeemed");
+    tx.commit().await.unwrap();
+    let (amount, pe) = (out["amount"].as_str().unwrap().to_string(), out["payment"].as_str().unwrap().to_string());
+    let so = t.get("SalesOrder", placed.so).await;
+    let sys = ferrum_domain::util::sys(&t.ctx);
+    let request =
+        t.k.insert(
+            &sys,
+            "PaymentRequest",
+            obj(json!({"company": so["company"], "sales_order": placed.so.to_string(), "order_number": placed.number, "gateway": "Gift Card",
+                       "currency": so["currency"], "currency_code": "INR", "amount": amount, "status": "Initiated"})),
+        )
+        .await
+        .expect("a request");
+    t.submit("PaymentRequest", uid(&request)).await;
+    t.sql(&format!("update e_payment_request set status = 'Paid', paid_at = now(), payment_entry = '{pe}' where id = '{}'", uid(&request))).await;
+    t.sql(&format!("update e_sales_order set ext = ext || jsonb_build_object('commerce_paid_by_card', '{amount}') where id = '{}'", placed.so)).await;
+    t.sql(&format!(
+        "update e_payment_entry set ext = ext || jsonb_build_object('commerce_sales_order', '{}', 'commerce_payment_request', '{}') where id = '{pe}'",
+        placed.so,
+        uid(&request)
+    ))
+    .await;
+}
+
+#[test]
+fn the_rest_after_a_card_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(the_rest_after_a_card()).await.unwrap() });
+}
+
+/// A gift card paid part of an order and the rest's payment did not come: the shopper may try again for what
+/// is left, and an order the rest of which never arrives cancels, the card getting its value back.
+async fn the_rest_after_a_card() {
+    let (Shop { t, .. }, kind, code, _) = card_shop("rest-after-card").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    let card = |a: Uuid| {
+        let t = &t;
+        async move { t.get("StoredValueAccount", a).await }
+    };
+    let tt = &t;
+    let again = |p: &Placed, email: &str, method: &str| {
+        let body = json!({"number": p.number, "email": email, "token": p.token, "payment_method": method});
+        async move { tt.call(None, "POST", "/orders/pay", &[], Some(body)).await }
+    };
+
+    // ───────────── as 0.8.0 left it: the card paid 500 at checkout, the rest's payment fails, the shopper tries again ─────────────
+    let old = place(&t, json!([{"item": "logo-tee", "qty": 1}]), "old@example.com", "fakepay", "rest-old-0001").await;
+    assert_eq!(old.total, n("531"));
+    paid_part_the_old_way(&t, kind, &code, &old).await;
+    let retry = again(&old, "old@example.com", "fakepay").await.expect("the shopper may pay the rest");
+    assert_eq!((dec(&retry["payment_request"]["amount"]), retry["payment_request"]["status"].clone()), (n("31"), json!("Initiated")), "31 is left: {retry}");
+    let request: Uuid = retry["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(t.get("SalesOrder", old.so).await["commerce_payment_status"], json!("Pending"));
+    t.k.run_action(&fakepay, "PaymentRequest", request, "mark_failed", json!({"reason": "declined"})).await.expect("failed");
+    assert_eq!(t.get("SalesOrder", old.so).await["commerce_payment_status"], json!("Failed"), "a card's part is not the order paid");
+    let retry = again(&old, "old@example.com", "fakepay").await.expect("and again");
+    assert_eq!(dec(&retry["payment_request"]["amount"]), n("31"));
+    pay(&t, &t.ctx, retry["payment_request"]["id"].as_str().unwrap().parse().unwrap(), n("31"), "fp_old_rest").await;
+    assert_eq!(t.get("SalesOrder", old.so).await["commerce_payment_status"], json!("Paid"));
+    let done = again(&old, "old@example.com", "fakepay").await;
+    assert!(matches!(done, Err(Error::Invalid(ref m)) if m.contains("already paid")), "nothing is left to pay: {done:?}");
+    let invoice = t.find_one("SalesInvoice", json!({"items.sales_order": old.so.to_string(), "is_return": false})).await;
+    assert_eq!(dec(&invoice["outstanding_amount"]), n("0"));
+
+    // ───────────── the rest never arrives, as 0.8.0 left it: the upkeep cancels, the card has its value back ─────────────
+    let (code, new) = buy_card(&t, "card-buy-0002").await;
+    let account = new;
+    let lost = place(&t, json!([{"item": "logo-tee", "qty": 1}]), "lost@example.com", "fakepay", "rest-lost-0001").await;
+    paid_part_the_old_way(&t, kind, &code, &lost).await;
+    assert_eq!(dec(&card(account).await["balance"]), n("0"));
+    let rest = again(&lost, "lost@example.com", "fakepay").await.expect("asked for the rest");
+    let rest_request: Uuid = rest["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{rest_request}'")).await;
+    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    assert_eq!(t.get("PaymentRequest", rest_request).await["status"], json!("Expired"));
+    let so = t.get("SalesOrder", lost.so).await;
+    assert_eq!((so["docstatus"].clone(), so["commerce_payment_status"].clone()), (json!(2), json!("Refunded")), "cancelled by the upkeep");
+    assert_eq!(dec(&card(account).await["balance"]), n("500"), "the card has what it paid back");
+    assert_eq!(t.count("SalesInvoice", json!({"items.sales_order": lost.so.to_string(), "docstatus": 1})).await, 0);
+
+    // ───────────── held, and the rest fails: the shopper tries again for what is left ─────────────
+    let (cart, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    t.cart_ok(&cart, "PUT", "/cart/details", Some(details("held2@example.com", "Held", "IN"))).await;
+    let done = t
+        .checkout(None, &cart, "rest-held-0002", json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": code}}))
+        .await
+        .expect("checkout");
+    let number = done["order"]["number"].as_str().unwrap().to_string();
+    let token = done["order_token"].as_str().unwrap().to_string();
+    let first: Uuid = done["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(dec(&card(account).await["held"]), n("500"));
+    // What the card did, on the answer to checkout and on the order: what it holds, until when, what it has left; never its code.
+    let card_says = &done["order"]["gift_card"];
+    assert_eq!((dec(&card_says["held"]), dec(&card_says["paid"]), dec(&card_says["balance_left"])), (n("500"), n("0"), n("0")), "{card_says}");
+    assert!(card_says["held_until"].is_string(), "{card_says}");
+    assert!(!done.to_string().contains(&code), "the code is nowhere in the answer");
+    t.k.run_action(&fakepay, "PaymentRequest", first, "mark_failed", json!({"reason": "declined"})).await.expect("failed");
+    let body = json!({"number": number, "email": "held2@example.com", "token": token, "payment_method": "fakepay"});
+    let retry = t.ok(None, "POST", "/orders/pay", &[], Some(body)).await;
+    assert_eq!(dec(&retry["payment_request"]["amount"]), n("31"), "the card still holds its part: {retry}");
+    pay(&t, &t.ctx, retry["payment_request"]["id"].as_str().unwrap().parse().unwrap(), n("31"), "fp_held_rest").await;
+    assert_eq!(dec(&card(account).await["balance"]), n("0"), "paid: the invoice took the card's value");
+    let order = t.ok(None, "POST", "/orders/lookup", &[], Some(json!({"number": number, "email": "held2@example.com", "token": token}))).await["order"].clone();
+    let card_says = &order["gift_card"];
+    assert_eq!(
+        (dec(&card_says["paid"]), dec(&card_says["held"]), dec(&card_says["balance_left"]), card_says["held_until"].clone()),
+        (n("500"), n("0"), n("0"), Value::Null),
+        "{card_says}"
+    );
+    // Paid two ways: the form's cancellation asks for one payment's refund, so it points at the order's own, which asks for each.
+    let reason = t.find_one("ReturnReason", json!({"reason": "Changed their mind"})).await;
+    let so_held = uid(&t.find_one("SalesOrder", json!({"number": number})).await);
+    let old_path = t.k.insert(&t.ctx, "OrderRefund", obj(json!({"sales_order": so_held.to_string(), "kind": "Cancellation", "reason": reason["id"]}))).await;
+    assert!(matches!(&old_path, Err(Error::Validation(f)) if f.iter().any(|x| x.field == "kind" && x.message.contains("Cancel Web Order"))), "{old_path:?}");
+
+    // ───────────── held, the rest expires, the store keeps the order: the card is free and the whole is asked ─────────────
+    let (code, new) = buy_card(&t, "card-buy-0003").await;
+    let account = new;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"cancel_unpaid_orders": false})), None).await.unwrap();
+    let (cart, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    t.cart_ok(&cart, "PUT", "/cart/details", Some(details("kept@example.com", "Kept", "IN"))).await;
+    let done = t
+        .checkout(None, &cart, "rest-kept-0001", json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": code}}))
+        .await
+        .expect("checkout");
+    let request: Uuid = done["payment_request"]["id"].as_str().unwrap().parse().unwrap();
+    t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{request}'")).await;
+    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    assert_eq!(dec(&card(account).await["held"]), n("0"), "let go");
+    let body = json!({"number": done["order"]["number"], "email": "kept@example.com", "token": done["order_token"], "payment_method": "fakepay"});
+    let retry = t.ok(None, "POST", "/orders/pay", &[], Some(body)).await;
+    assert_eq!(dec(&retry["payment_request"]["amount"]), n("531"), "the card holds nothing now: all of it is asked");
+}
+
+#[test]
+fn change_preview_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(change_preview()).await.unwrap() });
+}
+
+/// What the desk is shown before saving a change is what saving does: the lines as priced (delivery again for
+/// the value, weight and place), the difference and where it goes. Nothing is written by asking.
+async fn change_preview() {
+    let Shop { t, cid, .. } = small_shop("change-preview").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    // Delivery by order value in Karnataka (free from 500), a flat charge in Maharashtra.
+    let rule = t.find_one("ShippingRule", json!({"label": "Standard"})).await;
+    t.k.update(
+        &t.ctx,
+        "ShippingRule",
+        uid(&rule),
+        obj(json!({"basis": "Order Amount", "bands": [{"from_value": "0", "to_value": "500", "amount": "60"}, {"from_value": "500", "to_value": "0", "amount": "0"}],
+                   "regions": [{"region": "Karnataka"}]})),
+        None,
+    )
+    .await
+    .expect("rule");
+    t.insert(
+        "ShippingRule",
+        json!({"label": "Western", "basis": "Fixed", "amount": "120", "countries": [{"country_code": "IN"}], "regions": [{"region": "Maharashtra"}]}),
+    )
+    .await;
+    let _ = cid;
+    let preview = |so: Uuid, mut body: Value| {
+        let t = &t;
+        async move {
+            body["sales_order"] = json!(so.to_string());
+            t.call(Some(&t.ctx), "POST", "/desk/change-preview", &[], Some(body)).await
+        }
+    };
+    let save = |so: Uuid, body: Value| {
+        let t = &t;
+        async move { t.k.run_action(&t.ctx, "SalesOrder", so, "web_update_items", body).await.map_err(|e| format!("{e:?}")) }
+    };
+    // The same answer either way, but for the ids of what saving makes.
+    let same = |seen: &Value, done: &Value| {
+        let (mut a, mut b) = (seen.clone(), done.clone());
+        for v in [&mut a, &mut b] {
+            for k in ["payment_request", "refund", "preview"] {
+                v.as_object_mut().unwrap().remove(k);
+            }
+            // A line the change adds is given its id when it is saved.
+            for l in v["lines"].as_array_mut().unwrap() {
+                l.as_object_mut().unwrap().remove("id");
+            }
+        }
+        assert_eq!(a, b, "the preview and the save say the same");
+    };
+    let untouched = |so: Uuid, grand: Decimal, requests: usize| {
+        let t = &t;
+        async move {
+            assert_eq!(dec(&t.get("SalesOrder", so).await["rounded_total"]), grand, "asking changed nothing on the order");
+            assert_eq!(t.count("PaymentRequest", json!({"sales_order": so.to_string()})).await, requests, "and made no request");
+            assert_eq!(t.count("OrderRefund", json!({"sales_order": so.to_string()})).await, 0, "or refund");
+        }
+    };
+
+    // ───────────── unpaid: two mugs ship free; one does not, and the request for the new total replaces the old ─────────────
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 2}]), "prev-a@example.com", "fakepay", "prev-a-0001").await;
+    assert_eq!(a.total, n("590"), "500 at 18%, delivery free");
+    let mails_before = mails(&t, "prev-a@example.com").await.len();
+    let cut = json!({"changes": r#"[{"line": 1, "qty": "1"}]"#});
+    let seen = preview(a.so, cut.clone()).await.expect("previewed");
+    untouched(a.so, a.total, 1).await;
+    assert_eq!(mails(&t, "prev-a@example.com").await.len(), mails_before, "the shopper was told nothing");
+    assert_eq!(
+        (dec(&seen["total"]), dec(&seen["difference"]), seen["preview"].clone()),
+        (n("365.8"), n("-224.2"), json!(true)),
+        "(250 + 60 of delivery) at 18%: {seen}"
+    );
+    assert_eq!(seen["settlement"]["kind"], json!("charge"));
+    assert_eq!(
+        (dec(&seen["settlement"]["amount"]), seen["settlement"]["gateway"].clone(), seen["settlement"]["replaces_open_request"].clone()),
+        (n("365.8"), json!("fakepay"), json!(true))
+    );
+    let delivery: Vec<_> = seen["lines"].as_array().unwrap().iter().filter(|l| l["delivery"] == json!(true)).collect();
+    assert_eq!((delivery.len(), dec(&delivery[0]["amount"])), (1, n("60")), "delivery is priced again, a line that was not there");
+    let done = save(a.so, cut).await.expect("saved");
+    same(&seen, &done);
+    let so = t.get("SalesOrder", a.so).await;
+    assert_eq!(dec(&so["rounded_total"]), n("365.8"));
+    assert_eq!(so["items"].as_array().unwrap().len(), 2);
+    let request = uid(&t.find_one("PaymentRequest", json!({"sales_order": a.so.to_string(), "status": "Initiated"})).await);
+    assert_eq!(dec(&t.get("PaymentRequest", request).await["amount"]), n("365.8"));
+    pay(&t, &t.ctx, request, n("365.8"), "fp_prev_a").await;
+
+    // ───────────── paid, then to Maharashtra: another method, 120, the difference asked for through the card ─────────────
+    let west = json!({"address": {"line1": "5 Marine Drive", "city": "Mumbai", "state": "Maharashtra", "postal_code": "400001", "country": "IN"}});
+    let seen = preview(a.so, west.clone()).await.expect("previewed");
+    untouched(a.so, n("365.8"), 2).await;
+    assert_eq!((dec(&seen["total"]), dec(&seen["difference"])), (n("436.6"), n("70.8")), "(250 + 120) at 18%: {seen}");
+    assert_eq!(
+        (seen["settlement"]["kind"].clone(), seen["settlement"]["replaces_open_request"].clone(), dec(&seen["settlement"]["amount"])),
+        (json!("charge"), json!(false), n("70.8"))
+    );
+    let done = save(a.so, west).await.expect("saved");
+    same(&seen, &done);
+    let so = t.get("SalesOrder", a.so).await;
+    assert_eq!(so["commerce_shipping_rule"], json!(sid(&t.find_one("ShippingRule", json!({"label": "Western"})).await)));
+
+    // ───────────── paid, then less: sent back to where it was paid ─────────────
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 1}, {"item": "logo-tee", "qty": 1}]), "prev-b@example.com", "fakepay", "prev-b-0001").await;
+    assert_eq!(b.total, n("767"), "(250 + 400) at 18%, delivery free from 500: 650 + 0");
+    pay(&t, &t.ctx, b.request.unwrap(), b.total, "fp_prev_b").await;
+    let take = json!({"changes": r#"[{"line": 2, "qty": "0"}]"#});
+    let seen = preview(b.so, take.clone()).await.expect("previewed");
+    untouched(b.so, b.total, 1).await;
+    assert_eq!(seen["settlement"]["kind"], json!("refund"));
+    assert_eq!((seen["settlement"]["gateway"].clone(), dec(&seen["settlement"]["amount"])), (json!("fakepay"), dec(&seen["difference"]).abs()));
+    let done = save(b.so, take).await.expect("saved");
+    same(&seen, &done);
+    let refund = t.find_one("OrderRefund", json!({"sales_order": b.so.to_string(), "kind": "Adjustment"})).await;
+    assert_eq!((dec(&refund["amount"]), refund["gateway"].clone()), (dec(&seen["settlement"]["amount"]), json!("fakepay")));
+    t.k.run_action(&fakepay, "OrderRefund", uid(&refund), "refund_done", json!({"refund_reference": "re_prev"})).await.expect("sent back");
+
+    // ───────────── what the save refuses, the preview refuses; and only the desk asks ─────────────
+    let refused = preview(a.so, json!({"changes": r#"[{"line": 1, "qty": "-1"}]"#})).await;
+    assert!(matches!(refused, Err(Error::Validation(_))), "a change the save refuses, the preview refuses: {refused:?}");
+    untouched(a.so, dec(&t.get("SalesOrder", a.so).await["rounded_total"]), 3).await;
+    let far = preview(a.so, json!({"address": {"line1": "1 Rue", "city": "Goa", "state": "Goa", "postal_code": "403001", "country": "IN"}})).await;
+    assert!(matches!(far, Err(Error::Validation(ref f)) if f[0].field == "address"), "no method of the store reaches Goa: {far:?}");
+    // Only the desk asks.
+    let shopper =
+        t.k.load_ctx(t.ctx.tenant, t.k.create_user(&t.ctx, "nobody@shop.test", "Nobody", None, &[], false).await.unwrap(), None, "nobody".into())
+            .await
+            .unwrap();
+    assert!(t.call(Some(&shopper), "POST", "/desk/change-preview", &[], Some(json!({"sales_order": a.so.to_string(), "changes": "[]"}))).await.is_err());
+    assert!(t.call(None, "POST", "/desk/change-preview", &[], Some(json!({"sales_order": a.so.to_string()}))).await.is_err());
+}
+
+#[test]
+fn desk_pieces_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(desk_pieces()).await.unwrap() });
+}
+
+/// The desk sends a shopper mail again (counted, limited, never one with a secret), and a store with no returns
+/// has a link that lives as long as its cancellation window.
+async fn desk_pieces() {
+    let slug = "desk-pieces";
+    let Shop { t, .. } = shop_with(slug, &["commerce"]).await;
+    let settings = uid(&t.find_one("StoreSettings", json!({})).await);
+    let a = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "resend@example.com", "fakepay", "resend-a-0001").await;
+    let again = |so: Uuid, mail: &'static str| {
+        let t = &t;
+        async move { t.k.run_action(&t.ctx, "SalesOrder", so, "web_resend_mail", json!({"mail": mail})).await }
+    };
+    assert!(again(a.so, "Shipped").await.is_err(), "nothing has shipped");
+    assert!(again(a.so, "Payment Received").await.is_err(), "nothing was paid");
+    pay(&t, &t.ctx, a.request.unwrap(), a.total, "fp_resend_a").await;
+    t.k.run_action(&t.ctx, "SalesOrder", a.so, "web_ship", json!({"carrier": "Fast Couriers", "tracking_number": "FC123", "notify": "Yes"}))
+        .await
+        .expect("shipped");
+    let count = |subject: &'static str| {
+        let t = &t;
+        async move { mails(t, "resend@example.com").await.iter().filter(|m| m.0.contains(subject)).count() }
+    };
+    assert_eq!((count("has shipped").await, count("Payment received").await), (1, 1));
+    let out = again(a.so, "Shipped").await.expect("sent again");
+    assert_eq!((out["sent"].clone(), out["resent"].clone(), out["left_today"].clone()), (json!(true), json!("1"), json!(1)), "{out}");
+    let all = mails(&t, "resend@example.com").await;
+    let shipped: Vec<_> = all.iter().filter(|m| m.0.contains("has shipped")).collect();
+    assert!(shipped.len() == 2 && shipped[1].1.contains("FC123") && shipped[1].1.contains("Blue Mug"), "{shipped:?}");
+    again(a.so, "Payment Received").await.expect("the payment, again");
+    assert_eq!(count("Payment received").await, 2);
+    again(a.so, "Shipped").await.expect("a third time is the limit, the first among them");
+    let refused = again(a.so, "Shipped").await.unwrap_err().to_string();
+    assert!(refused.contains("limit is 3"), "{refused}");
+    assert_eq!(dec(&t.get("SalesOrder", a.so).await["commerce_mails_resent"]), n("3"), "counted on the order");
+    for secret in ["Gift Card Issued", "Order Placed", "Store Credit Issued", "Cancelled"] {
+        let e = again(a.so, secret).await.unwrap_err().to_string();
+        assert!(e.contains("secret value"), "{secret}: {e}");
+    }
+    t.k.update(&t.ctx, "StoreSettings", settings, obj(json!({"resend_per_day": 4})), None).await.unwrap();
+    again(a.so, "Shipped").await.expect("the limit is the store's");
+
+    // ───────────── no returns: the link lives as long as the cancellation window ─────────────
+    t.k.update(&t.ctx, "StoreSettings", settings, obj(json!({"return_window_days": 0})), None).await.unwrap();
+    let b = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "window@example.com", "fakepay", "resend-b-0001").await;
+    let ends: chrono::DateTime<chrono::Utc> = {
+        let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+        let at = sqlx::query_scalar("select expires_at from action_link where tenant_id = $1 and record_id = $2")
+            .bind(t.ctx.tenant)
+            .bind(b.so)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        at
+    };
+    assert!(ends < chrono::Utc::now() + chrono::Duration::days(3), "{ends}");
+    let link = manage_token(&t, "window@example.com", 0).await;
+    let page = t.k.link_page(slug, &link).await.unwrap().expect("a page");
+    assert_eq!(page.actions.iter().map(|a| a.0.clone()).collect::<Vec<_>>(), ["web_shopper_cancel"], "only what the store allows is offered");
+}
+
+/// A storefront page as a visitor's browser asks for it: with what the browser says it speaks.
+async fn page_in(t: &T, path: &str, query: &[(&str, &str)], accept: Option<&str>) -> (u16, Vec<(String, String)>, String) {
+    let mut headers = Map::new();
+    headers.insert("x-ferrum-site-api".into(), json!("/api/site/words/commerce"));
+    headers.insert("x-ferrum-site-origin".into(), json!("https://shop.example.com"));
+    if let Some(a) = accept {
+        headers.insert("accept-language".into(), json!(a));
+    }
+    let req = SiteRequest {
+        tenant: t.ctx.tenant,
+        user: None,
+        method: "GET".into(),
+        path: format!("/_site{path}"),
+        query: query.iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+        headers,
+        body: vec![],
+        client_ip: "203.0.113.7".into(),
+    };
+    let r = t.site.handle(&t.k, req).await.unwrap_or_else(|e| panic!("GET {path}: {e:?}"));
+    (r.status, r.headers, String::from_utf8(r.body).unwrap())
+}
+
+/// The words a page carries, as the script reads them, and the language it says it is in.
+fn words_of(html: &str) -> (String, String, Map<String, Value>) {
+    let lang = html.split("<html lang=\"").nth(1).and_then(|r| r.split('"').next()).unwrap().to_string();
+    let dir = html.split("dir=\"").nth(1).and_then(|r| r.split('"').next()).unwrap().to_string();
+    let json = html
+        .split("<script type=\"application/json\" id=\"store-words\">")
+        .nth(1)
+        .and_then(|r| r.split("</script>").next())
+        .expect("the words are in the page");
+    (lang, dir, serde_json::from_str::<Value>(json).unwrap().as_object().cloned().unwrap())
+}
+
+#[test]
+fn storefront_words_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(storefront_words()).await.unwrap() });
+}
+
+/// Every page carries the words of one language, chosen by the store's languages and the visitor's preference,
+/// from the app's English and a workspace's own words, English under every word a language lacks.
+async fn storefront_words() {
+    let Shop { t, .. } = small_shop("words").await;
+    let settings = uid(&t.find_one("StoreSettings", json!({})).await);
+
+    // ───────────── English, as it ships ─────────────
+    let (status, headers, html) = page_in(&t, "/cart", &[], Some("hi-IN,hi;q=0.9")).await;
+    let (lang, dir, en) = words_of(&html);
+    assert_eq!((status, lang.as_str(), dir.as_str()), (200, "en", "ltr"), "the store offers English only");
+    assert_eq!(en["cart.empty"], json!("Your cart is empty"));
+    assert!(headers.iter().any(|(k, v)| k == "vary" && v == "accept-language"), "{headers:?}");
+
+    // ───────────── a language the workspace writes ─────────────
+    t.k.update(&t.ctx, "StoreSettings", settings, obj(json!({"store_languages": "en, hi, ar"})), None).await.unwrap();
+    t.insert(
+        "StorefrontWords",
+        json!({"language": "HI", "words": {"cart.empty": "आपकी टोकरी खाली है", "cart.count_aria": "{n} आपकी टोकरी में", "cart.start": "</script><i>x</i>"}}),
+    )
+    .await;
+    t.insert("StorefrontWords", json!({"language": "ar", "words": {"cart.empty": "سلتك فارغة"}})).await;
+    let hindi = page_in(&t, "/cart", &[], Some("hi-IN,hi;q=0.9,en;q=0.5")).await.2;
+    assert!(!hindi.contains("</script><i>"), "a word cannot end the script it is in");
+    let (lang, dir, hi) = words_of(&hindi);
+    assert_eq!(hi["cart.start"], json!("</script><i>x</i>"), "and reaches the script as written");
+    assert_eq!((lang.as_str(), dir.as_str()), ("hi", "ltr"), "hi-IN is hi for a store that offers hi");
+    assert_eq!(hi["cart.empty"], json!("आपकी टोकरी खाली है"));
+    assert_eq!(hi["cart.checkout"], json!("Checkout"), "a word it lacks is the English one");
+    assert_eq!(hi.len(), en.len(), "every word is there");
+    let (lang, dir, _) = words_of(&page_in(&t, "/cart", &[("lang", "ar")], Some("hi")).await.2);
+    assert_eq!((lang.as_str(), dir.as_str()), ("ar", "rtl"), "the visitor's own choice comes before the browser's, and Arabic reads right to left");
+    let (lang, _, _) = words_of(&page_in(&t, "/", &[], Some("fr;q=1, de;q=0.8")).await.2);
+    assert_eq!(lang, "en", "a language the store does not offer: its default");
+    let (lang, _, _) = words_of(&page_in(&t, "/", &[], None).await.2);
+    assert_eq!(lang, "en");
+
+    // ───────────── the workspace changes the English too ─────────────
+    t.insert("StorefrontWords", json!({"language": "en", "words": {"cart.checkout": "Pay now"}})).await;
+    let (_, _, en2) = words_of(&page_in(&t, "/cart", &[], None).await.2);
+    assert_eq!((en2["cart.checkout"].clone(), en2["cart.empty"].clone()), (json!("Pay now"), json!("Your cart is empty")));
+    let (_, _, hi2) = words_of(&page_in(&t, "/cart", &[], Some("hi")).await.2);
+    assert_eq!(hi2["cart.checkout"], json!("Checkout"), "one language's words are not another's");
+    // Offered languages are the settings': one the store does not list is not served though it has words.
+    t.insert("StorefrontWords", json!({"language": "ta", "words": {"cart.empty": "காலி"}})).await;
+    assert_eq!(words_of(&page_in(&t, "/", &[("lang", "ta")], None).await.2).0, "en");
+
+    // ───────────── what is refused ─────────────
+    let typo = t.k.insert(&t.ctx, "StorefrontWords", obj(json!({"language": "de", "words": {"cart.emtpy": "Leer"}}))).await;
+    assert!(matches!(&typo, Err(Error::Validation(f)) if f.iter().any(|x| x.field == "words" && x.message.contains("cart.emtpy"))), "{typo:?}");
+    let place = t.k.insert(&t.ctx, "StorefrontWords", obj(json!({"language": "de", "words": {"cart.count_aria": "{count} im Warenkorb"}}))).await;
+    assert!(matches!(&place, Err(Error::Validation(f)) if f.iter().any(|x| x.message.contains("{count}"))), "{place:?}");
+    let code = t.k.insert(&t.ctx, "StorefrontWords", obj(json!({"language": "en_US", "words": {}}))).await;
+    assert!(matches!(&code, Err(Error::Validation(f)) if f.iter().any(|x| x.field == "language")), "{code:?}");
+    let twice = t.k.insert(&t.ctx, "StorefrontWords", obj(json!({"language": "hi", "words": {}}))).await;
+    assert!(twice.is_err(), "one record a language");
 }

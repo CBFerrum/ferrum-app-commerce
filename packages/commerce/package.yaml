@@ -28,6 +28,8 @@ overlays:
       - {op: add_field, field: {name: commerce_amount_owed, type: currency, label: Owed After a Change, read_only: true, description: "After the order was changed: what the shopper still owes (positive) or the store owes them (negative); nothing when settled"}}
       - {op: add_field, field: {name: commerce_card_held, type: currency, label: Held on Gift Card, read_only: true, description: "A gift card covers part of the order: this much is held on it until the rest is paid; nothing is invoiced before"}}
       - {op: add_field, field: {name: commerce_card_hold, type: data, label: Gift Card Hold, read_only: true, hidden: true, max_length: 40}}
+      - {op: add_field, field: {name: commerce_after_sales_terms, type: text, label: Terms Shown to the Shopper, read_only: true, description: "What the shopper's cancel and return page says of the store's terms, as Store Settings word them when the link was made"}}
+      - {op: add_field, field: {name: commerce_mails_resent, type: int, label: Mails Sent Again, read_only: true, no_copy: true, description: "How many times the desk sent the shopper a mail again"}}
       - {op: add_field, field: {name: commerce_cards_sent, type: check, label: Gift Cards Sent, read_only: true, description: "The codes of the gift cards this order bought went to the shopper, once"}}
       # The store's people ship and invoice web orders from the desk without holding the Sales roles:
       # these actions do exactly that, for web orders only (src/ship.rs checks who may).
@@ -46,6 +48,7 @@ overlays:
           confirm: "Change this order? Promotions are priced again; what the shopper now owes is asked for, or what they are owed is sent back.",
           params: [{name: changes, label: "Lines to change", type: text, description: "A JSON list: {line, qty} (the line's number on the order; qty 0 removes it) or {item, qty} to add an item"},
                    {name: address, label: "New shipping address", type: text, description: "A JSON object: {line1, line2, city, state, postal_code, country}. Tax follows where the order now goes"},
+                   {name: shipping_rule, label: Delivery method, type: link, to: ShippingRule, description: "Delivery is priced again for what the order now holds and where it goes: by the method it had, or the one that now applies; name one when several do"},
                    {name: note, label: Note, type: text},
                    {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: approve, label: "Send a refund of the difference now", type: select, options: ["Yes", "No"]}]}}
       # What a shopper does from the signed link in their order confirmation (a link names these actions; a guest
@@ -54,8 +57,12 @@ overlays:
           confirm: "Cancel this order? What you paid goes back to you.",
           params: [{name: reason, label: Why are you cancelling?, type: text}]}}
       - {op: add_action, action: {name: web_shopper_return, label: Return Something, docstatus: [1], permission: read,
-          params: [{name: lines, label: What are you sending back, type: text, description: "Leave empty to send back everything delivered; otherwise the item's number on your order and how many, as 1x2, 3 (the first item twice, the third once)"},
+          params: [{name: lines, label: "What are you sending back? Leave empty for everything delivered", type: text, description: "To send back only some: write each item's name or its number in the list above, then x and how many, separated by commas. Blue Mug x2, 3 sends back two Blue Mugs and one of item 3. Without an x the whole quantity delivered goes back"},
                    {name: reason, label: Why, type: data}, {name: note, label: Anything we should know, type: text}]}}
+      - {op: add_action, action: {name: web_resend_mail, label: Send Mail Again, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order",
+          confirm: "Send the shopper this mail again, as the order stands now?",
+          params: [{name: mail, label: Mail, type: select, required: true, options: [Shipped, Payment Received, Payment Failed, Refunded],
+                    description: "Goes to the order's own address. A mail that holds a secret value (a gift card or store credit code, the confirmation's link) cannot be sent again. The same mail goes to one order only so many times a day (Store Settings)"}]}}
       - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
   - entity: DeliveryNote
     ops:
@@ -76,7 +83,7 @@ modules:
     label: Commerce
     icon: shopping-bag
     order: 42
-    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnRequest, StockAlert, ReturnReason, ShippingRule, CouponCode, SalesOrder,
+    items: [StoreSettings, WebsiteItem, ItemCategory, ItemReview, ShoppingCart, PaymentRequest, PaymentException, OrderRefund, ReturnRequest, StockAlert, ReturnReason, StorefrontWords, ShippingRule, CouponCode, SalesOrder,
             report:web_sales, report:top_products, report:abandoned_carts, report:conversion_funnel, report:coupon_usage]
 
 # What a personal-data request exports and erases for a shopper (their email): their carts'
@@ -107,6 +114,7 @@ roles:
       - {entity: ReturnRequest, read: true, write: true, export: true}
       - {entity: StockAlert, read: true, export: true}
       - {entity: ReturnReason, read: true, write: true, create: true, delete: true}
+      - {entity: StorefrontWords, read: true, write: true, create: true, delete: true}
       - {entity: SalesOrder, read: true, export: true}
       - {entity: DeliveryNote, read: true}
       - {entity: SalesInvoice, read: true}
@@ -264,21 +272,21 @@ messages:
   - key: commerce.order_cancelled
     label: A shopper cancelled an order
     entity: SalesOrder
-    values: [refund_waits, link]
+    values: [refund_waits, refund_amount, refund_to, link]
     languages:
       en:
         email:
           subject: "Your order {{ doc.number }} was cancelled"
-          body: "<p>Your order {{ doc.number }} has been cancelled, as you asked.</p>{% if values.refund_waits %}<p>What you paid goes back to you once we have approved the refund; we will write again when it does.</p>{% else %}<p>What you paid is on its way back to you.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a></p>{% endif %}"
+          body: "<p>Your order {{ doc.number }} has been cancelled, as you asked.</p>{% if values.refund_waits %}<p>What you paid{% if values.refund_amount %}, {{ values.refund_amount }},{% endif %} goes back to you{% if values.refund_to %} ({{ values.refund_to }}){% endif %} once we have approved the refund; we will write again when it does.</p>{% else %}<p>What you paid{% if values.refund_amount %}, {{ values.refund_amount }},{% endif %} is on its way back to you{% if values.refund_to %} ({{ values.refund_to }}){% endif %}.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">See your order</a></p>{% endif %}"
   - key: commerce.return_requested
     label: A shopper asked to return goods
     entity: SalesOrder
-    values: [number, lines]
+    values: [number, lines, to_credit, fee, store_pays_shipping]
     languages:
       en:
         email:
           subject: "We have your return request {{ values.number }}"
-          body: "<p>We have your request to send back{% for l in values.lines %}{% if loop.first %}: {% endif %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %} from order {{ doc.number }}.</p><p>We will look at it and write to you with what to do next.</p>"
+          body: "<p>We have your request to send back{% for l in values.lines %}{% if loop.first %}: {% endif %}{{ l }}{% if not loop.last %}, {% endif %}{% endfor %} from order {{ doc.number }}.</p><p>We will look at it and write to you with what to do next. If it is approved, the refund goes to {% if values.to_credit %}store credit{% else %}the payment it came by{% endif %}{% if values.fee %}, less {{ values.fee }}% of the goods' price kept as a restocking fee{% endif %}; return shipping is paid by {% if values.store_pays_shipping %}us{% else %}you{% endif %}.</p>"
   - key: commerce.return_approved
     label: A return was approved
     entity: SalesOrder

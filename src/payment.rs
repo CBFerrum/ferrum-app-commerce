@@ -168,7 +168,19 @@ pub async fn refresh_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid) -> Resu
             .bind(so)
             .fetch_one(&mut **tx)
             .await?;
-    let status = web_status(&requests, sent);
+    // Only a gift card has paid, and not all of it: its part is not the order paid.
+    let (by_card, others, total): (Decimal, Decimal, Decimal) = sqlx::query_as(
+        "select coalesce(sum(r.amount) filter (where r.status = 'Paid' and r.gateway = $3), 0), coalesce(sum(r.amount) filter (where r.status = 'Paid' and r.gateway <> $3), 0), \
+         coalesce((select o.rounded_total from e_sales_order o where o.tenant_id = $1 and o.id = $2), 0) \
+         from e_payment_request r where r.tenant_id = $1 and r.sales_order = $2 and r.docstatus = 1",
+    )
+    .bind(ctx.tenant)
+    .bind(so)
+    .bind(crate::gift_card::GIFT_CARD)
+    .fetch_one(&mut **tx)
+    .await?;
+    let card_part = by_card > Decimal::ZERO && others.is_zero() && by_card < total;
+    let status = web_status(&requests, sent, card_part);
     match status {
         Some(status) => set_order_status(k, ctx, tx, so, status, None).await,
         None => Ok(()),
@@ -177,12 +189,24 @@ pub async fn refresh_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, so: Uuid) -> Resu
 
 /// The status behind `refresh_order`: `requests` are (status, amount), newest first; `sent` is what
 /// refunds have returned.
-pub(crate) fn web_status(requests: &[(String, Decimal)], sent: Decimal) -> Option<&'static str> {
+pub(crate) fn web_status(requests: &[(String, Decimal)], sent: Decimal, card_part: bool) -> Option<&'static str> {
     // The rest of an order a gift card paid part of, still to pay.
     if requests.first().is_some_and(|(st, _)| st == "Initiated") && sent.is_zero() {
         return Some("Pending");
     }
     let paid: Decimal = requests.iter().filter(|(st, _)| st == "Paid").map(|(_, a)| *a).sum();
+    // A card that paid part and nothing else did: what became of the request for the rest is the order's state.
+    let rest = requests.iter().map(|(st, _)| st.as_str()).find(|st| *st != "Paid");
+    if card_part
+        && sent.is_zero()
+        && let Some(st @ ("Failed" | "Expired" | "Cancelled")) = rest
+    {
+        return Some(match st {
+            "Failed" => "Failed",
+            "Expired" => "Expired",
+            _ => "Cancelled",
+        });
+    }
     if requests.iter().any(|(st, _)| st == "Paid") {
         return Some(if sent <= Decimal::ZERO {
             "Paid"
@@ -619,6 +643,7 @@ impl DocHook for WebOrderHook {
             "web_tracking_link" => crate::ship::tracking_link(hc, doc).await?,
             "web_cancel" => crate::refund::web_cancel(hc, doc, params).await?,
             "web_update_items" => crate::edit::web_update_items(hc, doc, params).await?,
+            "web_resend_mail" => crate::resend::web_resend_mail(hc, doc, params).await?,
             "web_shopper_cancel" => crate::shopper::cancel(hc, doc, params).await?,
             "web_shopper_return" => crate::shopper::request_return(hc, doc, params).await?,
             _ => return Ok(None),
@@ -777,25 +802,34 @@ mod tests {
 
     #[test]
     fn the_web_status_follows_the_payment_and_what_went_back() {
-        let paid = |sent: &str| web_status(&[("Paid".into(), Decimal::from(100))], sent.parse().unwrap());
+        let paid = |sent: &str| web_status(&[("Paid".into(), Decimal::from(100))], sent.parse().unwrap(), false);
         assert_eq!((paid("0"), paid("40"), paid("100")), (Some("Paid"), Some("Partly Refunded"), Some("Refunded")));
         assert_eq!(
-            web_status(&[("Cancelled".into(), Decimal::from(100))], Decimal::from(100)),
+            web_status(&[("Cancelled".into(), Decimal::from(100))], Decimal::from(100), false),
             Some("Refunded"),
             "a cancelled order's payment was reversed, not lost"
         );
-        let open = |st: &str| web_status(&[(st.into(), Decimal::from(100))], Decimal::ZERO);
+        let open = |st: &str| web_status(&[(st.into(), Decimal::from(100))], Decimal::ZERO, false);
         assert_eq!(
             (open("Initiated"), open("Failed"), open("Expired"), open("Cancelled"), open("Odd")),
             (Some("Pending"), Some("Failed"), Some("Expired"), Some("Cancelled"), None)
         );
         // A paid request anywhere in the list wins over a newer failed one.
-        assert_eq!(web_status(&[("Failed".into(), Decimal::from(100)), ("Paid".into(), Decimal::from(100))], Decimal::ZERO), Some("Paid"));
+        assert_eq!(web_status(&[("Failed".into(), Decimal::from(100)), ("Paid".into(), Decimal::from(100))], Decimal::ZERO, false), Some("Paid"));
         // A gift card paid part: the rest is still to pay; once paid, what went back counts against both.
-        let split = |rest: &str, sent: i64| web_status(&[(rest.into(), Decimal::from(31)), ("Paid".into(), Decimal::from(500))], Decimal::from(sent));
+        let split = |rest: &str, sent: i64| web_status(&[(rest.into(), Decimal::from(31)), ("Paid".into(), Decimal::from(500))], Decimal::from(sent), false);
         assert_eq!(
             (split("Initiated", 0), split("Paid", 0), split("Paid", 500), split("Paid", 531)),
             (Some("Pending"), Some("Paid"), Some("Partly Refunded"), Some("Refunded"))
+        );
+    }
+
+    #[test]
+    fn a_card_that_paid_part_is_not_the_order_paid() {
+        let rest = |st: &str| web_status(&[(st.into(), Decimal::from(31)), ("Paid".into(), Decimal::from(500))], Decimal::ZERO, true);
+        assert_eq!(
+            (rest("Failed"), rest("Expired"), rest("Cancelled"), rest("Initiated"), rest("Paid")),
+            (Some("Failed"), Some("Expired"), Some("Cancelled"), Some("Pending"), Some("Paid"))
         );
     }
 

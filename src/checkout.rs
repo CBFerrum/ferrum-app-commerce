@@ -521,6 +521,8 @@ mod tests {
             channel: "Web Shop".into(),
             gift_card_kind: None,
             policy: crate::store::Policy::default(),
+            resend_per_day: 3,
+            languages: vec!["en".into()],
         }
     }
 

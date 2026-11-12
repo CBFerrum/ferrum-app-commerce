@@ -48,7 +48,12 @@ pub async fn handle(k: &Kernel, ctx: &Ctx, req: &SiteRequest) -> Result<SiteResp
         }
         Err(e) => return Err(e),
     };
-    let site = Shop { origin, api, store: &store, cats: catalog::category_tree(&mut tx, ctx.tenant).await?, path: rest };
+    // The words of the page: the language the visitor asked for (?lang=, else the browser's), as the store offers it.
+    let mut asked: Vec<String> = req.query.get("lang").and_then(Value::as_str).map(|l| vec![l.trim().to_lowercase()]).unwrap_or_default();
+    asked.extend(crate::words::accepted(header("accept-language")));
+    let lang = crate::words::choose(&store.languages, &asked);
+    let words = Value::Object(crate::words::merged(&mut tx, ctx, &lang).await?);
+    let site = Shop { origin, api, store: &store, cats: catalog::category_tree(&mut tx, ctx.tenant).await?, path: rest, lang, words };
     let query = |n: &str| req.query.get(n).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     let out = match segs.as_slice() {
         [] => listing(k, ctx, &mut tx, &site, Lens::of(None, None, &query), query("cursor")).await?,
@@ -79,6 +84,9 @@ struct Shop<'a> {
     cats: Value,
     /// This page's path below the site's root (`/p/steel-bracket`).
     path: &'a str,
+    /// The language the page is written in, and the words the script shows in it (`words.rs`).
+    lang: String,
+    words: Value,
 }
 
 impl Shop<'_> {
@@ -122,11 +130,14 @@ impl Shop<'_> {
             .map(|u| format!(r#" · <a href="{}">Terms</a>"#, esc(u)))
             .unwrap_or_default();
         let html = format!(
-            r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}{sep}{store}</title>{description}<link rel="canonical" href="{c}">{social}{robots}<link rel="stylesheet" href="/assets/store.css?v={v}"><script type="module" src="/assets/store.js?v={v}"></script>{data}</head><body data-api="{api}" data-currency="{cur}" data-precision="{prec}" data-tax="{tax}"{return_to}><a class="skip" href="#main">Skip to content</a><header class="top"><a class="brand" href="/">{store}</a><form class="search" action="/search" role="search"><input name="q" type="search" placeholder="Search the store" aria-label="Search the store" maxlength="100"></form><a class="cart-link" href="/cart">Cart<span class="count" data-cart-count hidden></span></a></header>{nav}<main id="main">{main}</main><div id="live" class="visually-hidden" role="status" aria-live="polite"></div><footer><span>© {store}</span>{terms}</footer></body></html>"##,
+            r##"<!doctype html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}{sep}{store}</title>{description}<link rel="canonical" href="{c}">{social}{robots}<link rel="stylesheet" href="/assets/store.css?v={v}"><script type="application/json" id="store-words">{words}</script><script type="module" src="/assets/store.js?v={v}"></script>{data}</head><body data-api="{api}" data-currency="{cur}" data-precision="{prec}" data-tax="{tax}"{return_to}><a class="skip" href="#main">Skip to content</a><header class="top"><a class="brand" href="/">{store}</a><form class="search" action="/search" role="search"><input name="q" type="search" placeholder="Search the store" aria-label="Search the store" maxlength="100"></form><a class="cart-link" href="/cart">Cart<span class="count" data-cart-count hidden></span></a></header>{nav}<main id="main">{main}</main><div id="live" class="visually-hidden" role="status" aria-live="polite"></div><footer><span>© {store}</span>{terms}</footer></body></html>"##,
             t = esc(title),
             sep = if title.is_empty() { "" } else { " · " },
             c = esc(&canonical),
             social = social.unwrap_or_default(),
+            lang = esc(&self.lang),
+            dir = if crate::words::right_to_left(&self.lang) { "rtl" } else { "ltr" },
+            words = json_in_html(&self.words),
             v = version(),
             api = esc(self.api),
             cur = esc(&self.store.currency_code),
@@ -565,6 +576,8 @@ fn page_response(status: u16, html: String) -> SiteResponse {
     let mut r = SiteResponse::text(status, "text/html; charset=utf-8", html);
     // Prices and stock change; a page is good for a minute in shared caches, no longer.
     r.headers.push(("cache-control".into(), "public, max-age=60".into()));
+    // The words are the visitor's language's.
+    r.headers.push(("vary".into(), "accept-language".into()));
     r
 }
 
@@ -591,7 +604,7 @@ fn asset(content_type: &str, body: &str) -> SiteResponse {
 /// The assets' version, for their addresses.
 fn version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| hex::encode(&Sha256::digest(format!("{CSS}{JS}").as_bytes())[..6]))
+    V.get_or_init(|| hex::encode(&Sha256::digest(format!("{CSS}{JS}{}", crate::words::ENGLISH).as_bytes())[..6]))
 }
 
 /// An image the page may show: public files of the workspace, or https addresses.

@@ -22,6 +22,7 @@ mod pages;
 mod payment;
 mod refund;
 mod reports;
+mod resend;
 mod ship;
 mod shipping;
 mod shopper;
@@ -32,6 +33,7 @@ mod tell;
 mod token;
 mod upkeep;
 mod variants;
+mod words;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use ferrum_domain::reports::ReportSource;
@@ -46,6 +48,7 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("ItemCategory", Arc::new(catalog::CategoryHook))
         .register("WebsiteItem", Arc::new(catalog::WebsiteItemHook))
         .register("ItemReview", Arc::new(catalog::ReviewHook))
+        .register("StorefrontWords", Arc::new(words::StorefrontWordsHook))
         .register("ShoppingCart", Arc::new(cart::CartHook))
         .register("ShippingRule", Arc::new(shipping::ShippingRuleHook))
         .register("CouponCode", Arc::new(coupon::CouponHook))

@@ -201,6 +201,21 @@ pub async fn tracking_link(hc: &mut HookCtx<'_>, so: &Doc) -> Result<Value> {
     Ok(json!({"link": link}))
 }
 
+/// What the shipped mail says of one delivery note's part of an order: its lines, the carrier and tracking.
+pub(crate) fn shipped_values(note: &Doc, so_id: Uuid) -> Vec<(&'static str, Value)> {
+    let lines: Vec<Value> = rows(note, "items")
+        .iter()
+        .filter(|l| id(l, "sales_order") == Some(so_id))
+        .map(|l| json!(format!("{} × {}", d(l, "qty").normalize(), s(l, "item_name").unwrap_or_default())))
+        .collect();
+    vec![
+        ("lines", Value::Array(lines)),
+        ("carrier", json!(s(note, "transporter"))),
+        ("tracking_number", json!(s(note, "commerce_tracking_number"))),
+        ("tracking_url", json!(s(note, "commerce_tracking_url"))),
+    ]
+}
+
 /// Tells the world a web order left: after its delivery note is submitted, `commerce.order_shipped`
 /// carries the carrier and tracking, the shopper's address and the link to follow the order, for a
 /// mailer or webhook to use. `notify` says whether the person asked for the shopper to be told.
@@ -241,21 +256,11 @@ impl DocHook for DeliveryHook {
             if b(doc, "commerce_notify")
                 && let Some(to) = s(&so, "commerce_contact_email")
             {
-                let lines: Vec<Value> = rows(doc, "items")
-                    .iter()
-                    .filter(|l| id(l, "sales_order") == Some(so_id))
-                    .map(|l| json!(format!("{} × {}", d(l, "qty").normalize(), s(l, "item_name").unwrap_or_default())))
-                    .collect();
                 let mut values = serde_json::Map::new();
-                for (k, v) in [
-                    ("lines", Value::Array(lines)),
-                    ("carrier", json!(s(doc, "transporter"))),
-                    ("tracking_number", json!(s(doc, "commerce_tracking_number"))),
-                    ("tracking_url", json!(s(doc, "commerce_tracking_url"))),
-                    ("link", json!(link)),
-                ] {
+                for (k, v) in shipped_values(doc, so_id) {
                     values.insert(k.into(), v);
                 }
+                values.insert("link".into(), json!(link));
                 let m = Message {
                     template: "commerce.order_shipped".into(),
                     entity: Some("SalesOrder".into()),
