@@ -6,7 +6,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
+import { api, docPath, refusal, t, isolate } from "@ferrum/client";
 import { Alert, Button, confirmDialog, Dialog, Field, FormSkeleton, StatePanel, toast, useDebounced } from "@ferrum/kit";
 import { amountText, units } from "./queues";
 import { f, list, type Rights } from "./data";
@@ -92,7 +92,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
     try {
       made = await api.post<{ id: string }>(docPath("OrderRefund"), { ...asked, reason: reasonId, note: note.trim() || undefined, notify_customer: notify });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
       return;
     }
@@ -105,7 +105,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
       await api.post(docPath("OrderRefund", made.id, "actions", "approve_refund"), {});
       toast(t("Approved. The gateway sends it within a few minutes."));
     } catch (err) {
-      toast(t("Asked for, but not approved: {err}", { err: errorMessage(err) }), "error");
+      toast(t("Asked for, but not approved: {err}", { err: refusal(err) }), "error");
     }
     onDone();
   };

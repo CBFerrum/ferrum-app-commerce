@@ -33,9 +33,23 @@ impl ReportSource for CommerceReports {
     }
 
     async fn run(&self, k: &Kernel, ctx: &Ctx, name: &str, params: &HashMap<String, String>) -> Result<Value> {
-        let p = Params { raw: params };
         let mut tx = read_tx(k, ctx).await?;
-        let co = resolve_company(&mut tx, ctx, &p).await?;
+        // The store's company is the one Store Settings name, unless the caller asks for another; with no
+        // Store Settings the platform's rule stands (the person's default company, or the only one).
+        let mut raw = params.clone();
+        if raw.get("company").is_none_or(|c| c.trim().is_empty())
+            && let Some(c) = crate::store::company(k, ctx, &mut tx).await?
+        {
+            raw.insert("company".into(), c.to_string());
+        }
+        let p = Params { raw: &raw };
+        let co = resolve_company(&mut tx, ctx, &p).await.map_err(|e| match e {
+            // Said once, plainly, for a store that is not set up: a person is not asked for a company id.
+            Error::Validation(f) if f.iter().any(|x| x.field == "company") => {
+                Error::Invalid("The store is not set up yet: make Store Settings (its company, currency and price list) first.".into())
+            }
+            e => e,
+        })?;
         let mut out = match name {
             "web_sales" => web_sales(k, ctx, &mut tx, &co, &p).await?,
             "top_products" => top_products(k, ctx, &mut tx, &co, &p).await?,

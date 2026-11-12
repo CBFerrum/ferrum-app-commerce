@@ -5,7 +5,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { api, docPath, refusal, isolate, t } from "@ferrum/client";
 import { Alert, Button, Dialog, Field, toast } from "@ferrum/kit";
 import { cancelParams, type Part, partWords, parts, type PayRow } from "./edit";
 import { f, list, type Rights } from "./data";
@@ -47,7 +47,7 @@ export function CancelOrderDialog({ order, payments, rights, owed, code, onClose
       toast(r.cancelled ? t("Cancelled.") : waiting ? t("Asked for. The order is cancelled when the last refund has gone back.") : t("Done."));
       onDone();
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
       setBusy(false);
     }
   };

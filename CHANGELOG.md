@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.2
+
+From the first browser walk: a workspace with no Store Settings.
+
+- **The store's reports take the store's company.** `web_sales`, `top_products`, `abandoned_carts`, `conversion_funnel` and
+  `coupon_usage` named no company when the Today page asked, and a workspace with several companies and no default answered
+  422 "company is required". With no company in the request the report now uses the one Store Settings name (a caller may
+  still name another). With no Store Settings and no company to fall back on it answers one plain sentence: the store is not
+  set up yet.
+- **First-run state.** The Today page, Orders, Returns, Stock alerts, Variants, Storefront words and Money show "The store is
+  not set up yet" with a link to make Store Settings (or "ask an administrator") while none exist, and ask the server nothing
+  it would refuse. The store's records (catalog, coupons, Store Settings) stay reachable.
+- **Plain refusals.** A refusal the server gives a screen is shown as its reason alone, not as "Please correct the highlighted
+  fields: ...".
+- **Routes.** The route table is in `ui/src/routes.tsx` and a test mounts it on a workspace with no Store Settings and one with
+  them, and opens new and existing records. Commerce did not have CRM's route fault: every record route names the entity.
+
 ## 0.10.1
 
 The screens for 0.10.0, rebuilt with Ferrum-Frontend. Needs nothing new of the server; `ui/dist` is rebuilt (0.10.0 left it stale).

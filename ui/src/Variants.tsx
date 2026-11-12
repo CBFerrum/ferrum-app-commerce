@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, docPath, errorMessage, isolate, t } from "@ferrum/client";
+import { api, docPath, refusal, isolate, t } from "@ferrum/client";
 import { Alert, Badge, Button, confirmDialog, EmptyState, ErrorState, Field, FormSkeleton, StatePanel, toast, useShellTitle } from "@ferrum/kit";
 import { LinkInput, useEntityMeta, can } from "@ferrum/records";
 import { f, list, useRights } from "./data";
@@ -136,7 +136,7 @@ function Builder({ id }: { id: string }) {
       toast(madeWords(r));
       void qc.invalidateQueries({ queryKey: ["commerce"] });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(refusal(err));
     } finally {
       setBusy(false);
     }
