@@ -100,6 +100,55 @@ pub async fn held_until(tx: &mut Tx, tenant: Uuid, so: Uuid) -> Result<Option<ch
         .await?)
 }
 
+/// What a gift card did for an order, for the shopper and the desk: what it paid, what it holds until the rest is
+/// paid and when the hold lets go, and what the card has left after this order. Never the card's code. `Null`
+/// when no card is involved.
+pub async fn view(tx: &mut Tx, tenant: Uuid, so: &Doc) -> Result<Value> {
+    let Some(so_id) = id(so, "id") else { return Ok(Value::Null) };
+    let paid = paid(tx, tenant, so_id).await?.max(d(so, "commerce_paid_by_card"));
+    let held = d(so, "commerce_card_held");
+    if paid <= Decimal::ZERO && held <= Decimal::ZERO {
+        return Ok(Value::Null);
+    }
+    // The card is the one that holds for the order, else the one redeemed against its invoices.
+    let (account, still): (Option<Uuid>, Decimal) = match sqlx::query_as::<_, (Uuid, String, Decimal)>(
+        "select account_id, state, amount from stored_value_hold where tenant_id = $1 and order_id = $2 order by created_at desc limit 1",
+    )
+    .bind(tenant)
+    .bind(so_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        Some((a, state, amount)) => (Some(a), if state == "held" { amount } else { Decimal::ZERO }),
+        None => (
+            sqlx::query_scalar(
+                "select e.account_id from stored_value_entry e where e.tenant_id = $1 and e.entry_type = 'redeem' and e.source_entity = 'SalesInvoice' \
+                 and e.source_id in (select distinct i.parent_id from e_sales_invoice__items i where i.tenant_id = $1 and i.sales_order = $2) order by e.created_at desc limit 1",
+            )
+            .bind(tenant)
+            .bind(so_id)
+            .fetch_optional(&mut **tx)
+            .await?,
+            Decimal::ZERO,
+        ),
+    };
+    let left: Option<Decimal> = match account {
+        Some(a) => {
+            sqlx::query_scalar("select balance from e_stored_value_account where tenant_id = $1 and id = $2")
+                .bind(tenant)
+                .bind(a)
+                .fetch_optional(&mut **tx)
+                .await?
+        }
+        None => None,
+    };
+    let until = if held > Decimal::ZERO { held_until(tx, tenant, so_id).await? } else { None };
+    let m = |v: Decimal| v.normalize().to_string();
+    Ok(
+        json!({"paid": m(paid), "held": m(held), "held_until": until.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)), "balance_left": left.map(|b| m((b - still).max(Decimal::ZERO)))}),
+    )
+}
+
 /// Pays what it can of a just-placed order from `card`, in the checkout's transaction (a wrong code
 /// undoes the order with it). Returns what the card paid or holds.
 ///

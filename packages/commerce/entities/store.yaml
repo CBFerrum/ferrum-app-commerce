@@ -51,6 +51,7 @@
     - {name: abandon_after_hours, type: int, default: 24, min: 1, max: 8760, label: Carts Count as Abandoned After (Hours)}
     - {name: cart_expiry_days, type: int, default: 30, min: 1, max: 3650, label: Carts Expire After (Days)}
     - {name: gift_card_kind, type: link, to: StoredValueKind, label: Gift Cards, description: "The stored value the shop takes at checkout and sells as gift cards (an item that names it); empty: no gift cards"}
+    - {name: store_languages, type: data, max_length: 120, label: Languages Offered, description: "The languages the storefront's words come in, separated by commas, the first the default: en, hi, ar. A visitor gets the one they ask for (?lang=, else the browser's), else the first. Words for each: Storefront Words. Empty: English"}
     - {name: sales_channel, type: data, max_length: 140, default: Web Shop, label: Sales Channel, description: "The channel web carts and orders name, as promotions' Channels list it (empty: Web Shop)"}
     - {name: cancel_unpaid_orders, type: check, default: true, description: "Cancel a web order when its payment request expires unpaid, releasing its reserved stock"}
     - {name: cancel_window_hours, type: int, default: 24, min: 0, max: 8760, label: "Shoppers May Cancel for (Hours)", description: "After an order is placed, a shopper may cancel it themselves from the link in their confirmation, while it has not shipped: 0 = not at all"}
@@ -60,10 +61,12 @@
     - {name: restocking_fee_percent, type: percent, default: 0, label: Restocking Fee, description: "Kept from what a return credits, per cent of the goods' price"}
     - {name: refund_destination, type: select, options: [Original Payment, Store Credit], default: Original Payment, label: Returns Are Refunded To}
     - {name: out_for_delivery_words, type: data, max_length: 300, label: Carrier Words for Out for Delivery, description: "What a carrier says when a parcel is out for delivery, in its own words, separated by commas (as its tracking reports them): the shopper is then told. Empty: not told"}
+    - {name: after_sales_text, type: text, label: Words on the Shopper's Page, default: "You can cancel this order within {hours} hours of placing it, while it has not shipped. Goods can be sent back within {days} days of delivery. Keeping {fee}% of the goods' price as a restocking fee; return shipping is paid by the {shipping}; the refund goes to {refund}.", description: "Said on the page a shopper's link opens, under their order. {hours}, {days}, {fee}, {shipping} and {refund} are the settings above; empty: nothing is said"}
+    - {name: resend_per_day, type: int, default: 3, min: 1, max: 50, label: Same Mail to One Order at Most (a Day), description: "How many times one mail may go to the same order in a day, the first one among them: the desk's Send Mail Again stops there"}
     - {name: store_credit_kind, type: link, to: StoredValueKind, label: Store Credit, description: "The stored value a return is refunded as when the store refunds to store credit; empty: back to the payment"}
   form:
     - {label: Store, fields: [store_name, company, currency, price_list, tax_template, display_prices_with_tax, store_url, terms_url]}
     - {label: Stock, fields: [warehouses, fulfilment_warehouse, enforce_stock, show_stock_quantity]}
-    - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders, sales_channel, gift_card_kind]}
-    - {label: After Sales, fields: [cancel_window_hours, cancel_refund, return_window_days, return_shipping_paid_by, restocking_fee_percent, refund_destination, store_credit_kind, out_for_delivery_words]}
+    - {label: Checkout, fields: [allow_guest_checkout, default_customer_group, allowed_countries, shipping_item, payment_methods, cancel_unpaid_orders, sales_channel, gift_card_kind, store_languages]}
+    - {label: After Sales, fields: [cancel_window_hours, cancel_refund, return_window_days, return_shipping_paid_by, restocking_fee_percent, refund_destination, store_credit_kind, out_for_delivery_words, after_sales_text, resend_per_day]}
     - {label: Limits, collapsible: true, fields: [max_qty_per_line, max_cart_lines, abandon_after_hours, cart_expiry_days]}

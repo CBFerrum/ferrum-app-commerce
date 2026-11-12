@@ -565,7 +565,11 @@ async fn work_out(hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
             if started(&so) {
                 return Err(Error::field("kind", "part of this order was delivered or invoiced: send back the goods instead"));
             }
-            // An order paid two ways (a gift card and another) is cancelled by one refund for each.
+            // An order paid two ways (a gift card and another) is cancelled by one refund for each, which only the
+            // order's own Cancel Web Order asks for: the form asks for one payment's.
+            if !hc.ctx.is_system && payments_made(hc.tx, hc.ctx.tenant, so_id).await? > 1 {
+                return Err(Error::field("kind", "this order was paid two ways: cancel it with Cancel Web Order on the order, which sends each payment back"));
+            }
             if unclaimed_payments(hc.tx, hc.ctx.tenant, so_id).await? == 0 {
                 return Err(Error::invalid("this payment is already being sent back"));
             }
