@@ -130,6 +130,7 @@
  "retry.expired": "Your payment was not made in time",
  "retry.failed": "Your payment did not go through",
  "retry.text": "Nothing was taken. Your order is kept for you: choose how to pay {total} and try again.",
+ "retry.text_card": "Your gift card or store credit already paid {card}. Your order is kept for you: choose how to pay the other {total} and try again.",
  "select.choose": "Choose…",
  "sendon.instead": "Go to my order instead",
  "sendon.placed": "Order placed",
