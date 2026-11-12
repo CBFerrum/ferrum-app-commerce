@@ -5,13 +5,13 @@
 // asks, and a manager decides.
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api, docPath, errorMessage, t, isolate } from "@ferrum/client";
 import { Alert, Button, confirmDialog, Dialog, Field, FormSkeleton, StatePanel, toast, useDebounced } from "@ferrum/kit";
 import { amountText, units } from "./queues";
 import { f, list, type Rights } from "./data";
 import { gatewayName } from "./standing";
-import { type Choice, clampQty, emptyChoice, type Kind, type Plan, type PlanLine, readiness, request, restocks } from "./choices";
+import { type Choice, clampQty, emptyChoice, type Plan, type PlanLine, readiness, request, restocks } from "./choices";
 
 interface Reason {
   id: string;
@@ -47,7 +47,6 @@ function Stepper({ line, value, onChange }: { line: PlanLine; value: number; onC
 }
 
 export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: string; number?: string | null; customer_name?: string | null }; rights: Rights; onClose: () => void; onDone: () => void }) {
-  const [kind, setKind] = useState<Kind | null>(null);
   const [choice, setChoice] = useState<Choice>(emptyChoice);
   const [reasonId, setReasonId] = useState<string>("");
   const [note, setNote] = useState("");
@@ -58,7 +57,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
   const reasons = useQuery({ queryKey: ["commerce", "reasons"], queryFn: () => list<Reason>("ReturnReason", { filters: f([["disabled", "=", false]]), fields: "reason,restock", sort: "reason asc", limit: 100 }).then((r) => r.rows) });
   const reason = reasons.data?.find((r) => r.id === reasonId);
   const reasonRestocks = reason ? reason.restock !== false : true;
-  const asked = request(order.id, kind ?? "Return", choice, reasonRestocks);
+  const asked = request(order.id, choice, reasonRestocks);
   const key = useDebounced(JSON.stringify(asked), 250);
   const plan = useQuery({
     queryKey: ["commerce", "refund-plan", key],
@@ -69,13 +68,7 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
   const p = plan.data;
   const estimating = plan.isFetching || key !== JSON.stringify(asked);
 
-  // An order that has not shipped can only be cancelled; one that has, can only have goods come back.
-  useEffect(() => {
-    if (kind === null && p?.payable) setKind(p.cancel?.allowed ? "Cancellation" : "Return");
-  }, [kind, p]);
-
-  const current: Kind = kind ?? "Return";
-  const ready = readiness({ plan: p, kind: current, choice, reason: reasonId || null, estimating });
+  const ready = readiness({ plan: p, choice, reason: reasonId || null, estimating });
   const amount = p?.estimate?.amount;
   const money = (v: unknown) => amountText(v, p?.currency);
   const gateway = p?.payment ? (p.payment.label ? `${p.payment.label} (${gatewayName(p.payment.gateway)})` : gatewayName(p.payment.gateway)) : "";
@@ -127,59 +120,44 @@ export function RefundDialog({ order, rights, onClose, onDone }: { order: { id: 
     <div className="cm-refund">
       <div className="cm-refund-main stack">
         {error && <Alert tone="error">{isolate(error)}</Alert>}
-        <div className="segmented" role="group" aria-label={t("What happens")}>
-          <button type="button" aria-pressed={current === "Return"} onClick={() => setKind("Return")}>
-            {t("Goods come back")}
-          </button>
-          <button type="button" aria-pressed={current === "Cancellation"} disabled={!p.cancel?.allowed} title={p.cancel?.allowed ? undefined : t("This order has shipped or is already being refunded")} onClick={() => setKind("Cancellation")}>
-            {t("Cancel the order")}
-          </button>
-        </div>
-        {current === "Return" ? (
-          <>
-            {!p.lines?.some((l) => Number(l.returnable) > 0) ? (
-              <Alert tone="info">
-                {p.lines?.some((l) => Number(l.delivered) > 0 && !l.invoiced) ? t("Nothing can come back until the order is invoiced: a return credits the invoice.") : t("Nothing on this order can come back: it was not delivered, or it has all come back already.")}
-              </Alert>
-            ) : (
-              <ul className="cm-refund-lines">
-                {p.lines
-                  ?.filter((l) => Number(l.delivered) > 0)
-                  .map((l) => {
-                    const max = Number(l.returnable);
-                    const qty = choice.qty[l.id] ?? 0;
-                    return (
-                      <li key={l.id} className="cm-refund-line" data-chosen={qty > 0 || undefined}>
-                        <div className="cm-refund-what">
-                          <strong>{isolate(l.name ?? "")}</strong>
-                          <span className="faint">
-                            {isolate(units(Number(l.delivered)))} {(max > 0 ? t("delivered · {max} can come back", { max: units(max) }) : (l.invoiced ? t("delivered · all back already") : t("delivered · not invoiced yet")))}
-                          </span>
-                        </div>
-                        {max > 0 ? (
-                          <>
-                            <Stepper line={l} value={qty} onChange={(n) => setChoice({ ...choice, qty: { ...choice.qty, [l.id]: n } })} />
-                            <label className="check-field cm-shelf">
-                              <input type="checkbox" checked={restocks(choice, l.id, reasonRestocks)} disabled={qty <= 0} onChange={(e) => setChoice({ ...choice, restock: { ...choice.restock, [l.id]: e.target.checked } })} />
-                              <span>{t("Back on the shelf")}</span>
-                            </label>
-                          </>
-                        ) : null}
-                      </li>
-                    );
-                  })}
-              </ul>
-            )}
-            <label className="check-field">
-              <input type="checkbox" checked={choice.shipping} disabled={!p.shipping?.available} onChange={(e) => setChoice({ ...choice, shipping: e.target.checked })} />
-              <span>{p.shipping?.available ? t("Refund the delivery charge too") : t("The delivery charge cannot be refunded (there is none, or it went back already)")}</span>
-            </label>
-          </>
-        ) : (
-          <Alert tone="warning">
-            {t("The order has not shipped. Its whole payment goes back and the order is cancelled, which frees its stock.")}
+        {p.cancel?.allowed && <Alert tone="info">{t("This order has not shipped. To cancel it and send each payment back, use Cancel order… on the order: a refund here is for goods that come back.")}</Alert>}
+        {!p.lines?.some((l) => Number(l.returnable) > 0) ? (
+          <Alert tone="info">
+            {p.lines?.some((l) => Number(l.delivered) > 0 && !l.invoiced) ? t("Nothing can come back until the order is invoiced: a return credits the invoice.") : t("Nothing on this order can come back: it was not delivered, or it has all come back already.")}
           </Alert>
+        ) : (
+          <ul className="cm-refund-lines">
+            {p.lines
+              ?.filter((l) => Number(l.delivered) > 0)
+              .map((l) => {
+                const max = Number(l.returnable);
+                const qty = choice.qty[l.id] ?? 0;
+                return (
+                  <li key={l.id} className="cm-refund-line" data-chosen={qty > 0 || undefined}>
+                    <div className="cm-refund-what">
+                      <strong>{isolate(l.name ?? "")}</strong>
+                      <span className="faint">
+                        {isolate(units(Number(l.delivered)))} {(max > 0 ? t("delivered · {max} can come back", { max: units(max) }) : (l.invoiced ? t("delivered · all back already") : t("delivered · not invoiced yet")))}
+                      </span>
+                    </div>
+                    {max > 0 ? (
+                      <>
+                        <Stepper line={l} value={qty} onChange={(n) => setChoice({ ...choice, qty: { ...choice.qty, [l.id]: n } })} />
+                        <label className="check-field cm-shelf">
+                          <input type="checkbox" checked={restocks(choice, l.id, reasonRestocks)} disabled={qty <= 0} onChange={(e) => setChoice({ ...choice, restock: { ...choice.restock, [l.id]: e.target.checked } })} />
+                          <span>{t("Back on the shelf")}</span>
+                        </label>
+                      </>
+                    ) : null}
+                  </li>
+                );
+              })}
+          </ul>
         )}
+        <label className="check-field">
+          <input type="checkbox" checked={choice.shipping} disabled={!p.shipping?.available} onChange={(e) => setChoice({ ...choice, shipping: e.target.checked })} />
+          <span>{p.shipping?.available ? t("Refund the delivery charge too") : t("The delivery charge cannot be refunded (there is none, or it went back already)")}</span>
+        </label>
         <Field label={t("Why")} htmlFor="refund-reason" required>
           <select id="refund-reason" className="select" value={reasonId} required onChange={(e) => setReasonId(e.target.value)}>
             <option value="">{t("Choose a reason…")}</option>

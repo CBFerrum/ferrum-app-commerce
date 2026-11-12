@@ -111,57 +111,70 @@ export function addressParam(a: Address | null) {
   return JSON.stringify(out);
 }
 
-export interface Estimate {
-  /** What the lines the desk can price change by, at the price each had: removing a line is negative. */
-  goods: number;
-  /** Lines added: their price is the server's to work out. */
-  added: number;
-  /** The address changed: tax follows where it now goes. */
-  moves: boolean;
+/** How the server settles what an order now comes to against what was paid (src/edit.rs, `settlement`). */
+export type Settlement =
+  | { kind: "none"; amount?: string }
+  /** The shopper is asked: their open request is replaced (`replaces_open_request`), or a new one is made on the paid order. */
+  | { kind: "charge"; amount: string; gateway?: string | null; label?: string | null; replaces_open_request?: boolean }
+  /** Sent back through the payment that can take it, as an Adjustment refund. */
+  | { kind: "refund"; amount: string; gateway?: string | null; label?: string | null; status?: string | null }
+  /** Neither could be done: recorded as owed, by the shopper or by the store. */
+  | { kind: "owed"; amount: string; by: "shopper" | "store" };
+
+export interface PreviewLine {
+  line: number;
+  id?: string | null;
+  item?: string | null;
+  name?: string | null;
+  qty: string;
+  rate: string;
+  amount: string;
+  delivery: boolean;
+  delivered_qty?: string;
 }
 
-export function estimate(lines: OrderLine[], d: Draft): Estimate {
-  let goods = 0;
-  for (const l of lines) {
-    const raw = d.qty[l.id];
-    const q = raw === undefined ? null : quantity(raw);
-    if (q !== null) goods += (q - num(l.qty)) * num(l.rate);
-  }
-  return { goods: Math.round(goods * 100) / 100, added: d.added.filter((a) => a.item && num(a.qty) > 0).length, moves: !!d.address };
-}
-
-export type Settle =
-  | { kind: "none" }
-  /** An unpaid order: its open request is replaced by one for the new total. */
-  | { kind: "replace"; via: string | null }
-  /** A paid order that now owes more: asked for through the method it was paid with. */
-  | { kind: "charge"; via: string | null }
-  /** A paid order that now owes less: sent back as an Adjustment refund through a payment that can take it. */
-  | { kind: "refund"; via: string | null; offline: boolean }
-  /** Neither could be done: the amount is recorded as owed, either way. */
-  | { kind: "owed"; toShopper: boolean };
-
-/** What the server does with the difference, from the payments the order has (src/edit.rs, in its order). */
-export function settlement(difference: number, payments: PayRow[]): Settle {
-  const live = payments.filter((p) => p.status === "Initiated");
-  const paid = payments.filter((p) => p.status === "Paid" && p.gateway !== GIFT_CARD);
-  if (live.length) return difference === 0 ? { kind: "none" } : { kind: "replace", via: live[0].gateway ?? null };
-  if (!payments.some((p) => p.status === "Paid")) return { kind: "owed", toShopper: difference < 0 };
-  if (difference > 0) return { kind: "charge", via: paid[0]?.gateway ?? null };
-  if (difference < 0) {
-    const room = paid.find((p) => num(p.amount) - num(p.refunded_amount) >= -difference);
-    return room ? { kind: "refund", via: room.gateway ?? null, offline: isOffline(room.gateway) } : { kind: "owed", toShopper: true };
-  }
-  return { kind: "none" };
-}
-
-/** What the server answers to `Update Web Order`: money as text (src/edit.rs). */
+/** What `Update Web Order` answers, and what the preview route answers before it: money as text (src/edit.rs). */
 export interface Saved {
   total?: string;
   difference?: string;
   owed?: string;
   payment_request?: string | null;
   refund?: string | null;
+  settlement?: Settlement;
+  lines?: PreviewLine[];
+  totals?: { goods: string; delivery: string; taxes: string; grand_total: string; rounded_total: string; was: string };
+  preview?: boolean;
+}
+
+/** The body of the preview route: the save's own parameters and the order. The refund is never approved in a preview. */
+export function previewBody(order: string, lines: OrderLine[], d: Draft, shippingRule: string) {
+  return { sales_order: order, ...updateParams(lines, d, "", false, false), shipping_rule: shippingRule || undefined };
+}
+
+/** What the server will do with the difference, in words; `approvable` when the refund waits for the desk's choice. */
+export function settlementWords(s: Settlement, money: (v: unknown) => string, via: (gateway?: string | null, label?: string | null) => string): { text: string; approvable: boolean } {
+  switch (s.kind) {
+    case "none":
+      return { text: t("Nothing is asked for and nothing is sent back."), approvable: false };
+    case "charge":
+      return {
+        text: s.replaces_open_request
+          ? t("The shopper has not paid yet: their open payment request is replaced by one for {amount}, through {via}.", { amount: money(s.amount), via: via(s.gateway, s.label) })
+          : t("The shopper is asked for {amount} through {via}, with a payment link on their order page.", { amount: money(s.amount), via: via(s.gateway, s.label) }),
+        approvable: false,
+      };
+    case "refund":
+      return isOffline(s.gateway)
+        ? { text: t("{amount} is noted as a refund through {via}, which has no gateway: you hand it back and record that you did.", { amount: money(s.amount), via: via(s.gateway, s.label) }), approvable: false }
+        : { text: t("{amount} is sent back through {via} as an adjustment refund.", { amount: money(s.amount), via: via(s.gateway, s.label) }), approvable: true };
+    default:
+      return {
+        text: s.by === "store"
+          ? t("No payment can take a refund of this size, so it is recorded as owed to the shopper: the store owes {amount}.", { amount: money(s.amount) })
+          : t("No payment can be asked for it, so it is recorded as owed by the shopper: {amount} is still to collect.", { amount: money(s.amount) }),
+        approvable: false,
+      };
+  }
 }
 
 /** What the desk is told once it is saved, with the figures the server worked out. */

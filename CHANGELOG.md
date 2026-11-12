@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.1
+
+The screens for 0.10.0, rebuilt with Ferrum-Frontend. Needs nothing new of the server; `ui/dist` is rebuilt (0.10.0 left it stale).
+
+- **Change order** asks the server what saving would do (`POST /api/app/commerce/desk/change-preview`) a moment after the last edit, and shows what it answers: the lines as priced (promotions, tax and delivery again), the totals, the difference and the `settlement` in words (the shopper is asked through which method, replacing the open request or not; sent back through which payment; owed by the shopper or the store; or nothing). The delivery method (`shipping_rule`) is offered beside it, and is asked for when the server says more than one applies. Saving sends the same body and the desk is told the server's figures, and if the price moved since the preview, that. The old estimate is gone; a refund is never approved by a preview.
+- **Cancel and refund.** The refund dialog is for goods that come back; its "Cancel the order" path is removed (the server refuses it for an order paid two ways) and it points at **Cancel order…**, which sends each payment back (the gift card's part first) and shows the server's refusal as it is.
+- **Order screen.** **Send a mail again…** (More menu): the four mails that may go again (Shipped, Payment received, Payment failed, Refunded), the ones with nothing to tell disabled with the reason, the count on the order and the daily limit, a note that the confirmation and gift card or store credit codes cannot, the server's refusal as it is, and how many more may go today. A **Gift card** block shows what the card paid and what it holds.
+- **Storefront** (`assets/store.js`): a shopper whose card paid part and whose rest failed or lapsed is offered to pay the rest (the page asks for the rest only, as the server does) and is told what the card paid, the rest and what is left on it; the card's note shows while the gateway's page is made; numbers and country names are written in the page's language; a chosen `?lang=` stays on the store's links and its search. A test fails if a word of its own comes back into the script. Words added: `retry.text_card`.
+- **Storefront Words** (`/words`, a tab for those who may change them): one row a word with its key, the English, the workspace's text, search, only the words not yet written, reset to default, a place its English does not fill refused before the server does; one record a language, as before.
+
+Not built: the language switch (the storefront's `GET /store` does not say which languages the store offers, so the page cannot list them), and the gift card's `held_until` and `balance_left` on the desk's order screen (only the shopper's order routes carry `gift_card`; the desk sees what the card paid and holds from the order's own fields). The new words are in English in the Hindi and Arabic catalogs.
+
 ## 0.10.0
 
 Needs ERP 0.25 or later for its tests (carriers on the platform's connections); uses the platform's links with `columns` (BD-38). What the screens of 0.9.1 asked of the server, and the storefront's words. A new entity, **Storefront Words**, so a minor release; nothing is seeded and nothing is assumed: a workspace that has not had the update has no words table, no terms field, no settings for them, and its storefront, links and mails behave as before.

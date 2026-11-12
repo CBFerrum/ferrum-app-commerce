@@ -178,3 +178,9 @@ export function useReturnsWaiting(): number | undefined {
   });
   return q.data;
 }
+
+/** May this person change the storefront's words: the tab is for those who may. */
+export function useCanEditWords(): boolean {
+  const meta = useEntityMeta("StorefrontWords");
+  return can(meta.data?.permissions, "write") || can(meta.data?.permissions, "create");
+}

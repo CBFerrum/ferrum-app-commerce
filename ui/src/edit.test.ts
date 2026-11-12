@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addressParam, addressProblem, cancelParams, changes, emptyAddress, emptyDraft, estimate, type OrderLine, parts, partWords, readiness, savedWords, settlement, updateParams } from "./edit";
+import { addressParam, addressProblem, cancelParams, changes, emptyAddress, emptyDraft, type OrderLine, parts, partWords, previewBody, readiness, savedWords, settlementWords, updateParams } from "./edit";
 
 const lines: OrderLine[] = [
   { id: "a", item: "mug", item_name: "Blue Mug", qty: "2", rate: "250", amount: "500", delivered_qty: "0" },
@@ -36,28 +36,26 @@ describe("what is asked of the server", () => {
   });
 });
 
-describe("the difference before saving", () => {
-  it("prices what the desk can price, and says what it cannot", () => {
-    expect(estimate(lines, draft({ qty: { a: "1" } }))).toEqual({ goods: -250, added: 0, moves: false });
-    expect(estimate(lines, draft({ qty: { a: "3" }, added: [{ key: 1, item: "x", title: "", qty: "2" }], address: emptyAddress() }))).toEqual({ goods: 250, added: 1, moves: true });
+describe("what the server says saving would do", () => {
+  const money = (v: unknown) => `₹${Number(v)}`;
+  const via = (g?: string | null, l?: string | null) => l ?? g ?? "the first method";
+
+  it("asks as the save does, for this order and never to approve a refund", () => {
+    expect(previewBody("o1", lines, draft({ qty: { a: "1" } }), "")).toEqual({ sales_order: "o1", changes: '[{"line":1,"qty":"1"}]', address: undefined, note: undefined, notify: "No", approve: "No", shipping_rule: undefined });
+    expect(previewBody("o1", lines, draft({ qty: { a: "1" } }), "r9").shipping_rule).toBe("r9");
   });
 
-  it("follows the server: replace an open request, ask for more, send some back, or record it as owed", () => {
-    const stripe = { id: "p", gateway: "stripe", amount: "1000", status: "Paid", refunded_amount: "0" };
-    expect(settlement(-250, [{ id: "p", gateway: "stripe", amount: "1000", status: "Initiated" }])).toEqual({ kind: "replace", via: "stripe" });
-    expect(settlement(0, [{ id: "p", gateway: "stripe", status: "Initiated" }])).toEqual({ kind: "none" });
-    expect(settlement(100, [stripe])).toEqual({ kind: "charge", via: "stripe" });
-    expect(settlement(-250, [stripe])).toEqual({ kind: "refund", via: "stripe", offline: false });
-    // The gateway's payment has been refunded already: it cannot take this one, so it is owed.
-    expect(settlement(-250, [{ ...stripe, refunded_amount: "900" }])).toEqual({ kind: "owed", toShopper: true });
-    // A gift card's part cannot take a refund through a gateway, nor be asked for again.
-    expect(settlement(-50, [{ id: "g", gateway: "Gift Card", amount: "100", status: "Paid" }])).toEqual({ kind: "owed", toShopper: true });
-    expect(settlement(-50, [{ id: "p", gateway: "Cash on Delivery", amount: "300", status: "Paid" }])).toEqual({ kind: "refund", via: "Cash on Delivery", offline: true });
-    expect(settlement(80, [])).toEqual({ kind: "owed", toShopper: false });
+  it("puts each settlement the server names in words: charge, refund, owed, none", () => {
+    expect(settlementWords({ kind: "none" }, money, via).text).toBe("Nothing is asked for and nothing is sent back.");
+    expect(settlementWords({ kind: "charge", amount: "100", label: "Card", replaces_open_request: true }, money, via).text).toBe("The shopper has not paid yet: their open payment request is replaced by one for ₹100, through Card.");
+    expect(settlementWords({ kind: "charge", amount: "100", label: "Card", replaces_open_request: false }, money, via).text).toMatch(/is asked for ₹100 through Card, with a payment link/);
+    expect(settlementWords({ kind: "refund", amount: "250", gateway: "stripe", status: "Requested" }, money, via)).toEqual({ text: "₹250 is sent back through stripe as an adjustment refund.", approvable: true });
+    expect(settlementWords({ kind: "refund", amount: "50", gateway: "Cash on Delivery" }, money, via)).toMatchObject({ approvable: false, text: expect.stringContaining("you hand it back") });
+    expect(settlementWords({ kind: "owed", amount: "80", by: "shopper" }, money, via).text).toMatch(/owed by the shopper: ₹80 is still to collect/);
+    expect(settlementWords({ kind: "owed", amount: "80", by: "store" }, money, via).text).toMatch(/the store owes ₹80/);
   });
 
   it("tells what was saved from the server's own figures", () => {
-    const money = (v: unknown) => `₹${Number(v)}`;
     expect(savedWords({ total: "1100", difference: "100", owed: "0", payment_request: "pr1" }, money)).toBe("Saved. The order now comes to ₹1100. That is ₹100 more than before. The shopper is asked for it with a payment link on their order page.");
     expect(savedWords({ total: "900", difference: "-100", owed: "-100", refund: null }, money)).toContain("The store owes the shopper ₹100.");
   });
