@@ -17,7 +17,7 @@
     - {name: weight_kg, type: decimal, read_only: true}
     - {name: is_shipping, type: check, read_only: true, description: The shipping charge line}
     - {name: promotion_percent, type: data, hidden: true, read_only: true, label: Promotions' Share, description: "What promotions take off what this line's own discount left, as ERP works it out"}
-    - {name: added_by_promotion, type: link, to: Promotion, link_filters: {company: {from: parent.company}}, read_only: true, on_delete: set_null, description: "A free item a promotion added"}
+    - {name: added_by_promotion, type: link, to: Promotion, read_only: true, on_delete: set_null, description: "A free item a promotion added"}
 
 - name: ShoppingCart
   label: Shopping Cart

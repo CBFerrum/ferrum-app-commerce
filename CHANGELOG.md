@@ -12,8 +12,9 @@ was then refused with "belongs to another company".
   a table's row). Needs Ferrum 0.3.6 (`>=0.3.6, <0.4`). A single-company workspace sees no change.
 - **The company takes itself.** Store Settings fills Company in with the user's default company, which is the only
   company when the workspace has exactly one.
-- **The refusal names the records.** "Warehouse Stores belongs to Walk Co One, not to Walk Co Two (the company of
-  this store)", on the field (or the table's row) that holds it; the same for the tax template.
+- **The refusal names the records.** The platform reads "Warehouse Stores belongs to Walk Co One; this record is for
+  Walk Co Two" ("this line" in a table's row), on the field that holds it; Commerce's own company checks for the
+  warehouses and the tax template are gone as unreachable.
 - **Tests.** A metadata test fails for any company-bound link of Commerce without the filter (exemptions are listed
   with a reason; there are none), and a test saves Store Settings in a workspace of four companies whose warehouses
   share names.

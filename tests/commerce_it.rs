@@ -3378,7 +3378,9 @@ async fn four_companies() {
     let row = table.def.fields.iter().find(|f| f.name == "warehouse").unwrap();
     assert_eq!(row.link_filters.clone().unwrap().get("company"), Some(&json!({"from": "parent.company"})));
     let inr = t.find_one("Currency", json!({"code": "INR"})).await;
+    assert_eq!(t.count("Company", json!({})).await, 0, "a new workspace has no company");
     let first = t.insert("Company", json!({"company_name": "Walk Co One", "abbr": "W1", "default_currency": inr["id"]})).await;
+    k.invalidate_tenant_users(tenant); // a person's context is kept for half a minute
     t.ctx = login(k.clone()).await;
     assert_eq!(t.ctx.default_company, Some(uid(&first)), "one company: it is the default of Store Settings");
 
@@ -3401,13 +3403,16 @@ async fn four_companies() {
     // The warehouses of another company are refused, by field, with the record and both companies named.
     let wrong = t.k.insert(&t.ctx, "StoreSettings", obj(settings(&companies[1], &stores[0], &stores[1]))).await;
     let m = field_error(&wrong.map(|d| json!(d)), "fulfilment_warehouse");
-    assert!(m.contains("Stores"), "{m}");
-    if m.contains("belongs to") {
-        assert!(m.contains("Walk Co One") && m.contains("Walk Co Two"), "both companies named: {m}");
-    }
+    assert_eq!(m, "Warehouse Stores belongs to Walk Co One; this record is for Walk Co Two");
     let wrong = t.k.insert(&t.ctx, "StoreSettings", obj(settings(&companies[1], &stores[1], &stores[3]))).await;
     match wrong {
-        Err(Error::Validation(f)) => assert!(f.iter().any(|x| x.field.contains("warehouse") && x.message.contains("Stores")), "{f:?}"),
+        Err(Error::Validation(f)) => {
+            let row = f.iter().find(|x| x.field == "warehouse").unwrap_or_else(|| panic!("{f:?}"));
+            assert_eq!(
+                (row.message.as_str(), row.row.as_ref().map(|r| r.0.as_str())),
+                ("Warehouse Stores belongs to Walk Co Four; this line is for Walk Co Two", Some("warehouses"))
+            );
+        }
         other => panic!("another company's warehouse in the table was accepted: {other:?}"),
     }
 
