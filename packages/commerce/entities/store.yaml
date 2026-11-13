@@ -2,7 +2,7 @@
   label: Store Warehouse
   kind: child
   fields:
-    - {name: warehouse, type: link, to: Warehouse, required: true, link_filters: {is_group: false}, in_list: true}
+    - {name: warehouse, type: link, to: Warehouse, required: true, link_filters: {company: {from: parent.company}, is_group: false}, in_list: true}
 
 - name: StoreCountry
   label: Store Country
@@ -18,7 +18,7 @@
     - {name: gateway, type: data, required: true, max_length: 40, in_list: true, description: "A payment gateway plugin's name, or Manual or Cash on Delivery"}
     - {name: label, type: data, required: true, max_length: 100, in_list: true, description: Shown to customers at checkout}
     - {name: enabled, type: check, default: true, in_list: true}
-    - {name: payment_account, type: link, to: Account, link_filters: {is_group: false}, description: "Bank or cash account the payments are booked to (empty: the company's default bank account)"}
+    - {name: payment_account, type: link, to: Account, link_filters: {company: {from: parent.company}, is_group: false}, description: "Bank or cash account the payments are booked to (empty: the company's default bank account)"}
     - {name: expiry_minutes, type: int, default: 60, min: 0, max: 525600, in_list: true, description: "Unpaid payment requests expire after this many minutes; 0 = never"}
     - {name: instructions, type: text, max_length: 2000, description: "Shown to the customer after checkout, e.g. bank transfer details"}
 
@@ -30,13 +30,13 @@
   title_field: store_name
   fields:
     - {name: store_name, type: data, required: true, max_length: 140}
-    - {name: company, type: link, to: Company, required: true}
+    - {name: company, type: link, to: Company, required: true, default_expr: "user.default_company", description: "Taken for you when the workspace has one company; the warehouses, taxes and accounts below are the ones of this company"}
     - {name: currency, type: link, to: Currency, required: true, description: "Currency of the storefront; prices come from the price list (read as company-currency prices) and are converted at the exchange rate"}
     - {name: price_list, type: link, to: PriceList, required: true, link_filters: {selling: true}}
-    - {name: tax_template, type: link, to: TaxTemplate, description: "Sales taxes of web carts and orders (empty: the company's default sales template)"}
+    - {name: tax_template, type: link, to: TaxTemplate, link_filters: {company: {from: company}}, description: "Sales taxes of web carts and orders (empty: the company's default sales template)"}
     - {name: display_prices_with_tax, type: check, description: Catalog prices include tax}
     - {name: warehouses, type: table, of: StoreWarehouse, description: "Warehouses whose stock can be sold online (empty: every warehouse of the company)"}
-    - {name: fulfilment_warehouse, type: link, to: Warehouse, required: true, link_filters: {is_group: false}, description: Warehouse set on web order lines}
+    - {name: fulfilment_warehouse, type: link, to: Warehouse, required: true, link_filters: {company: {from: company}, is_group: false}, description: Warehouse set on web order lines}
     - {name: enforce_stock, type: check, default: true, description: Refuse quantities beyond the available stock of stock items}
     - {name: show_stock_quantity, type: check, description: "Show available quantities to customers (otherwise only in stock / out of stock)"}
     - {name: allow_guest_checkout, type: check, default: true}
@@ -50,7 +50,7 @@
     - {name: max_cart_lines, type: int, default: 50, min: 1, max: 500, label: Maximum Items per Cart}
     - {name: abandon_after_hours, type: int, default: 24, min: 1, max: 8760, label: Carts Count as Abandoned After (Hours)}
     - {name: cart_expiry_days, type: int, default: 30, min: 1, max: 3650, label: Carts Expire After (Days)}
-    - {name: gift_card_kind, type: link, to: StoredValueKind, label: Gift Cards, description: "The stored value the shop takes at checkout and sells as gift cards (an item that names it); empty: no gift cards"}
+    - {name: gift_card_kind, type: link, to: StoredValueKind, link_filters: {company: {from: company}}, label: Gift Cards, description: "The stored value the shop takes at checkout and sells as gift cards (an item that names it); empty: no gift cards"}
     - {name: store_languages, type: data, max_length: 120, label: Languages Offered, description: "The languages the storefront's words come in, separated by commas, the first the default: en, hi, ar. A visitor gets the one they ask for (?lang=, else the browser's), else the first. Words for each: Storefront Words. Empty: English"}
     - {name: sales_channel, type: data, max_length: 140, default: Web Shop, label: Sales Channel, description: "The channel web carts and orders name, as promotions' Channels list it (empty: Web Shop)"}
     - {name: cancel_unpaid_orders, type: check, default: true, description: "Cancel a web order when its payment request expires unpaid, releasing its reserved stock"}
@@ -63,7 +63,7 @@
     - {name: out_for_delivery_words, type: data, max_length: 300, label: Carrier Words for Out for Delivery, description: "What a carrier says when a parcel is out for delivery, in its own words, separated by commas (as its tracking reports them): the shopper is then told. Empty: not told"}
     - {name: after_sales_text, type: text, label: Words on the Shopper's Page, default: "You can cancel this order within {hours} hours of placing it, while it has not shipped. Goods can be sent back within {days} days of delivery. Keeping {fee}% of the goods' price as a restocking fee; return shipping is paid by the {shipping}; the refund goes to {refund}.", description: "Said on the page a shopper's link opens, under their order. {hours}, {days}, {fee}, {shipping} and {refund} are the settings above; empty: nothing is said"}
     - {name: resend_per_day, type: int, default: 3, min: 1, max: 50, label: Same Mail to One Order at Most (a Day), description: "How many times one mail may go to the same order in a day, the first one among them: the desk's Send Mail Again stops there"}
-    - {name: store_credit_kind, type: link, to: StoredValueKind, label: Store Credit, description: "The stored value a return is refunded as when the store refunds to store credit; empty: back to the payment"}
+    - {name: store_credit_kind, type: link, to: StoredValueKind, link_filters: {company: {from: company}}, label: Store Credit, description: "The stored value a return is refunded as when the store refunds to store credit; empty: back to the payment"}
   form:
     - {label: Store, fields: [store_name, company, currency, price_list, tax_template, display_prices_with_tax, store_url, terms_url]}
     - {label: Stock, fields: [warehouses, fulfilment_warehouse, enforce_stock, show_stock_quantity]}
