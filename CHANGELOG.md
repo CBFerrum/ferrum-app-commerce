@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.3
+
+From the second browser walk: Store Settings could not be saved by following the form, because the warehouse
+pickers listed every company's warehouses by bare name (four "Stores" in a workspace of four companies) and the save
+was then refused with "belongs to another company".
+
+- **Choices limited to the company.** The store's warehouses table, the fulfilment warehouse, the tax template, the
+  gift card and store credit kinds, the payment methods' accounts and a cart's warehouse, tax template and promotions
+  offer only the records of the company chosen above (`link_filters: {company: {from: company}}`, `parent.company` in
+  a table's row). Needs Ferrum 0.3.6 (`>=0.3.6, <0.4`). A single-company workspace sees no change.
+- **The company takes itself.** Store Settings fills Company in with the user's default company, which is the only
+  company when the workspace has exactly one.
+- **The refusal names the records.** The platform reads "Warehouse Stores belongs to Walk Co One; this record is for
+  Walk Co Two" ("this line" in a table's row), on the field that holds it; Commerce's own company checks for the
+  warehouses and the tax template are gone as unreachable.
+- **Tests.** A metadata test fails for any company-bound link of Commerce without the filter (exemptions are listed
+  with a reason; there are none), and a test saves Store Settings in a workspace of four companies whose warehouses
+  share names.
+
 ## 0.10.2
 
 From the first browser walk: a workspace with no Store Settings.

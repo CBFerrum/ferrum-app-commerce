@@ -316,22 +316,17 @@ impl DocHook for SettingsHook {
         }
         if let Some(t) = id(doc, "tax_template") {
             let tpl = get(k, &sctx, tx, "TaxTemplate", t).await?;
-            if id(&tpl, "company") != Some(company) || s(&tpl, "kind") != Some("Sales") {
-                errors.push(FieldError::new("tax_template", "choose a sales tax template of the store's company"));
+            if s(&tpl, "kind") != Some("Sales") {
+                errors.push(FieldError::new("tax_template", "choose a sales tax template"));
             }
         }
         let listed: Vec<Uuid> = rows(doc, "warehouses").iter().filter_map(|r| id(r, "warehouse")).collect();
-        for (i, w) in listed.iter().enumerate() {
-            if id(&get(k, &sctx, tx, "Warehouse", *w).await?, "company") != Some(company) {
-                errors.push(FieldError::new("warehouse", "belongs to another company").in_row("warehouses", i));
-            }
-        }
-        if let Some(w) = id(doc, "fulfilment_warehouse") {
-            if id(&get(k, &sctx, tx, "Warehouse", w).await?, "company") != Some(company) {
-                errors.push(FieldError::new("fulfilment_warehouse", "belongs to another company"));
-            } else if !listed.is_empty() && !listed.contains(&w) {
-                errors.push(FieldError::new("fulfilment_warehouse", "must be one of the store's warehouses"));
-            }
+        // A warehouse of another company is refused by the links' company filters before this runs.
+        if let Some(w) = id(doc, "fulfilment_warehouse")
+            && !listed.is_empty()
+            && !listed.contains(&w)
+        {
+            errors.push(FieldError::new("fulfilment_warehouse", "must be one of the store's warehouses"));
         }
         if let Some(item) = id(doc, "shipping_item") {
             let it = get(k, &sctx, tx, "Item", item).await?;

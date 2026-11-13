@@ -5,7 +5,7 @@
   <img alt="Ferrum Commerce" src="docs/assets/banner-light.svg" width="100%">
 </picture>
 
-[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.7.5-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.1%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
+[![CI](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/CBFerrum/ferrum-app-commerce/actions/workflows/ci.yml) ![Version](https://img.shields.io/badge/version-0.7.5-be185d?style=flat-square) ![Ferrum](https://img.shields.io/badge/Ferrum-%3E%3D0.3.6%2C%20%3C0.4-2f5bea?style=flat-square) ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square) ![Rust](https://img.shields.io/badge/Rust-native%20app-b7410e?style=flat-square&logo=rust&logoColor=white) ![Interface](https://img.shields.io/badge/interface-React%20%2B%20Vite-0ea5e9?style=flat-square&logo=react&logoColor=white) ![MCP](https://img.shields.io/badge/AI%20agents-MCP-8b5cf6?style=flat-square)
 
 **A native app for [Ferrum](https://github.com/CBFerrum/Ferrum), the open-source, AI-first business platform.**
 
@@ -26,7 +26,7 @@ plugins mark payment requests paid, which books an advance applied when the orde
 | At a glance | |
 |---|---|
 | 📦 Version | `0.7.5` |
-| 🧱 Platform | Ferrum `>=0.3.1, <0.4` |
+| 🧱 Platform | Ferrum `>=0.3.6, <0.4` |
 | 🔗 Requires | erp `>=0.15` |
 | 🖥️ Interface | its own, at `/commerce/` |
 | 🗃️ Records | 22 entities in 1 package |
@@ -327,6 +327,7 @@ CHANGELOG.md  what changed in each version
 | **0.7.20** | The redesigned interface: the upgraded design system, shaped loading, told-apart states. |
 | **0.7.21** | Orders carry the shopper's delivery address as a structured ship-to (country code, region), for tax rules of any country. |
 | **0.7.22** | Rebuilt on the tuned design system: better menu icons, a lighter first page, a visible scroll cue, cleaner print. |
+| **0.10.3** | Store Settings offers only the chosen company's warehouses, tax templates and accounts, takes the company itself in a workspace of one, and a refusal names the record and both companies. Needs Ferrum 0.3.6. |
 | **0.10.2** | The store's reports use the company Store Settings name (a workspace with several companies and no default no longer answers "company is required"), and the store's screens say the store is not set up, with a link to set it up, instead of failing while there are no Store Settings. |
 | **0.10.1** | The screens for 0.10.0: the order's Change dialog asks the server what saving comes to (lines as priced, totals, difference, where the difference goes, the delivery method) and saves the same figures; the refund dialog is for goods that come back and Cancel order sends each payment back; Send Mail Again and the gift card's part on the order; the storefront lets a shopper whose card paid part pay the rest, writes numbers in the page's language and keeps a chosen `?lang=` on its links; and Storefront Words has an editor per language. |
 | **0.10.0** | A shopper whose card paid part can pay the rest, the desk previews an order change (delivery priced again) before saving it, the shopper's link pages show the order's lines and the store's terms, the desk can send a mail again, a gift card's balance and hold show on the order, and the storefront's words are keys with a language file per language the workspace can override. |

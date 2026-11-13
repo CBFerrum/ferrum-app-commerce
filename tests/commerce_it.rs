@@ -3336,3 +3336,87 @@ async fn storefront_words() {
     let twice = t.k.insert(&t.ctx, "StorefrontWords", obj(json!({"language": "hi", "words": {}}))).await;
     assert!(twice.is_err(), "one record a language");
 }
+
+// ───────────── four companies whose warehouses share names (browser walk 2, fault 1) ─────────────
+
+#[test]
+fn store_settings_in_a_workspace_of_four_companies() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(four_companies()).await.unwrap() });
+}
+
+async fn four_companies() {
+    let k = fresh_kernel().await;
+    let tenant = k
+        .create_tenant(NewTenant {
+            slug: "four".into(),
+            name: "Four".into(),
+            admin_email: "admin@four.test".into(),
+            admin_password: "Correct-Horse-9".into(),
+            admin_name: None,
+            packages: vec!["commerce".into()],
+            settings: None,
+        })
+        .await
+        .expect("tenant");
+    let login = |k: Arc<Kernel>| async move {
+        let session = k.login("four", "admin@four.test", "Correct-Horse-9").await.expect("login");
+        k.load_ctx(tenant, session.user, Some(session.token_version), "it".into()).await.expect("ctx")
+    };
+    let site = k.hooks.site("commerce").cloned().expect("storefront registered");
+    let mut t = T { k: k.clone(), ctx: login(k.clone()).await, site };
+
+    // The field offers no one else's records and, with one company in the workspace, fills itself in.
+    let schema = t.k.registry.schema(tenant).await.unwrap();
+    let meta = schema.entity("StoreSettings").expect("StoreSettings").clone();
+    let field = |name: &str| meta.def.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("StoreSettings.{name}")).clone();
+    assert_eq!(field("company").default_expr.as_deref(), Some("user.default_company"));
+    let from_company = json!({"from": "company"});
+    assert_eq!(field("fulfilment_warehouse").link_filters.unwrap().get("company"), Some(&from_company));
+    let table = schema.entity("StoreWarehouse").expect("StoreWarehouse").clone();
+    let row = table.def.fields.iter().find(|f| f.name == "warehouse").unwrap();
+    assert_eq!(row.link_filters.clone().unwrap().get("company"), Some(&json!({"from": "parent.company"})));
+    let inr = t.find_one("Currency", json!({"code": "INR"})).await;
+    assert_eq!(t.count("Company", json!({})).await, 0, "a new workspace has no company");
+    let first = t.insert("Company", json!({"company_name": "Walk Co One", "abbr": "W1", "default_currency": inr["id"]})).await;
+    k.invalidate_tenant_users(tenant); // a person's context is kept for half a minute
+    t.ctx = login(k.clone()).await;
+    assert_eq!(t.ctx.default_company, Some(uid(&first)), "one company: it is the default of Store Settings");
+
+    let mut companies = vec![first];
+    for (name, abbr) in [("Walk Co Two", "W2"), ("Walk Co Three", "W3"), ("Walk Co Four", "W4")] {
+        companies.push(t.insert("Company", json!({"company_name": name, "abbr": abbr, "default_currency": inr["id"]})).await);
+    }
+    // Every company has its own "Stores": the names alone cannot tell them apart.
+    assert_eq!(t.count("Warehouse", json!({"warehouse_name": "Stores"})).await, 4);
+    let mut stores = vec![];
+    for c in &companies {
+        stores.push(t.find_one("Warehouse", json!({"warehouse_name": "Stores", "company": c["id"]})).await);
+    }
+    let selling = t.find_one("PriceList", json!({"price_list_name": "Standard Selling"})).await;
+    let settings = |company: &Doc, fulfilment: &Doc, listed: &Doc| {
+        json!({"store_name": "Shop", "company": company["id"], "currency": inr["id"], "price_list": selling["id"],
+               "warehouses": [{"warehouse": listed["id"]}], "fulfilment_warehouse": fulfilment["id"]})
+    };
+
+    // The warehouses of another company are refused, by field, with the record and both companies named.
+    let wrong = t.k.insert(&t.ctx, "StoreSettings", obj(settings(&companies[1], &stores[0], &stores[1]))).await;
+    let m = field_error(&wrong.map(|d| json!(d)), "fulfilment_warehouse");
+    assert_eq!(m, "Warehouse Stores belongs to Walk Co One; this record is for Walk Co Two");
+    let wrong = t.k.insert(&t.ctx, "StoreSettings", obj(settings(&companies[1], &stores[1], &stores[3]))).await;
+    match wrong {
+        Err(Error::Validation(f)) => {
+            let row = f.iter().find(|x| x.field == "warehouse").unwrap_or_else(|| panic!("{f:?}"));
+            assert_eq!(
+                (row.message.as_str(), row.row.as_ref().map(|r| r.0.as_str())),
+                ("Warehouse Stores belongs to Walk Co Four; this line is for Walk Co Two", Some("warehouses"))
+            );
+        }
+        other => panic!("another company's warehouse in the table was accepted: {other:?}"),
+    }
+
+    // Following the form with the chosen company's own warehouses saves.
+    let ok = t.insert("StoreSettings", settings(&companies[1], &stores[1], &stores[1])).await;
+    assert_eq!(ok["fulfilment_warehouse"], stores[1]["id"]);
+}
