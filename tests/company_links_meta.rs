@@ -49,7 +49,13 @@ pub fn faults(pkgs: &[Package], others: &[Package], exempt: &[(&str, &str, &str)
     let mut all: Vec<Package> = others.to_vec();
     all.extend(pkgs.iter().cloned());
     let ents = entities(&all);
-    let masters: Vec<&String> = ents.iter().filter(|(_, (k, f))| *k == EntityKind::Master && has_company(f)).map(|(n, _)| n).collect();
+    // A master whose company may be empty ("Empty: every company": a numbering series, a promotion) is
+    // for every company's records at once, and a filter by equality would refuse it.
+    let masters: Vec<&String> = ents
+        .iter()
+        .filter(|(_, (k, f))| *k == EntityKind::Master && has_company(f) && f.iter().any(|f| f.name == "company" && (f.required || f.read_only)))
+        .map(|(n, _)| n)
+        .collect();
     let mine = entities(pkgs);
     // Who holds each child entity as a table.
     let mut parents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
