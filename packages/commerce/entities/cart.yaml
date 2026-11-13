@@ -17,7 +17,7 @@
     - {name: weight_kg, type: decimal, read_only: true}
     - {name: is_shipping, type: check, read_only: true, description: The shipping charge line}
     - {name: promotion_percent, type: data, hidden: true, read_only: true, label: Promotions' Share, description: "What promotions take off what this line's own discount left, as ERP works it out"}
-    - {name: added_by_promotion, type: link, to: Promotion, read_only: true, on_delete: set_null, description: "A free item a promotion added"}
+    - {name: added_by_promotion, type: link, to: Promotion, link_filters: {company: {from: parent.company}}, read_only: true, on_delete: set_null, description: "A free item a promotion added"}
 
 - name: ShoppingCart
   label: Shopping Cart
@@ -56,8 +56,8 @@
     - {name: currency, type: link, to: Currency, read_only: true}
     - {name: conversion_rate, type: decimal, read_only: true}
     - {name: price_list, type: link, to: PriceList, read_only: true}
-    - {name: tax_template, type: link, to: TaxTemplate, read_only: true}
-    - {name: set_warehouse, type: link, to: Warehouse, read_only: true, hidden: true, description: "The store's fulfilment warehouse, as its order names it (promotions may be for a place)"}
+    - {name: tax_template, type: link, to: TaxTemplate, link_filters: {company: {from: company}}, read_only: true}
+    - {name: set_warehouse, type: link, to: Warehouse, link_filters: {company: {from: company}}, read_only: true, hidden: true, description: "The store's fulfilment warehouse, as its order names it (promotions may be for a place)"}
     - {name: channel, type: data, read_only: true, description: "Where the sale is made, as promotions name it: the store's Sales Channel"}
     - {name: promotion_codes, type: data, read_only: true, max_length: 1000, description: "Promotion codes the shopper gave, separated by commas"}
     - {name: applied_promotions, type: table, of: AppliedPromotion, read_only: true, label: Promotions Applied}
