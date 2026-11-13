@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.4
+
+* **Store Settings' pickers offer the store's company's warehouses, taxes and accounts.** 0.10.3 declared the filters; the interface built into it was older than the Frontend that resolves them, so a picker sent the filter unresolved and listed nothing. Rebuilt on Ferrum-Frontend d470c42. Nothing changes on the server. Found by a browser walk.
+
 ## 0.10.3
 
 From the second browser walk: Store Settings could not be saved by following the form, because the warehouse
