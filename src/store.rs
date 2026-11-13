@@ -14,6 +14,23 @@ pub const CASH_ON_DELIVERY: &str = "Cash on Delivery";
 /// The channel of a store that names none (a workspace from before Sales Channel).
 pub const WEB_SHOP: &str = "Web Shop";
 
+/// "Warehouse Stores belongs to Walk Co Hrxbi, not to Walk Co Ogxbi (the company of this store)": the record
+/// and both companies, so whoever picked it knows which one is wrong.
+async fn other_company(k: &Kernel, sctx: &Ctx, tx: &mut Tx, what: &str, rec: &Doc, name_field: &str, company: Uuid) -> Result<String> {
+    let title = |d: &Doc| s(d, "company_name").map(str::to_string);
+    let theirs = match id(rec, "company") {
+        Some(c) => title(&get(k, sctx, tx, "Company", c).await?),
+        None => None,
+    };
+    let ours = title(&get(k, sctx, tx, "Company", company).await?);
+    Ok(format!(
+        "{what} {} belongs to {}, not to {} (the company of this store)",
+        s(rec, name_field).unwrap_or("chosen"),
+        theirs.unwrap_or_else(|| "another company".into()),
+        ours.unwrap_or_else(|| "this store's company".into())
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct PaymentMethod {
     pub gateway: String,
@@ -317,18 +334,27 @@ impl DocHook for SettingsHook {
         if let Some(t) = id(doc, "tax_template") {
             let tpl = get(k, &sctx, tx, "TaxTemplate", t).await?;
             if id(&tpl, "company") != Some(company) || s(&tpl, "kind") != Some("Sales") {
-                errors.push(FieldError::new("tax_template", "choose a sales tax template of the store's company"));
+                let m = if id(&tpl, "company") != Some(company) {
+                    other_company(k, &sctx, tx, "Tax template", &tpl, "title", company).await?
+                } else {
+                    "choose a sales tax template of the store's company".to_string()
+                };
+                errors.push(FieldError::new("tax_template", m));
             }
         }
         let listed: Vec<Uuid> = rows(doc, "warehouses").iter().filter_map(|r| id(r, "warehouse")).collect();
         for (i, w) in listed.iter().enumerate() {
-            if id(&get(k, &sctx, tx, "Warehouse", *w).await?, "company") != Some(company) {
-                errors.push(FieldError::new("warehouse", "belongs to another company").in_row("warehouses", i));
+            let rec = get(k, &sctx, tx, "Warehouse", *w).await?;
+            if id(&rec, "company") != Some(company) {
+                let m = other_company(k, &sctx, tx, "Warehouse", &rec, "warehouse_name", company).await?;
+                errors.push(FieldError::new("warehouse", m).in_row("warehouses", i));
             }
         }
         if let Some(w) = id(doc, "fulfilment_warehouse") {
-            if id(&get(k, &sctx, tx, "Warehouse", w).await?, "company") != Some(company) {
-                errors.push(FieldError::new("fulfilment_warehouse", "belongs to another company"));
+            let rec = get(k, &sctx, tx, "Warehouse", w).await?;
+            if id(&rec, "company") != Some(company) {
+                let m = other_company(k, &sctx, tx, "Warehouse", &rec, "warehouse_name", company).await?;
+                errors.push(FieldError::new("fulfilment_warehouse", m));
             } else if !listed.is_empty() && !listed.contains(&w) {
                 errors.push(FieldError::new("fulfilment_warehouse", "must be one of the store's warehouses"));
             }
