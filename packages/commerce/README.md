@@ -175,7 +175,11 @@ the same result again; another key on an ordered cart is `409`. Errors: `422` (m
 details, `payment_method`, `accept_terms`, `return_url`, `shipping_address.country`, `items`
 rows no longer available / out of stock, `coupon_code`), `409` (`expected_total` differs —
 the message has the new total —, cart already ordered or expired), `403` guest checkout
-disabled. Keep `order_token`: it is the guest's key to the order.
+disabled. Keep `order_token`: it is the guest's key to the order. It is `v{n}.{mac}`, an HMAC-SHA256 of the
+order under a key derived from Commerce's own key in the platform's vault (`order-links`, version `n`), kept nowhere;
+while the vault is closed, checkout and the order endpoints answer `503`. A token from before 0.11 (43 characters, no
+dot) was signed with the key then kept in `commerce_secret`: that key, sealed in the vault since, still opens the
+orders made before 0.11, never one made since (`commerce_order_signed`).
 
 With `gift_card`, the store's Gift Cards kind pays what it holds of the order (ERP's stored value, which
 pays invoices: the order is invoiced at checkout, and the card is redeemed through ERP's prove step, its
