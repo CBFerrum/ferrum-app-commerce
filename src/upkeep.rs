@@ -1,7 +1,8 @@
 //! Every-minute upkeep for each tenant running the store: unpaid (open or failed) payment
 //! requests past their expiry become Expired (and, when the store says so, their orders are cancelled, releasing
 //! the stock they reserved); idle carts with items become Abandoned (an event lets a mailer
-//! send a reminder), old carts Expired. Each step is idempotent and bounded per run.
+//! send a reminder), old carts Expired. First, the old signing key of a workspace whose key has
+//! not moved into the vault yet moves (`keys.rs`). Each step is idempotent and bounded per run.
 
 use crate::payment::refresh_order;
 use crate::store::Store;
@@ -14,6 +15,9 @@ use uuid::Uuid;
 const BATCH: i64 = 200;
 
 pub async fn run(k: &Kernel) -> Result<()> {
+    if let Err(e) = crate::keys::move_waiting(k).await {
+        tracing::warn!("commerce upkeep: moving old keys into the vault: {e}");
+    }
     let tenants: Vec<Uuid> = {
         let mut tx = k.db.system_tx().await?;
         let t = sqlx::query_scalar("select tenant_id from installed_package where name = 'commerce'").fetch_all(&mut *tx).await?;
@@ -117,7 +121,7 @@ pub async fn carrier_news(k: &Kernel, ctx: &Ctx, store: &Store) -> Result<usize>
                 values.insert("tracking_url".into(), json!(s(&ship, "tracking_url").filter(|u| u.starts_with("https://"))));
                 values.insert(
                     "link".into(),
-                    json!(crate::tell::order_link(&mut tx, ctx.tenant, store.store_url.as_deref(), s(&order, "number").unwrap_or_default(), so).await?),
+                    json!(crate::tell::order_link(k, ctx.tenant, store.store_url.as_deref(), s(&order, "number").unwrap_or_default(), so).await?),
                 );
                 let template = if delivered { "commerce.order_delivered" } else { "commerce.out_for_delivery" };
                 crate::tell::message(k, &mut tx, ctx, template, so, s(&order, "commerce_contact_email"), values, vec![]).await?;

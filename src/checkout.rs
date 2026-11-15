@@ -8,6 +8,7 @@ use crate::catalog::{allocate, available, available_by_warehouse, stock_items};
 use crate::store::Store;
 use crate::{coupon, gift_card, orders, payment, token};
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
+use ferrum_kernel::vault::Derived;
 use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, Kernel, Result, Tx, outbox, with_retry};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
@@ -312,23 +313,25 @@ pub async fn checkout(k: &Kernel, c: Checkout<'_>) -> Result<Value> {
         ),
     };
     let schema = k.registry.schema(c.tenant).await?;
+    // The key an order's token is signed with, taken before the transaction: the vault answers on a connection of its own.
+    let key = crate::keys::current(k, c.tenant, crate::keys::ORDERS).await?;
     with_retry(|| async {
         let ctx = Ctx::system(c.tenant, schema.clone());
         let mut tx = k.db.tenant_tx(c.tenant).await?;
-        let out = run(k, &ctx, &mut tx, &c, expected).await?;
+        let out = run(k, &ctx, &mut tx, &c, expected, &key).await?;
         tx.commit().await?;
         Ok(out)
     })
     .await
 }
 
-async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Option<Decimal>) -> Result<Value> {
+async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Option<Decimal>, key: &Derived) -> Result<Value> {
     let mut cart = cart::locate(k, ctx, tx, c.cart_token).await?;
     let store = Store::load(k, ctx, tx).await?;
     match s(&cart, "status") {
         Some("Ordered") if s(&cart, "checkout_key") == Some(c.key) => {
             let so = id(&cart, "sales_order").ok_or_else(|| Error::internal("ordered cart without order"))?;
-            return response(k, ctx, tx, &store, so).await;
+            return response(k, ctx, tx, &store, so, key).await;
         }
         Some("Ordered") => return Err(Error::Conflict("this cart has already been checked out".into())),
         Some("Expired") => return Err(Error::Conflict("this cart has expired; start a new cart".into())),
@@ -452,7 +455,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         so_id,
     )
     .await?;
-    let order_token = token::order_token(tx, ctx.tenant, so_id).await?;
+    let order_token = token::order_token(key, so_id);
     let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &order_token));
     let event = json!({
         "sales_order": so_id, "number": number, "customer": customer, "email": s(&cart, "email"), "name": s(&cart, "contact_name"),
@@ -473,17 +476,17 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     values.insert("manage_token".into(), json!(manage.as_ref().map(|m| m.1.clone())));
     let secret = if manage.is_some() { vec!["manage_token".to_string()] } else { vec![] };
     crate::tell::message(k, tx, ctx, "commerce.order_placed", so_id, s(&cart, "email"), values, secret).await?;
-    response(k, ctx, tx, &store, so_id).await
+    response(k, ctx, tx, &store, so_id, key).await
 }
 
 /// The checkout result (also what a replay with the same key returns).
-async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid) -> Result<Value> {
+async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid, key: &Derived) -> Result<Value> {
     let so = get(k, ctx, tx, "SalesOrder", so_id).await?;
     let view = orders::order_view(k, &sys(ctx), tx, store, &so).await?;
     // The one still to pay (beside a gift card's, already paid), else the latest.
     let payments = view["payments"].as_array().cloned().unwrap_or_default();
     let active = payments.iter().find(|p| p["status"] == json!("Initiated")).or(payments.first()).cloned().unwrap_or(Value::Null);
-    let token = token::order_token(tx, ctx.tenant, so_id).await?;
+    let token = token::order_token(key, so_id);
     let link = s(&so, "number").zip(store.store_url.as_deref()).map(|(number, url)| orders::tracking_url(url, number, &token));
     Ok(json!({"order": view, "order_token": token, "order_link": link, "payment_request": active}))
 }
