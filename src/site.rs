@@ -7,7 +7,7 @@
 use crate::catalog::{self, Listing, Sort, decimal_param};
 use crate::checkout::{self, Checkout};
 use crate::store::Store;
-use crate::{cart, edit, orders, refund, subscriptions};
+use crate::{cart, edit, orders, refund, subscriptions, token};
 use async_trait::async_trait;
 use ferrum_domain::util::{id, s};
 use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
@@ -338,6 +338,14 @@ async fn read_route(k: &Kernel, r: &Req<'_>, segs: &[&str]) -> Result<Value> {
     if r.raw.method != "GET" && r.raw.method != "POST" {
         return Err(not_found());
     }
+    // The key an order token names, taken before the transaction: the vault answers on a connection of its own.
+    let body = if r.raw.method == "POST" { r.body().ok() } else { None };
+    let presented = match segs {
+        ["payment-requests", _] => r.header("x-order-token"),
+        ["orders", "lookup" | "track"] => body.as_ref().and_then(|b| b.get("token")).and_then(Value::as_str),
+        _ => None,
+    };
+    let key = token::presented(k, r.ctx.tenant, presented).await?;
     let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
     let store = Store::load(k, &r.ctx, &mut tx).await?;
     let out = match (r.raw.method.as_str(), segs) {
@@ -356,17 +364,17 @@ async fn read_route(k: &Kernel, r: &Req<'_>, segs: &[&str]) -> Result<Value> {
         }
         ("GET", ["payment-requests", request]) => {
             let token = r.header("x-order-token").ok_or_else(|| Error::NotFound("payment request".into()))?;
-            orders::request_for_token(k, &r.ctx, &mut tx, &store, request, token).await?
+            orders::request_for_token(k, &r.ctx, &mut tx, &store, request, token, key.as_ref()).await?
         }
         ("POST", ["orders", "lookup"]) => {
             let body = r.body()?;
-            let so = orders::guest_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "email")?, text(&body, "token")?).await?;
+            let so = orders::guest_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "email")?, text(&body, "token")?, key.as_ref()).await?;
             json!({"order": orders::order_view(k, &r.ctx, &mut tx, &store, &so).await?})
         }
         // The link a shopper was sent: the number and the token alone, no email, and a thinner view.
         ("POST", ["orders", "track"]) => {
             let body = r.body()?;
-            let so = orders::tracked_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "token")?).await?;
+            let so = orders::tracked_order(k, &r.ctx, &mut tx, text(&body, "number")?, text(&body, "token")?, key.as_ref()).await?;
             json!({"order": orders::track_view(orders::order_view(k, &r.ctx, &mut tx, &store, &so).await?)})
         }
         ("GET", ["orders", number]) => {
@@ -392,12 +400,14 @@ fn subscribed(ctx: &Ctx) -> Result<()> {
 /// Pays an unpaid order again: guests identify it like a lookup, signed-in customers by number.
 async fn pay(k: &Kernel, r: &Req<'_>, body: &Map<String, Value>, own: Option<&str>) -> Result<Value> {
     let gateway = text(body, "payment_method")?.to_string();
+    // The key the order token names, taken before the transaction.
+    let key = token::presented(k, r.ctx.tenant, body.get("token").and_then(Value::as_str)).await?;
     with_retry(|| async {
         let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
         let store = Store::load(k, &r.ctx, &mut tx).await?;
         let so = match (own, r.user) {
             (Some(number), Some(user)) => orders::own_order(k, &r.ctx, &mut tx, user, number).await?,
-            _ => orders::guest_order(k, &r.ctx, &mut tx, text(body, "number")?, text(body, "email")?, text(body, "token")?).await?,
+            _ => orders::guest_order(k, &r.ctx, &mut tx, text(body, "number")?, text(body, "email")?, text(body, "token")?, key.as_ref()).await?,
         };
         let return_url = checkout::return_url(&store, body.get("return_url"))?;
         let pr = orders::pay_again(k, &r.ctx, &mut tx, &store, &so, &gateway, return_url).await?;

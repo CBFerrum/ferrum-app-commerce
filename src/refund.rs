@@ -902,7 +902,7 @@ async fn finish(hc: &mut HookCtx<'_>, doc: &Doc, reference: Option<String>, note
                 let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
                 let mut values = serde_json::Map::new();
                 values.insert("amount".into(), json!(crate::pages::money(s(doc, "currency_code").unwrap_or_default(), &amount.to_string(), store.precision)));
-                values.insert("link".into(), json!(crate::tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), number, so).await?));
+                values.insert("link".into(), json!(crate::tell::order_link(hc.kernel, hc.ctx.tenant, store.store_url.as_deref(), number, so).await?));
                 crate::tell::message(hc.kernel, hc.tx, &sctx, "commerce.order_refunded", so, s(&order, "commerce_contact_email"), values, vec![]).await?;
             }
         }

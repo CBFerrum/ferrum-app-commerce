@@ -144,7 +144,7 @@ pub async fn cancel(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Va
     values.insert("refund_to".into(), json!((!to.is_empty()).then(|| to.join(", "))));
     values.insert(
         "link".into(),
-        json!(tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), s(&after, "number").unwrap_or_default(), so_id).await?),
+        json!(tell::order_link(hc.kernel, hc.ctx.tenant, store.store_url.as_deref(), s(&after, "number").unwrap_or_default(), so_id).await?),
     );
     tell::message(hc.kernel, hc.tx, &sctx, "commerce.order_cancelled", so_id, s(&after, "commerce_contact_email"), values, vec![]).await?;
     notify_managers(hc.tx, hc.ctx.tenant, "A shopper cancelled an order", s(&after, "number"), "SalesOrder", so_id).await?;

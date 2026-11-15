@@ -55,9 +55,9 @@ pub async fn about(
 }
 
 /// The address a shopper follows an order at, when the store has its own address.
-pub async fn order_link(tx: &mut Tx, tenant: Uuid, store_url: Option<&str>, number: &str, so: Uuid) -> Result<Option<String>> {
+pub async fn order_link(k: &Kernel, tenant: Uuid, store_url: Option<&str>, number: &str, so: Uuid) -> Result<Option<String>> {
     match store_url {
-        Some(url) => Ok(Some(crate::orders::tracking_url(url, number, &crate::token::order_token(tx, tenant, so).await?))),
+        Some(url) => Ok(crate::token::for_mail(k, tenant, so).await?.map(|t| crate::orders::tracking_url(url, number, &t))),
         None => Ok(None),
     }
 }

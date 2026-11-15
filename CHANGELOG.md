@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.11.0
+
+Needs a platform with the vault (Ferrum `8e6b1f0` or later). A database change (`commerce/002_order_links.sql`: the
+column `commerce_secret.retired_at` and the table `commerce_order_signed`) is applied at startup; nothing existing
+moves. No interface change.
+
+**An order's token is signed with a key from the vault.** The token that opens a guest's order, follows it (the tracking
+link) and looks up its payment request was signed with a key per workspace kept unsealed in `commerce_secret`: whoever
+could read the database, or a dump of it, could open any order. It is now signed with a key derived from Commerce's own
+key in the vault for that purpose (`order-links`), made when needed and kept nowhere. It reads `v1.{mac}`: it names
+the version of Commerce's key it came from, so a new version of that key (`ferrum task vault_rotate level:owner …
+owner:commerce`) leaves the links already sent working. Checkout replays still return the same token.
+
+**Links already sent keep working, for good.** An order's token never expires and is in mail already sent. The old key
+moves into the vault, sealed, as Commerce's secret `old-signing-key`, and keeps checking the tokens of the orders made
+before this build (or by the build before, during an upgrade or after a rollback). It never opens an order this build
+made, whatever it is given: each sales order made from 0.11 on is listed in `commerce_order_signed` as it is made. It
+moves the first time an old token is checked, or at Commerce's next upkeep, a minute after the first start at most:
+once, even with replicas starting together (its row is locked without waiting; a replica that finds it locked waits
+without holding a connection). From then on this build never reads `commerce_secret`. The build before still does, so
+its rows stay until the release after this one deletes them. Whoever kept a copy of the old key can still open the
+orders made before, as before; nothing made from now on.
+
+**When the vault is closed** (an installation with nothing to open its root with), checkout, the order lookup, the
+tracking link, paying again, the payment request's lookup and the desk's tracking link are refused with "Commerce
+cannot sign or check order links right now: its keys are unavailable". Mails and events about an order go without its
+link (the log says so), so shipping, payments and refunds go on. Nothing is signed another way.
+
+**A sandbox** never takes the old key, and its own keys are not the live workspace's: no link of the live workspace
+opens the copy.
+
+**A workspace moved to another installation**: the platform's move copies the workspace's tables, not its keys in the
+vault, so links signed from 0.11 on do not work after the move. The old key travels in `commerce_secret` (and the list
+of orders made here in `commerce_order_signed`), and moves into the new installation's vault, so links from before 0.11
+keep working there.
+
+**For other apps' tests**: Commerce takes its vault handle as it registers, so register it as the server does,
+`hooks.app("commerce", &[], ferrum_app_commerce::register)`; called outside that, the kernel refuses to boot.
+
+Tests: a new end-to-end suite, `order_links_from_the_vault`: what checkout signs names the version and opens the order;
+an order the build before made opens with the token its key made (eight at once move the key once, for good); that key
+opens no order this build made, nor does another; signing and checking go on with `commerce_secret` out of reach (nothing
+new matches the old key); a sandbox never takes the old key; upkeep moves what is left; a replica whose vault is closed
+refuses plainly. Every suite opens the vault as a server does and registers Commerce as the server does.
+
+Not in this release: the rows of `commerce_secret` (the release after this one); links signed from 0.11 on that survive a
+move to another installation (the platform's move would have to carry the workspace's keys in the vault).
+
 ## 0.10.4
 
 * **Store Settings' pickers offer the store's company's warehouses, taxes and accounts.** 0.10.3 declared the filters; the interface built into it was older than the Frontend that resolves them, so a picker sent the filter unresolved and listed nothing. Rebuilt on Ferrum-Frontend 6d0bd1f. Nothing changes on the server. Found by a browser walk.

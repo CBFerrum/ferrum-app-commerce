@@ -17,6 +17,7 @@ mod checkout;
 mod coupon;
 mod edit;
 mod gift_card;
+mod keys;
 mod orders;
 mod pages;
 mod payment;
@@ -42,7 +43,10 @@ use std::sync::Arc;
 
 /// Registers this package's document hooks and its storefront. The hooks on other packages'
 /// entities (orders, invoices, payments, pricing rules) do nothing for tenants without commerce.
+/// Call it inside the platform's registration of the app, `hooks.app("commerce", …)`: Commerce takes
+/// its own vault handle there (its keys, `keys.rs`).
 pub fn register(hooks: &mut HookRegistry) {
+    keys::remember(hooks.vault());
     hooks
         .register("StoreSettings", Arc::new(store::SettingsHook))
         .register("ItemCategory", Arc::new(catalog::CategoryHook))
@@ -59,6 +63,7 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("ReturnRequest", Arc::new(shopper::ReturnRequestHook))
         .register("DeliveryNote", Arc::new(ship::DeliveryHook))
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
+        .register("SalesOrder", Arc::new(token::MadeHere))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))
         .register("PaymentEntry", Arc::new(payment::PaymentEntryHook));
     // The connector with Finance: only where Store Subscriptions is installed.

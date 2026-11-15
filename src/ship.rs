@@ -195,7 +195,7 @@ pub async fn tracking_link(hc: &mut HookCtx<'_>, so: &Doc) -> Result<Value> {
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let store = Store::load(hc.kernel, hc.ctx, hc.tx).await?;
     let link = match (&store.store_url, s(so, "number")) {
-        (Some(url), Some(number)) => Some(orders::tracking_url(url, number, &token::order_token(hc.tx, hc.ctx.tenant, so_id).await?)),
+        (Some(url), Some(number)) => Some(orders::tracking_url(url, number, &token::issue(hc.kernel, hc.ctx.tenant, so_id).await?)),
         _ => None,
     };
     Ok(json!({"link": link}))
@@ -238,7 +238,7 @@ impl DocHook for DeliveryHook {
             let number = s(&so, "number").unwrap_or_default().to_string();
             let link = match Store::load(hc.kernel, hc.ctx, hc.tx).await {
                 Ok(store) => match &store.store_url {
-                    Some(url) => Some(orders::tracking_url(url, &number, &token::order_token(hc.tx, hc.ctx.tenant, so_id).await?)),
+                    Some(url) => token::for_mail(hc.kernel, hc.ctx.tenant, so_id).await?.map(|t| orders::tracking_url(url, &number, &t)),
                     None => None,
                 },
                 Err(Error::NotFound(_)) => None,

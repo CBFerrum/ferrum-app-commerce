@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.10.4-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.11.0-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.10.4 (packages: `commerce` 0.5.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.11.0 (packages: `commerce` 0.5.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.3.6, <0.4`; ERP `>=0.24` (installing Commerce installs ERP) |
@@ -370,6 +370,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.11.0** — An order's token is signed with a key from the platform's vault; the key kept unsealed before opens only the orders made before.
 - [x] **0.10.4** — Store Settings pickers offer the store's company's warehouses, taxes and accounts.
 - [x] **0.10.3** — Choices limited to the company; Store Settings fills the company in; the refusal names the records.
 - [x] **0.10.2** — Reports take the store's company; a first-run state says the store is not set up yet.
@@ -512,7 +513,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.10.4**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.11.0**.
 
 ## 🤝 Contributing
 

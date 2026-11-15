@@ -10,6 +10,7 @@ use crate::cart;
 use crate::store::{Store, valid_gateway};
 use crate::{payment, token};
 use ferrum_domain::util::{b, currency, d, find, get, id, rows, s};
+use ferrum_kernel::vault::Derived;
 use ferrum_kernel::{Ctx, Doc, Error, Filter, Kernel, ListQuery, Op, Result, Tx};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -202,11 +203,11 @@ pub(crate) fn track_view(mut order: Value) -> Value {
 }
 
 /// An order by number and its token alone (the tracking link). Every failure looks the same.
-pub async fn tracked_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, order_token: &str) -> Result<Doc> {
+pub async fn tracked_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, order_token: &str, key: Option<&Derived>) -> Result<Doc> {
     let hidden = || Error::NotFound("order".into());
     let so = web_order(k, ctx, tx, number).await?.ok_or_else(hidden)?;
     let so_id = id(&so, "id").ok_or_else(hidden)?;
-    if !token::order_token_valid(tx, ctx.tenant, so_id, order_token).await? {
+    if !token::order_token_valid(k, tx, ctx.tenant, so_id, order_token, key).await? {
         return Err(hidden());
     }
     Ok(so)
@@ -227,12 +228,12 @@ async fn web_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str) -> Result<O
 
 /// Guest access: the order number, its contact email and its token must all match. Every
 /// failure looks the same, so the endpoint reveals nothing about which part was wrong.
-pub async fn guest_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, email: &str, order_token: &str) -> Result<Doc> {
+pub async fn guest_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, email: &str, order_token: &str, key: Option<&Derived>) -> Result<Doc> {
     let hidden = || Error::NotFound("order".into());
     let so = web_order(k, ctx, tx, number).await?.ok_or_else(hidden)?;
     let so_id = id(&so, "id").ok_or_else(hidden)?;
     let email_ok = s(&so, "commerce_contact_email").is_some_and(|e| e.eq_ignore_ascii_case(email.trim()));
-    let token_ok = token::order_token_valid(tx, ctx.tenant, so_id, order_token).await?;
+    let token_ok = token::order_token_valid(k, tx, ctx.tenant, so_id, order_token, key).await?;
     if !(email_ok && token_ok) {
         return Err(hidden());
     }
@@ -264,7 +265,7 @@ async fn web_order_any(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str) -> Resu
 }
 
 /// The payment request behind `id`, if the order token is the request's order's token.
-pub async fn request_for_token(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, request: &str, order_token: &str) -> Result<Value> {
+pub async fn request_for_token(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, request: &str, order_token: &str, key: Option<&Derived>) -> Result<Value> {
     let hidden = || Error::NotFound("payment request".into());
     let pr_id = Uuid::parse_str(request.trim()).map_err(|_| hidden())?;
     let pr = match get(k, ctx, tx, "PaymentRequest", pr_id).await {
@@ -273,7 +274,7 @@ pub async fn request_for_token(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store
         Err(e) => return Err(e),
     };
     let so = id(&pr, "sales_order").ok_or_else(hidden)?;
-    if !token::order_token_valid(tx, ctx.tenant, so, order_token).await? {
+    if !token::order_token_valid(k, tx, ctx.tenant, so, order_token, key).await? {
         return Err(hidden());
     }
     Ok(request_view(&pr, store))

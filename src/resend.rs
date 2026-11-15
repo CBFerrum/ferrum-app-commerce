@@ -26,7 +26,7 @@ async fn values(hc: &mut HookCtx<'_>, store: &Store, so: &Doc, template: &str) -
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let number = s(so, "number").unwrap_or_default();
     let mut v = Map::new();
-    v.insert("link".into(), json!(tell::order_link(hc.tx, hc.ctx.tenant, store.store_url.as_deref(), number, so_id).await?));
+    v.insert("link".into(), json!(tell::order_link(hc.kernel, hc.ctx.tenant, store.store_url.as_deref(), number, so_id).await?));
     let money_of = |code: &str, a: Decimal| crate::pages::money(code, &a.to_string(), store.precision);
     match template {
         "commerce.order_shipped" => {
