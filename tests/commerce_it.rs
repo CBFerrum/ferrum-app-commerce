@@ -5,7 +5,6 @@
 //! public and signed in — and confirms payments the way a gateway plugin does: as its service
 //! user, through the payment request's `mark_paid` action.
 
-use ferrum_kernel::secret::SecretKey;
 use ferrum_kernel::tenant::NewTenant;
 use ferrum_kernel::{Ctx, Db, DbConfig, Doc, Error, HookRegistry, Kernel, KernelSettings, ListQuery, Site, SiteRequest};
 use ferrum_meta::{Catalog, PermissionDef};
@@ -65,9 +64,21 @@ async fn kernel(db: Db) -> Arc<Kernel> {
     for source in ferrum_app_commerce::reports() {
         ferrum_domain::reports::add_source(source);
     }
-    // Messages with a secret value (a gift card's code) are sealed with the server's key while they wait.
-    let settings = KernelSettings { secret_key: Some(SecretKey::new(SECRET)), ..Default::default() };
-    Kernel::boot(db, catalog, hooks, settings, None).await.expect("boot")
+    // Messages with a secret value (a gift card's code) are sealed by the vault while they wait; the mailer opens them.
+    Kernel::boot(db, catalog, hooks, KernelSettings::default(), Some(Arc::new(Captured))).await.expect("boot")
+}
+
+/// What the server's mailer was handed, in order: (to, subject, html). Each fresh kernel starts it afresh.
+static SENT: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+struct Captured;
+
+#[async_trait::async_trait]
+impl ferrum_kernel::Mailer for Captured {
+    async fn send(&self, to: &str, subject: &str, html: &str) -> ferrum_kernel::Result<()> {
+        SENT.lock().unwrap_or_else(|e| e.into_inner()).push((to.to_string(), subject.to_string(), html.to_string()));
+        Ok(())
+    }
 }
 
 async fn fresh_kernel() -> Arc<Kernel> {
@@ -82,29 +93,17 @@ async fn fresh_kernel() -> Arc<Kernel> {
         ..Default::default()
     };
     ferrum_kernel::vault::open(&db, opener, false).await.expect("the vault");
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let k = kernel(db).await;
     ferrum_domain::maintenance(&k).await.expect("maintenance");
     ferrum_app_erp::maintenance(&k).await.expect("maintenance");
     k
 }
 
-const SECRET: [u8; 32] = [7; 32];
-
-/// The mails queued to `to` with what the outbox holds sealed opened (a secret value's place, otherwise).
+/// The mails sent to `to`, oldest first, as the mailer got them (secret values opened): the outbox handed over.
 async fn opened_mails(t: &T, to: &str) -> Vec<(String, String)> {
-    let key = SecretKey::new(SECRET);
-    events(t, "ferrum.mail")
-        .await
-        .iter()
-        .filter(|m| m["to"] == json!(to))
-        .map(|m| match m["sealed"].as_str() {
-            Some(sealed) => {
-                let open: Value = serde_json::from_str(&key.open(&format!("{}/message", t.ctx.tenant), sealed).unwrap()).unwrap();
-                (open["subject"].as_str().unwrap().to_string(), open["html"].as_str().unwrap().to_string())
-            }
-            None => (m["subject"].as_str().unwrap_or_default().to_string(), m["html"].as_str().unwrap_or_default().to_string()),
-        })
-        .collect()
+    while t.k.dispatch_outbox_once().await.unwrap_or(0) > 0 {}
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|m| m.0 == to).map(|m| (m.1.clone(), m.2.clone())).collect()
 }
 
 /// A gateway's service user, as its plugin acts.
@@ -1414,7 +1413,7 @@ async fn gift_cards() {
     let body = &sent[0].1;
     let code = body.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
     assert!(code.len() >= 8 && body.contains("500"), "{body}");
-    // While it waits for the mailer the outbox holds the code sealed, and only a placeholder where it goes.
+    // The outbox holds only a placeholder where the code goes: the code was sealed while it waited, and the mailer opened it.
     let waiting = mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect::<Vec<_>>();
     assert!(waiting.len() == 1 && !waiting[0].1.contains(&code) && waiting[0].1.contains("••••••"), "the code is not in the clear in the outbox: {waiting:?}");
     let account = t.find_one("StoredValueAccount", json!({"kind": sid(&kind)})).await;
@@ -2297,6 +2296,147 @@ async fn subscriptions() {
 
 fn sid(doc: &Doc) -> String {
     doc["id"].as_str().unwrap().to_string()
+}
+
+// ───────────────────────────── what Commerce offers other apps ─────────────────────────────
+
+#[test]
+fn payment_operations_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(payment_operations()).await.unwrap() });
+}
+
+/// A person of the workspace holding `roles`.
+async fn person(t: &T, email: &str, roles: &[&str]) -> Ctx {
+    let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
+    let u = t.k.create_user(&t.ctx, email, email, None, &roles, false).await.unwrap();
+    t.k.load_ctx(t.ctx.tenant, u, None, "it".into()).await.unwrap()
+}
+
+/// The fields a capability says it returns, sorted.
+fn returns(output: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = output["properties"].as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+/// Today the platform names an action that one package adds to another's entity after the entity's package (selling,
+/// at selling's version); once that is fixed it is `commerce.sales_invoice.request_payment`, at Commerce's version.
+const ASK: &str = "selling.sales_invoice.request_payment";
+
+/// Commerce's payments as other apps (Bookings' deposits, LMS's courses) use them: operations through the platform's
+/// gate, each once per key, in the invoice's currency, checked against what the caller may do.
+async fn payment_operations() {
+    let Shop { t, cid, mug, .. } = small_shop("payops").await;
+    let clerk = person(&t, "clerk@shop.test", &["Sales Manager"]).await;
+    let web = person(&t, "web@shop.test", &["Website Manager"]).await;
+    let customer = t.insert("Customer", json!({"customer_name": "Asha Rao", "email": GUEST})).await;
+    let draft = t
+        .insert(
+            "SalesInvoice",
+            json!({"company": cid.to_string(), "customer": sid(&customer), "items": [{"item": mug.to_string(), "qty": "4", "rate": "250"}]}),
+        )
+        .await;
+    let invoice = t.submit("SalesInvoice", uid(&draft)).await;
+    let owed = dec(&invoice["outstanding_amount"]);
+    assert!(owed > n("400"), "{owed}");
+    let asked = || t.count("PaymentRequest", json!({"sales_invoice": sid(&invoice)}));
+    let ask = |params: Value, key: &str| ferrum_kernel::capability::Invocation::new(ASK, json!({"id": sid(&invoice), "params": params})).key(key);
+
+    // ───────────── offered in the catalog, with its contract ─────────────
+    let selling = t.k.registry.catalog().package("selling").unwrap().manifest.version.clone();
+    let catalog = t.k.catalog(&clerk);
+    let c = catalog.iter().find(|c| c.id == ASK).expect("request_payment is in the catalog");
+    assert_eq!((c.owner.as_str(), c.version.as_str()), ("selling", selling.as_str()), "named after SalesInvoice's package until the platform's fix");
+    assert_eq!(c.permissions, vec!["SalesInvoice:write".to_string()]);
+    assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("transactional_action"));
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["gateway"]));
+    assert_eq!(returns(&c.output), ["amount", "currency", "expires_at", "payment_request", "payment_url"]);
+    assert!(c.completion.contains("submitted payment request"), "{}", c.completion);
+
+    // ───────────── a part of the invoice, asked for once ─────────────
+    let first = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "400", "payer_email": GUEST}), "deposit:1")).await.expect("asked for");
+    assert!(!first.repeated);
+    let pr = t.get("PaymentRequest", first.result["payment_request"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (pr["docstatus"].clone(), pr["status"].clone(), dec(&pr["amount"]), pr["gateway"].clone(), pr["payer_email"].clone()),
+        (json!(1), json!("Initiated"), n("400"), json!("fakepay"), json!(GUEST))
+    );
+    assert_eq!(pr["currency"], invoice["currency"], "in the invoice's currency");
+    assert_eq!((dec(&first.result["amount"]), first.result["currency"].clone()), (n("400"), json!("INR")));
+    assert_eq!(first.result["expires_at"], pr["expires_at"]);
+    assert!(!pr["expires_at"].is_null(), "fakepay's requests lapse after 30 minutes");
+    // The answer was lost on its way back, so the caller asks again with the same key: it is told what was done.
+    let again = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "400", "payer_email": GUEST}), "deposit:1")).await.expect("answered");
+    assert!(again.repeated);
+    assert_eq!(again.result, first.result);
+    assert_eq!(asked().await, 1, "one request, however often it is asked");
+    let other = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "500", "payer_email": GUEST}), "deposit:1")).await;
+    assert_eq!(other.as_ref().map_err(Error::code).unwrap_err(), "input_changed", "another amount is another request: {other:?}");
+
+    // ───────────── more than is left to ask: refused, nothing kept, not even the key ─────────────
+    let left = owed - n("400");
+    let over = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": (left + n("1")).to_string()}), "deposit:2")).await;
+    assert_eq!(over.as_ref().map_err(Error::code).unwrap_err(), "invalid", "{over:?}");
+    assert_eq!(asked().await, 1);
+    // Without an amount: the rest of what is owed, beside what is already asked for.
+    let rest = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay"}), "deposit:2")).await.expect("the rest asked for");
+    assert!(!rest.repeated, "the refused call kept no receipt");
+    assert_eq!(dec(&rest.result["amount"]), left);
+    assert_eq!(asked().await, 2);
+    let more = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "1"}), "deposit:3")).await;
+    assert_eq!(more.as_ref().map_err(Error::code).unwrap_err(), "invalid", "all of it is asked for already: {more:?}");
+    let nowhere = t.k.invoke(&clerk, ask(json!({"gateway": "nopay"}), "deposit:4")).await;
+    assert_eq!(field_error(&nowhere.map(|r| r.result), "gateway"), "is not one of the store's payment methods");
+    assert_eq!(asked().await, 2);
+
+    // ───────────── who may ask ─────────────
+    let reader = t.k.invoke(&web, ask(json!({"gateway": "fakepay", "amount": "1"}), "deposit:5")).await;
+    assert_eq!(reader.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "reading invoices is not enough: {reader:?}");
+    assert_eq!(asked().await, 2);
+
+    // ───────────── refund: offered in the catalog, with its contract ─────────────
+    const REFUND: &str = "commerce.payment_request.refund";
+    let commerce = t.k.registry.catalog().package("commerce").unwrap().manifest.version.clone();
+    let c = catalog.iter().find(|c| c.id == REFUND).expect("refund is in the catalog");
+    assert_eq!((c.owner.as_str(), c.version.as_str()), ("commerce", commerce.as_str()));
+    assert_eq!(c.permissions, vec!["PaymentRequest:write".to_string()]);
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["amount", "note"]));
+    assert_eq!(returns(&c.output), ["amount", "refund"]);
+    assert!(c.completion.contains("approves"), "{}", c.completion);
+
+    // ───────────── a paid request's money asked back, once ─────────────
+    let paid: Uuid = first.result["payment_request"].as_str().unwrap().parse().unwrap();
+    let unpaid: Uuid = rest.result["payment_request"].as_str().unwrap().parse().unwrap();
+    let fakepay = gateway(&t, "fakepay").await;
+    pay(&t, &fakepay, paid, n("400"), "pi_deposit").await;
+    let refunds = |pr: Uuid| t.count("OrderRefund", json!({"payment_request": pr.to_string()}));
+    let back =
+        |pr: Uuid, params: Value, key: &str| ferrum_kernel::capability::Invocation::new(REFUND, json!({"id": pr.to_string(), "params": params})).key(key);
+    let one = t.k.invoke(&clerk, back(paid, json!({"amount": "150", "note": "Cancelled in time"}), "deposit-refund:1")).await.expect("asked for");
+    let refund = t.get("OrderRefund", one.result["refund"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (refund["status"].clone(), refund["kind"].clone(), dec(&refund["amount"]), refund["payment_request"].clone(), refund["requested_by"].clone()),
+        (json!("Requested"), json!("Payment"), n("150"), json!(paid.to_string()), json!("clerk@shop.test"))
+    );
+    assert_eq!(dec(&one.result["amount"]), n("150"));
+    let again = t.k.invoke(&clerk, back(paid, json!({"amount": "150", "note": "Cancelled in time"}), "deposit-refund:1")).await.expect("answered");
+    assert!(again.repeated);
+    assert_eq!(again.result, one.result);
+    assert_eq!(refunds(paid).await, 1, "one refund, however often it is asked");
+    let too_much = t.k.invoke(&clerk, back(paid, json!({"amount": "300", "note": "The rest and more"}), "deposit-refund:2")).await;
+    assert_eq!(too_much.as_ref().map_err(Error::code).unwrap_err(), "invalid", "250 is left of 400: {too_much:?}");
+    assert_eq!(refunds(paid).await, 1);
+
+    // ───────────── refused: an unpaid request, and one who only reads requests ─────────────
+    let nothing = t.k.invoke(&clerk, back(unpaid, json!({"amount": "10", "note": "Not paid yet"}), "deposit-refund:3")).await;
+    assert_eq!(nothing.as_ref().map_err(Error::code).unwrap_err(), "invalid", "{nothing:?}");
+    assert_eq!(refunds(unpaid).await, 0);
+    let reader = person(&t, "sales@shop.test", &["Sales User"]).await;
+    let refused = t.k.invoke(&reader, back(paid, json!({"amount": "10", "note": "Goodwill"}), "deposit-refund:4")).await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    assert_eq!(refunds(paid).await, 1);
 }
 
 #[test]
