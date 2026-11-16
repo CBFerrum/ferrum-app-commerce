@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.13.0
+
+The `commerce` package is 0.6.0. No database change. Needs no newer ERP or platform.
+
+**Commerce offers its payments to other apps as two operations**, called through the platform's gate (`Kernel::invoke`,
+or `invoke_tx` in the caller's transaction) with an effect key, so a call repeated with the same key is told what was
+done the first time and makes nothing new, and the same key with other input is refused (`input_changed`).
+
+- `request_payment` on a submitted SalesInvoice with something outstanding (Commerce's overlay; hidden, `permission:
+  write`): `gateway` (required, one of the store's payment methods), `amount` (the part; what is owed and not yet asked
+  for when empty), `payer_email`. Returns `{payment_request, amount, currency, payment_url, expires_at}`: a submitted
+  request in the invoice's currency (`currency` is its ISO code; `payment_url` is empty until the gateway writes it
+  after the commit). A part above what is owed less what open requests already ask for is refused.
+- `refund` on a submitted PaymentRequest (hidden, `permission: write`): `amount` and `note` (required), `credit_note`.
+  Returns `{refund, amount}`: an `OrderRefund` in state Requested, which a person approves and the gateway sends after
+  the commit. Refused unless the request is paid, pays an invoice and holds the amount beyond its other refunds.
+
+The platform lists `request_payment` today as `selling.sales_invoice.request_payment`, at the selling package's
+version, because it names an overlay's action after the entity's package; once that is fixed it is
+`commerce.sales_invoice.request_payment` at Commerce's. `refund` is `commerce.payment_request.refund`.
+
+`request_invoice_payment` and `refund_payment` are unchanged and stay until Bookings and LMS call the operations.
+
+Tests: `payment_operations_end_to_end` calls both through the gate as a Sales Manager (one request for the part, in
+the invoice's currency; a retried call answered `repeated`; another amount under the key refused; too much refused
+with nothing kept; a part and then the rest; one Requested refund of a paid request; an unpaid request refused) and is
+refused for a Website Manager, who reads invoices without writing them, and a Sales User, who reads requests. The
+suite boots without the platform's old master key: messages with a secret value are sealed by the vault and read as
+the mailer got them.
+
 ## 0.12.0
 
 Needs ERP 0.28.3 (`requires: {erp: ">=0.28.3"}`), for `portal::customer_for`. No interface change. The package's SQL

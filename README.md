@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.12.0-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.0-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,13 +39,13 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.12.0 (packages: `commerce` 0.5.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.13.0 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.28.3` (installing Commerce installs ERP) |
 | **Works with** | ERP (items, customers, stock, orders, invoices, promotions, gift cards), Finance (subscriptions), Stock Operations (variants), Bookings (deposits), Retail (returns at a till), Campaigns and Mail (events and messages) |
 | **Languages** | Admin in English, Arabic, Hindi; storefront words English with per-language overrides |
-| **Tests** | 66 Rust tests against a real PostgreSQL, 16 interface test files, gateway tests against scripted and mock providers |
+| **Tests** | 67 Rust tests against a real PostgreSQL, 16 interface test files, gateway tests against scripted and mock providers |
 | **Licence** | AGPL-3.0-only |
 
 ## 📸 Screenshots
@@ -283,7 +283,7 @@ Every minute, one replica at a time: expire overdue payment requests (cancelling
 | Stripe, PayPal, Razorpay | Built as WebAssembly plugins in `gateways/`; webhooks signed and checked | Your own provider account, keys and webhook |
 | Finance | The Store Subscriptions connector sells plans | Finance installed |
 | Stock Operations | Generate Variants | Installed |
-| Bookings and other apps | Ask for a payment or a part refund through `request_invoice_payment` and `refund_payment` | The other app installed |
+| Bookings and other apps | Ask for a payment or a part refund through the platform's gate: the operations `request_payment` on a submitted SalesInvoice and `refund` on a paid PaymentRequest, each once per key (`request_invoice_payment` and `refund_payment` stay until Bookings and LMS move) | The other app installed |
 | Retail | Returns at a store against Commerce's invoice; the same stock and customers | Retail installed |
 | Mail, Campaigns | Shopper mails are message templates; events feed journeys | Mail installed |
 | Carriers | ERP's carrier shipments are read to tell the shopper | A carrier connection in ERP |
@@ -370,6 +370,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.13.0** — Other apps ask for a payment of an invoice and a refund of a paid request as operations through the platform's gate, each once per key.
 - [x] **0.12.0** — An order's token names the version of Commerce's key that signed it, or is refused; the key kept unsealed before 0.11 is gone; a signed-in shopper's first orders at once make one customer.
 - [x] **0.11.0** — An order's token is signed with a key from the platform's vault; the key kept unsealed before opens only the orders made before.
 - [x] **0.10.4** — Store Settings pickers offer the store's company's warehouses, taxes and accounts.
@@ -514,7 +515,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.12.0**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.13.0**.
 
 ## 🤝 Contributing
 
