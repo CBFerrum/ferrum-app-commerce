@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1
+
+Commerce no longer looks at the server's key (`FERRUM_SECRET_KEY`), which the platform is making its own. Before it makes an order's link for a shopper, or a gift card's code, both of which wait in mail sealed, it asks the platform whether it can seal such a mail (`Kernel::seals_secret_values`, on the platform's main from 0ce3017): with the vault open that is so even on a server without the key, where the link was left out and the codes were held back before; without either the link is left out and the managers are told, as before. Needs that platform (0.3.8 from 0ce3017). No database or interface change.
+
 ## 0.11.0
 
 Needs a platform with the vault (Ferrum `8e6b1f0` or later). A database change (`commerce/002_order_links.sql`: the

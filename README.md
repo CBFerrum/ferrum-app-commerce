@@ -42,7 +42,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 | **Version** | 0.11.0 (packages: `commerce` 0.5.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
-| **Depends on** | Ferrum platform `>=0.3.6, <0.4`; ERP `>=0.24` (installing Commerce installs ERP) |
+| **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.24` (installing Commerce installs ERP) |
 | **Works with** | ERP (items, customers, stock, orders, invoices, promotions, gift cards), Finance (subscriptions), Stock Operations (variants), Bookings (deposits), Retail (returns at a till), Campaigns and Mail (events and messages) |
 | **Languages** | Admin in English, Arabic, Hindi; storefront words English with per-language overrides |
 | **Tests** | 66 Rust tests against a real PostgreSQL, 16 interface test files, gateway tests against scripted and mock providers |

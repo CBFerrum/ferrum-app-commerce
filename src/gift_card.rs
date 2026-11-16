@@ -314,9 +314,9 @@ pub async fn send_sold(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id:
     if cards.is_empty() {
         return Ok(());
     }
-    // A code is sealed while its mail waits, and only the server's secret key can: without one the codes
-    // are not made (they are shown once), and the managers are told so it can be put right.
-    if k.settings.secret_key.is_none() {
+    // A code is sealed while its mail waits, which the platform does with its vault (or the server's secret key):
+    // where it cannot, the codes are not made (they are shown once), and the managers are told so it can be put right.
+    if !k.seals_secret_values() {
         let body = format!("{}: the server has no secret key, so the gift card codes this order bought cannot be sent", s(&so, "number").unwrap_or_default());
         crate::store::notify_managers(tx, ctx.tenant, "Gift card codes were not sent", Some(&body), "SalesOrder", so_id).await?;
         return Ok(());

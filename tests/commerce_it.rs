@@ -56,6 +56,8 @@ async fn kernel(db: Db) -> Arc<Kernel> {
     let mut hooks = HookRegistry::default();
     ferrum_domain::register(&mut hooks);
     hooks.app("erp", &[], ferrum_app_erp::register);
+    let erp_packages: Vec<String> = ferrum_app_erp::packages().unwrap().iter().map(|p| p.name().to_string()).collect();
+    hooks.own("erp", &erp_packages);
     for source in ferrum_app_erp::reports() {
         ferrum_domain::reports::add_source(source);
     }
