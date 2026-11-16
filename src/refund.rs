@@ -41,7 +41,7 @@ async fn held_payment(tx: &mut Tx, tenant: Uuid, pr: Uuid, except: Option<Uuid>)
 /// Asks for `amount` of a paid payment request to go back, as the app that took it decides (a
 /// booking's deposit by its cancellation terms), against `credit_note` when the app credited the
 /// invoice. A person still approves it and the gateway carries it out, as for an order's refund.
-pub async fn refund_payment(k: &Kernel, ctx: &Ctx, tx: &mut Tx, pr: Uuid, amount: Decimal, credit_note: Option<Uuid>, note: &str) -> Result<Doc> {
+pub(crate) async fn refund_payment(k: &Kernel, ctx: &Ctx, tx: &mut Tx, pr: Uuid, amount: Decimal, credit_note: Option<Uuid>, note: &str) -> Result<Doc> {
     let sctx = sys(ctx);
     let request = k.get_tx(&sctx, tx, "PaymentRequest", pr, true).await?;
     if s(&request, "status") != Some("Paid") {
