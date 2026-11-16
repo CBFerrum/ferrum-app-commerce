@@ -3,12 +3,10 @@
 //! Commerce's own key in the vault (`keys.rs`), kept nowhere, and are checked in constant time.
 
 use crate::keys;
-use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ferrum_domain::util::id;
 use ferrum_kernel::vault::Derived;
-use ferrum_kernel::{Doc, DocHook, Error, HookCtx, Kernel, Result, Tx};
+use ferrum_kernel::{Error, Kernel, Result};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -36,8 +34,7 @@ fn order_message(order: Uuid) -> Vec<u8> {
 }
 
 /// The access token of an order, `v{n}.{mac}`: signed with the key for order links from version n of Commerce's key,
-/// so the same every time while that version is the current one (checkout replays return it again). Before 0.11 it was
-/// the old key's MAC alone (43 characters).
+/// so the same every time while that version is the current one (checkout replays return it again).
 pub fn order_token(key: &Derived, order: Uuid) -> String {
     keys::signed(key.bytes(), key.version(), &order_message(order))
 }
@@ -60,58 +57,24 @@ pub async fn for_mail(k: &Kernel, tenant: Uuid, order: Uuid) -> Result<Option<St
     }
 }
 
+/// A token as it reads: the version of Commerce's key that signed it and its MAC; none unless well formed.
+fn read(token: &str) -> Option<(i32, Vec<u8>)> {
+    let (v, mac) = token.trim().split_once('.')?;
+    Some((keys::version(v)?, URL_SAFE_NO_PAD.decode(mac).ok()?))
+}
+
 /// The key a presented token was signed with, to take before any transaction (the vault answers on a connection of its
-/// own); none for a token from before 0.11, or none at all.
+/// own); none without a well-formed token, or once its version is gone.
 pub async fn presented(k: &Kernel, tenant: Uuid, token: Option<&str>) -> Result<Option<Derived>> {
-    match token.and_then(|t| t.trim().split_once('.')).and_then(|(v, _)| keys::version(v)) {
-        Some(v) => keys::at(k, tenant, keys::ORDERS, v).await,
+    match token.and_then(read) {
+        Some((v, _)) => keys::at(k, tenant, keys::ORDERS, v).await,
         None => Ok(None),
     }
 }
 
-/// Whether `token` is `order`'s: signed with `key`, which [`presented`] gave for the version it names; or a token from
-/// before 0.11, signed with the old key, for an order this build did not make (`commerce_order_signed`).
-pub async fn order_token_valid(k: &Kernel, tx: &mut Tx, tenant: Uuid, order: Uuid, token: &str, key: Option<&Derived>) -> Result<bool> {
-    let token = token.trim();
-    match token.split_once('.') {
-        Some((v, mac)) => {
-            let (Some(v), Ok(mac)) = (keys::version(v), URL_SAFE_NO_PAD.decode(mac)) else { return Ok(false) };
-            Ok(key.is_some_and(|key| key.version() == v && keys::mac_ok(key.bytes(), &order_message(order), &mac)))
-        }
-        None => {
-            let Ok(mac) = URL_SAFE_NO_PAD.decode(token) else { return Ok(false) };
-            let made_here: bool = sqlx::query_scalar("select exists (select 1 from commerce_order_signed where tenant_id = $1 and sales_order = $2)")
-                .bind(tenant)
-                .bind(order)
-                .fetch_one(&mut **tx)
-                .await?;
-            // (In the caller's transaction: rare, an order from before 0.11 opened with the link it was sent.)
-            Ok(!made_here && keys::old_ok(k, tenant, &order_message(order), &mac).await?)
-        }
-    }
-}
-
-/// Marks each sales order made from 0.11 on: the old key never opens it, whatever it is given (`keys.rs`).
-pub struct MadeHere;
-
-#[async_trait]
-impl DocHook for MadeHere {
-    fn name(&self) -> &'static str {
-        "commerce.order_signed"
-    }
-
-    async fn after_save(&self, hc: &mut HookCtx<'_>, doc: &Doc, old: Option<&Doc>) -> Result<()> {
-        if old.is_none()
-            && let Some(order) = id(doc, "id")
-        {
-            sqlx::query("insert into commerce_order_signed (tenant_id, sales_order) values ($1, $2) on conflict do nothing")
-                .bind(hc.ctx.tenant)
-                .bind(order)
-                .execute(&mut **hc.tx)
-                .await?;
-        }
-        Ok(())
-    }
+/// Whether `token` is `order`'s: signed with `key`, which [`presented`] gave for the version it names (in constant time).
+pub fn order_token_valid(order: Uuid, token: &str, key: Option<&Derived>) -> bool {
+    read(token).is_some_and(|(v, mac)| key.is_some_and(|key| key.version() == v && keys::mac_ok(key.bytes(), &order_message(order), &mac)))
 }
 
 #[cfg(test)]
@@ -135,14 +98,15 @@ mod tests {
         let (k1, k2) = ([7u8; 32], [8u8; 32]);
         let (o1, o2) = (Uuid::now_v7(), Uuid::now_v7());
         let token = keys::signed(&k1, 1, &order_message(o1));
-        let (v, mac) = token.split_once('.').unwrap();
-        let mac = URL_SAFE_NO_PAD.decode(mac).unwrap();
-        assert_eq!(keys::version(v), Some(1));
+        let (v, mac) = read(&token).expect("well formed");
+        assert_eq!(v, 1);
         assert!(keys::mac_ok(&k1, &order_message(o1), &mac));
         assert!(!keys::mac_ok(&k1, &order_message(o2), &mac), "another order");
         assert!(!keys::mac_ok(&k2, &order_message(o1), &mac), "another tenant's key");
-        // A token from before 0.11: the old key's MAC alone, 43 characters, no dot.
-        let old = URL_SAFE_NO_PAD.encode(keys::mac(&k1, &order_message(o1)));
-        assert!(old.len() == 43 && !old.contains('.'));
+        // One that names no version (the MAC alone) is refused like anything else malformed.
+        let bare = URL_SAFE_NO_PAD.encode(keys::mac(&k1, &order_message(o1)));
+        for bad in [bare.as_str(), "v0.abc", "x1.abc", "v1.not base64", ""] {
+            assert!(read(bad).is_none(), "{bad}");
+        }
     }
 }

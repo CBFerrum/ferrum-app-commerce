@@ -26,9 +26,6 @@ hex = "0.4"
 hmac = "0.12"
 rand = "0.9"
 base64 = "0.22"
-# Waiting a moment, without a connection, while another replica moves the old key into the vault (src/keys.rs). The
-# platform already builds it.
-tokio = { version = "1.45", features = ["time"] }
 
 [dev-dependencies]
 ferrum-apps = { git = "https://github.com/CBFerrum/Ferrum", branch = "main" }

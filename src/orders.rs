@@ -207,7 +207,7 @@ pub async fn tracked_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, ord
     let hidden = || Error::NotFound("order".into());
     let so = web_order(k, ctx, tx, number).await?.ok_or_else(hidden)?;
     let so_id = id(&so, "id").ok_or_else(hidden)?;
-    if !token::order_token_valid(k, tx, ctx.tenant, so_id, order_token, key).await? {
+    if !token::order_token_valid(so_id, order_token, key) {
         return Err(hidden());
     }
     Ok(so)
@@ -233,7 +233,7 @@ pub async fn guest_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, email
     let so = web_order(k, ctx, tx, number).await?.ok_or_else(hidden)?;
     let so_id = id(&so, "id").ok_or_else(hidden)?;
     let email_ok = s(&so, "commerce_contact_email").is_some_and(|e| e.eq_ignore_ascii_case(email.trim()));
-    let token_ok = token::order_token_valid(k, tx, ctx.tenant, so_id, order_token, key).await?;
+    let token_ok = token::order_token_valid(so_id, order_token, key);
     if !(email_ok && token_ok) {
         return Err(hidden());
     }
@@ -274,7 +274,7 @@ pub async fn request_for_token(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store
         Err(e) => return Err(e),
     };
     let so = id(&pr, "sales_order").ok_or_else(hidden)?;
-    if !token::order_token_valid(k, tx, ctx.tenant, so, order_token, key).await? {
+    if !token::order_token_valid(so, order_token, key) {
         return Err(hidden());
     }
     Ok(request_view(&pr, store))
