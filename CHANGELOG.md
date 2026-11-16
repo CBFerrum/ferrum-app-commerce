@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.11.2
+
+Needs ERP 0.28.2 (`requires: {erp: ">=0.28.2"}`), whose `ledger::allocate` answers the base it took. No database or
+interface change.
+
+- **A web order in another currency than the company's settles its invoice, and the difference is booked.** A
+  payment received before the order is invoiced is an advance, applied to the invoice when it is submitted. Each side
+  now gives up the base ERP took (the invoice at the order's rate, the payment at the rate it was received at, either
+  all it has left when this clears it), and what the two differ by goes to the company's exchange gain/loss account
+  against the receivable. It is booked under the payment, as the allocations are, so cancelling the payment takes it
+  back with them. Before, an advance received at another rate than the order's was not applied at all, leaving the
+  invoice of a paid order unpaid (the known limit "left for the accountant" is gone); at the same rate, a taxed
+  invoice booked part by part (a tee at 84.5: 471.52 rupees, its payment 471.51) left the cent in receivables, which
+  since ERP 0.28.2 no open item showed.
+- **The part of an advance an invoice takes is converted as the company rounds** (`ledger::round_as`), not always half
+  up. In a company that rounds half to even, a mug invoiced on its own out of a paid order (3.49 dollars at 84.5,
+  294.905 rupees, its invoice booked at 294.90) took 294.91 of the advance: a cent of exchange difference between two
+  documents at the same rate, and a cent less left on the advance.
+
+Tests: `advances_in_another_currency_end_to_end` (at the same rate, at another, the payment cancelled) and
+`part_of_an_advance_end_to_end` (a company that rounds half to even).
+
 ## 0.11.1
 
 Commerce no longer looks at the server's key (`FERRUM_SECRET_KEY`), which the platform is making its own. Before it makes an order's link for a shopper, or a gift card's code, both of which wait in mail sealed, it asks the platform whether it can seal such a mail (`Kernel::seals_secret_values`, on the platform's main from 0ce3017): with the vault open that is so even on a server without the key, where the link was left out and the codes were held back before; without either the link is left out and the managers are told, as before. Needs that platform (0.3.8 from 0ce3017). No database or interface change.

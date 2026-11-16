@@ -3599,3 +3599,144 @@ async fn order_links_from_the_vault() {
         assert_eq!(e.to_string(), "Commerce cannot sign or check order links right now: its keys are unavailable", "plain");
     }
 }
+
+// ───────────────────────────── a store selling in another currency than its company's ─────────────────────────────
+
+/// The small shop selling in dollars for its company, which keeps rupees: 84.5 rupees a dollar since long
+/// ago, and no delivery charge.
+async fn dollar_shop(slug: &str) -> Shop {
+    let shop = small_shop(slug).await;
+    let t = &shop.t;
+    let (inr, usd) = (t.find_one("Currency", json!({"code": "INR"})).await, t.find_one("Currency", json!({"code": "USD"})).await);
+    t.insert("ExchangeRate", json!({"from_currency": usd["id"], "to_currency": inr["id"], "rate": "84.5", "valid_from": "2000-01-01"})).await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"currency": usd["id"]})), None).await.expect("a store in dollars");
+    let rule = t.find_one("ShippingRule", json!({})).await;
+    t.k.update(&t.ctx, "ShippingRule", uid(&rule), obj(json!({"enabled": false})), None).await.expect("no delivery charge");
+    shop
+}
+
+/// What a customer owes in the company's currency: by the ledger, on its open items' account, and by what
+/// its open items have left.
+async fn receivable(t: &T, customer: &Value) -> (Decimal, Decimal) {
+    let customer: Uuid = customer.as_str().unwrap().parse().unwrap();
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    let both = sqlx::query_as(
+        "select (select coalesce(sum(debit - credit), 0) from journal_line where tenant_id = $1 and customer_id = $2 \
+                 and account_id in (select account_id from open_item where tenant_id = $1 and customer_id = $2)), \
+                (select coalesce(sum(base_outstanding), 0) from open_item where tenant_id = $1 and customer_id = $2)",
+    )
+    .bind(t.ctx.tenant)
+    .bind(customer)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    both
+}
+
+/// The ledger's balance (debit less credit) on the company's account of that name.
+async fn balance(t: &T, account: &str) -> Decimal {
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    let v = sqlx::query_scalar(
+        "select coalesce(sum(l.debit - l.credit), 0) from journal_line l join e_account a on a.tenant_id = l.tenant_id and a.id = l.account_id \
+         where l.tenant_id = $1 and a.account_name = $2",
+    )
+    .bind(t.ctx.tenant)
+    .bind(account)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    v
+}
+
+#[test]
+fn advances_in_another_currency_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(advances_in_another_currency()).await.unwrap() });
+}
+
+/// A web order in dollars is paid first, an advance at the payment's rate, and invoiced when it ships, at
+/// the order's rate. The advance settles the invoice, each giving up its own rupees, and what the two
+/// differ by (the invoice's base rounded part by part, or the two rates) is an exchange difference: what
+/// the ledger holds against the customer is what the open items say.
+async fn advances_in_another_currency() {
+    let Shop { t, .. } = dollar_shop("dollars").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    let pay_and_ship = |placed: &Placed| {
+        let (t, fakepay, request, so, total) = (&t, &fakepay, placed.request.unwrap(), placed.so, placed.total);
+        async move {
+            let paid = json!({"amount": total.to_string(), "currency": "USD", "gateway_reference": format!("pi_{so}")});
+            let pe = t.k.run_action(fakepay, "PaymentRequest", request, "mark_paid", paid).await.expect("paid")["payment_entry"].clone();
+            let shipped = t.k.run_action(&t.ctx, "SalesOrder", so, "web_ship", json!({"notify": "No"})).await.expect("shipped and invoiced");
+            let si = t.get("SalesInvoice", shipped["sales_invoice"]["id"].as_str().unwrap().parse().unwrap()).await;
+            (si, pe.as_str().unwrap().parse::<Uuid>().unwrap())
+        }
+    };
+    let losses = balance(&t, "Exchange Gain or Loss").await;
+
+    // A tee: 400 rupees are 4.73 dollars, and 0.85 VAT makes 5.58. The invoice is booked part by part, 399.69
+    // and 71.83 rupees: 471.52. Paid at the same rate, the 5.58 dollars are 471.51: a cent short.
+    let a = place(&t, json!([{"item": "logo-tee", "qty": 1}]), "same-rate@example.com", "fakepay", "usd-same-0001").await;
+    assert_eq!(a.total, n("5.58"));
+    let (si, _) = pay_and_ship(&a).await;
+    assert_eq!((dec(&si["base_rounded_total"]), dec(&si["outstanding_amount"]), si["status"].clone()), (n("471.52"), Decimal::ZERO, json!("Paid")));
+    assert_eq!(receivable(&t, &si["customer"]).await, (Decimal::ZERO, Decimal::ZERO), "nothing owed in rupees, by the ledger or the open items");
+    assert_eq!(balance(&t, "Exchange Gain or Loss").await - losses, n("0.01"), "the cent is a loss on exchange");
+
+    // Ordered at 84.5, paid once the rate is 85: the advance's 474.30 rupees settle the invoice's 471.52, a gain of 2.78.
+    let b = place(&t, json!([{"item": "logo-tee", "qty": 1}]), "later-rate@example.com", "fakepay", "usd-later-0001").await;
+    let (inr, usd) = (t.find_one("Currency", json!({"code": "INR"})).await, t.find_one("Currency", json!({"code": "USD"})).await);
+    let today = chrono::Utc::now().date_naive().to_string();
+    t.insert("ExchangeRate", json!({"from_currency": usd["id"], "to_currency": inr["id"], "rate": "85", "valid_from": today})).await;
+    let (si, pe) = pay_and_ship(&b).await;
+    assert_eq!(dec(&t.get("PaymentEntry", pe).await["base_paid_amount"]), n("474.30"));
+    assert_eq!(
+        (dec(&si["conversion_rate"]), dec(&si["outstanding_amount"]), si["status"].clone()),
+        (n("84.5"), Decimal::ZERO, json!("Paid")),
+        "the advance settles it"
+    );
+    assert_eq!(receivable(&t, &si["customer"]).await, (Decimal::ZERO, Decimal::ZERO));
+    assert_eq!(balance(&t, "Exchange Gain or Loss").await - losses, n("-2.77"), "a gain of 2.78 after the cent lost");
+
+    // Cancelled, the payment takes back what it gave: the invoice is owed again, at its own rupees, and the gain is gone.
+    t.k.cancel(&t.ctx, "PaymentEntry", pe, None).await.expect("cancel the payment");
+    assert_eq!(dec(&t.get("SalesInvoice", uid(&si)).await["outstanding_amount"]), n("5.58"));
+    assert_eq!(receivable(&t, &si["customer"]).await, (n("471.52"), n("471.52")));
+    assert_eq!(balance(&t, "Exchange Gain or Loss").await - losses, n("0.01"));
+}
+
+#[test]
+fn part_of_an_advance_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(part_of_an_advance()).await.unwrap() });
+}
+
+/// The part of an advance an invoice takes is converted as the company rounds. A mug and a tee are paid
+/// together, 9.07 dollars (766.42 rupees), in a company that rounds half to even; the mug ships first and
+/// is invoiced on its own: 3.49 dollars, which at 84.5 are 294.905 rupees, and the invoice is booked at
+/// 294.90 (250.12 and 44.78). The advance gives up those 294.90 for it, not 294.91: the same rate on both
+/// leaves no exchange difference, and the advance keeps 471.52.
+async fn part_of_an_advance() {
+    let Shop { t, cid, mug, .. } = dollar_shop("even-dollars").await;
+    t.k.update(&t.ctx, "Company", cid, obj(json!({"rounding_mode": "Half Even"})), None).await.expect("rounds half to even");
+    let fakepay = gateway(&t, "fakepay").await;
+    let placed = place(&t, json!([{"item": "blue-mug", "qty": 1}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "even-0001").await;
+    assert_eq!(placed.total, n("9.07"));
+    t.k.run_action(&fakepay, "PaymentRequest", placed.request.unwrap(), "mark_paid", json!({"amount": "9.07", "currency": "USD"})).await.expect("paid");
+    let so = t.get("SalesOrder", placed.so).await;
+    let mug_line = so["items"].as_array().unwrap().iter().find(|l| l["item"] == json!(mug.to_string())).unwrap()["id"].clone();
+    let shipped =
+        t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"lines": [{"line": mug_line}], "notify": "No"})).await.expect("the mug ships");
+    let note: Uuid = shipped["delivery_note"]["id"].as_str().unwrap().parse().unwrap();
+    let made = t.k.run_action(&t.ctx, "DeliveryNote", note, "make_sales_invoice", json!({})).await.expect("the mug's invoice");
+    let losses = balance(&t, "Exchange Gain or Loss").await;
+    let si = t.submit("SalesInvoice", made["id"].as_str().unwrap().parse().unwrap()).await;
+    let si = t.get("SalesInvoice", uid(&si)).await;
+    assert_eq!((dec(&si["base_rounded_total"]), dec(&si["outstanding_amount"])), (n("294.90"), Decimal::ZERO), "settled by the advance");
+    assert_eq!(receivable(&t, &si["customer"]).await, (n("-471.52"), n("-471.52")), "766.42 received, 294.90 of it taken");
+    assert_eq!(balance(&t, "Exchange Gain or Loss").await, losses, "one rate on both: no exchange difference");
+}
