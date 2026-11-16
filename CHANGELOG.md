@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.2
+
+Needs the platform that lists an action one package adds to another's entity under the adding package (Ferrum main
+44520a63). No database change, no interface change, no code change.
+
+- `request_payment` is `commerce.sales_invoice.request_payment`, owned by `commerce` at its package's version (0.6.0),
+  as 0.13.0 said it would be once the platform named such actions after the package that adds them; it was
+  `selling.sales_invoice.request_payment` before. `refund` stays `commerce.payment_request.refund`. A caller names the
+  new id. Commerce's other added actions are listed the same way (`commerce.sales_order.web_ship` and the rest of the
+  web order's).
+- The suite asks for the payment under the new id and checks that Commerce owns it; the README names both operations
+  by their ids.
+
 ## 0.13.1
 
 Needs the same platform as 0.13.0. No database change. Interface only, `ui/dist` rebuilt with Ferrum-Frontend `06bd1a2`.
