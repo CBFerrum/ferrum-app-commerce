@@ -73,6 +73,18 @@ overlays:
     ops:
       - {op: add_field, field: {name: commerce_out_notified, type: check, label: Out for Delivery Told, read_only: true, no_copy: true, hidden: true}}
       - {op: add_field, field: {name: commerce_delivered_notified, type: check, label: Delivered Told, read_only: true, no_copy: true, hidden: true}}
+  # For other apps (Bookings' deposits, LMS's courses), through the platform's gate: not a button. A person or agent
+  # reaching it through the API needs what a clerk who invoices needs (src/payment.rs, `request_payment`).
+  - entity: SalesInvoice
+    ops:
+      - {op: add_action, action: {name: request_payment, label: Request a Payment, docstatus: [1], permission: write, hidden: true, condition: "doc.outstanding_amount > 0.0",
+          params: [{name: gateway, label: Payment Method, required: true, description: "One of the store's payment methods (Store Settings), by its gateway's name"},
+                   {name: amount, label: Amount, description: "The part to ask for, as a decimal string in the invoice's currency; what is owed and not yet asked for when empty"},
+                   {name: payer_email, label: Payer Email, description: "Where the gateway writes to the payer"}],
+          contract: {effect: transactional_action,
+            returns: {type: object, properties: {payment_request: {type: string, format: uuid}, amount: {type: string}, currency: {type: string, description: "The invoice's currency, its ISO code"},
+                                                 payment_url: {type: [string, "null"], description: "Empty here: the gateway writes it after the commit"}, expires_at: {type: [string, "null"]}}},
+            completion: "A submitted payment request for the invoice, or the part asked, committed with this receipt; the gateway collects after the commit"}}}
   - entity: PaymentEntry
     ops:
       - {op: add_field, field: {name: commerce_sales_order, type: link, to: SalesOrder, label: Web Order, read_only: true, in_filter: true}}

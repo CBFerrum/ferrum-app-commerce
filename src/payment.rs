@@ -729,8 +729,50 @@ impl DocHook for PaymentEntryHook {
 /// payment.
 pub struct AdvanceHook;
 
+/// A decimal parameter given as text.
+pub(crate) fn param_amount(params: &Value, key: &str) -> Result<Option<Decimal>> {
+    param_text(params, key, 40)?.map(|a| Decimal::from_str(&a).map_err(|_| Error::field(key, "must be a decimal"))).transpose()
+}
+
+/// `request_payment`, for other apps through the platform's gate: `amount` of a submitted invoice (what is owed and
+/// not yet asked for, when empty) through the store's method `gateway`, made on the caller's behalf.
+async fn request_payment(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Value> {
+    let gateway = param_text(params, "gateway", 40)?.ok_or_else(|| Error::field("gateway", "is required"))?;
+    let part = param_amount(params, "amount")?;
+    let email = param_text(params, "payer_email", 200)?;
+    let ctx = elevated(hc.ctx);
+    let store = Store::load(hc.kernel, &ctx, hc.tx).await?;
+    let method = store.method(&gateway).cloned().ok_or_else(|| Error::field("gateway", "is not one of the store's payment methods"))?;
+    // Requests still open ask for part of what is owed: more than the rest would ask twice for the same money. The
+    // action holds the invoice's row, so two asks for one invoice take turns.
+    let open: Decimal = sqlx::query_scalar(
+        "select coalesce(sum(amount), 0) from e_payment_request where tenant_id = $1 and sales_invoice = $2 and docstatus = 1 and status = 'Initiated'",
+    )
+    .bind(hc.ctx.tenant)
+    .bind(id(doc, "id"))
+    .fetch_one(&mut **hc.tx)
+    .await?;
+    let left = d(doc, "outstanding_amount") - open;
+    let part = part.unwrap_or(left);
+    if part > left {
+        return Err(Error::invalid(format!("{} is owed and not yet asked for: ask for no more than that", left.max(Decimal::ZERO).normalize())));
+    }
+    let pr = invoice_request(hc.kernel, &ctx, hc.tx, &store, doc, &method, Some(part), email, None)
+        .await?
+        .ok_or_else(|| Error::invalid("nothing is outstanding on this invoice"))?;
+    Ok(json!({"payment_request": id(&pr, "id"), "amount": money(d(&pr, "amount")), "currency": s(&pr, "currency_code"),
+              "payment_url": s(&pr, "payment_url"), "expires_at": s(&pr, "expires_at")}))
+}
+
 #[async_trait]
 impl DocHook for AdvanceHook {
+    async fn action(&self, hc: &mut HookCtx<'_>, name: &str, doc: &Doc, params: &Value) -> Result<Option<Value>> {
+        Ok(match name {
+            "request_payment" => Some(request_payment(hc, doc, params).await?),
+            _ => None,
+        })
+    }
+
     async fn on_submit(&self, hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
         if !crate::installed(hc.ctx) || b(doc, "is_return") {
             return Ok(());

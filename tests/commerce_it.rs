@@ -2299,6 +2299,105 @@ fn sid(doc: &Doc) -> String {
     doc["id"].as_str().unwrap().to_string()
 }
 
+// ───────────────────────────── what Commerce offers other apps ─────────────────────────────
+
+#[test]
+fn payment_operations_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(payment_operations()).await.unwrap() });
+}
+
+/// A person of the workspace holding `roles`.
+async fn person(t: &T, email: &str, roles: &[&str]) -> Ctx {
+    let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
+    let u = t.k.create_user(&t.ctx, email, email, None, &roles, false).await.unwrap();
+    t.k.load_ctx(t.ctx.tenant, u, None, "it".into()).await.unwrap()
+}
+
+/// The fields a capability says it returns, sorted.
+fn returns(output: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = output["properties"].as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+/// Today the platform names an action that one package adds to another's entity after the entity's package (selling,
+/// at selling's version); once that is fixed it is `commerce.sales_invoice.request_payment`, at Commerce's version.
+const ASK: &str = "selling.sales_invoice.request_payment";
+
+/// Commerce's payments as other apps (Bookings' deposits, LMS's courses) use them: operations through the platform's
+/// gate, each once per key, in the invoice's currency, checked against what the caller may do.
+async fn payment_operations() {
+    let Shop { t, cid, mug, .. } = small_shop("payops").await;
+    let clerk = person(&t, "clerk@shop.test", &["Sales Manager"]).await;
+    let web = person(&t, "web@shop.test", &["Website Manager"]).await;
+    let customer = t.insert("Customer", json!({"customer_name": "Asha Rao", "email": GUEST})).await;
+    let draft = t
+        .insert(
+            "SalesInvoice",
+            json!({"company": cid.to_string(), "customer": sid(&customer), "items": [{"item": mug.to_string(), "qty": "4", "rate": "250"}]}),
+        )
+        .await;
+    let invoice = t.submit("SalesInvoice", uid(&draft)).await;
+    let owed = dec(&invoice["outstanding_amount"]);
+    assert!(owed > n("400"), "{owed}");
+    let asked = || t.count("PaymentRequest", json!({"sales_invoice": sid(&invoice)}));
+    let ask = |params: Value, key: &str| ferrum_kernel::capability::Invocation::new(ASK, json!({"id": sid(&invoice), "params": params})).key(key);
+
+    // ───────────── offered in the catalog, with its contract ─────────────
+    let selling = t.k.registry.catalog().package("selling").unwrap().manifest.version.clone();
+    let catalog = t.k.catalog(&clerk);
+    let c = catalog.iter().find(|c| c.id == ASK).expect("request_payment is in the catalog");
+    assert_eq!((c.owner.as_str(), c.version.as_str()), ("selling", selling.as_str()), "named after SalesInvoice's package until the platform's fix");
+    assert_eq!(c.permissions, vec!["SalesInvoice:write".to_string()]);
+    assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("transactional_action"));
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["gateway"]));
+    assert_eq!(returns(&c.output), ["amount", "currency", "expires_at", "payment_request", "payment_url"]);
+    assert!(c.completion.contains("submitted payment request"), "{}", c.completion);
+
+    // ───────────── a part of the invoice, asked for once ─────────────
+    let first = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "400", "payer_email": GUEST}), "deposit:1")).await.expect("asked for");
+    assert!(!first.repeated);
+    let pr = t.get("PaymentRequest", first.result["payment_request"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (pr["docstatus"].clone(), pr["status"].clone(), dec(&pr["amount"]), pr["gateway"].clone(), pr["payer_email"].clone()),
+        (json!(1), json!("Initiated"), n("400"), json!("fakepay"), json!(GUEST))
+    );
+    assert_eq!(pr["currency"], invoice["currency"], "in the invoice's currency");
+    assert_eq!((dec(&first.result["amount"]), first.result["currency"].clone()), (n("400"), json!("INR")));
+    assert_eq!(first.result["expires_at"], pr["expires_at"]);
+    assert!(!pr["expires_at"].is_null(), "fakepay's requests lapse after 30 minutes");
+    // The answer was lost on its way back, so the caller asks again with the same key: it is told what was done.
+    let again = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "400", "payer_email": GUEST}), "deposit:1")).await.expect("answered");
+    assert!(again.repeated);
+    assert_eq!(again.result, first.result);
+    assert_eq!(asked().await, 1, "one request, however often it is asked");
+    let other = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "500", "payer_email": GUEST}), "deposit:1")).await;
+    assert_eq!(other.as_ref().map_err(Error::code).unwrap_err(), "input_changed", "another amount is another request: {other:?}");
+
+    // ───────────── more than is left to ask: refused, nothing kept, not even the key ─────────────
+    let left = owed - n("400");
+    let over = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": (left + n("1")).to_string()}), "deposit:2")).await;
+    assert_eq!(over.as_ref().map_err(Error::code).unwrap_err(), "invalid", "{over:?}");
+    assert_eq!(asked().await, 1);
+    // Without an amount: the rest of what is owed, beside what is already asked for.
+    let rest = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay"}), "deposit:2")).await.expect("the rest asked for");
+    assert!(!rest.repeated, "the refused call kept no receipt");
+    assert_eq!(dec(&rest.result["amount"]), left);
+    assert_eq!(asked().await, 2);
+    let more = t.k.invoke(&clerk, ask(json!({"gateway": "fakepay", "amount": "1"}), "deposit:3")).await;
+    assert_eq!(more.as_ref().map_err(Error::code).unwrap_err(), "invalid", "all of it is asked for already: {more:?}");
+    let nowhere = t.k.invoke(&clerk, ask(json!({"gateway": "nopay"}), "deposit:4")).await;
+    assert_eq!(field_error(&nowhere.map(|r| r.result), "gateway"), "is not one of the store's payment methods");
+    assert_eq!(asked().await, 2);
+
+    // ───────────── who may ask ─────────────
+    let reader = t.k.invoke(&web, ask(json!({"gateway": "fakepay", "amount": "1"}), "deposit:5")).await;
+    assert_eq!(reader.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "reading invoices is not enough: {reader:?}");
+    assert_eq!(asked().await, 2);
+}
+
 #[test]
 fn order_edits_end_to_end() {
     let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
