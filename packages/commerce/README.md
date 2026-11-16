@@ -459,5 +459,3 @@ shopper revives them) and carts idle for *cart expiry days* as `Expired` (frozen
   posted by hand), and an order must be invoiced before goods can be returned. A tax template with fixed
   (`Actual`) charges is left out of a partial credit note.
 * Expired carts are kept (with their contact details) until deleted by staff.
-* Advances in another currency at a different booked rate are left for the accountant to
-  allocate (an exchange difference needs a journal entry).
