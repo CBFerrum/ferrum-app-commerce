@@ -2256,14 +2256,14 @@ async fn subscriptions() {
     }
 
     // ───────────── part of a payment goes back, as the app that took it decides ─────────────
-    let refund = {
-        let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
-        let r = ferrum_app_commerce::refund_payment(&t.k, &t.ctx, &mut tx, uid(&renewal), n("100"), None, "A goodwill gesture").await.expect("asked for");
-        let too_much = ferrum_app_commerce::refund_payment(&t.k, &t.ctx, &mut tx, uid(&renewal), total, None, "Everything").await;
-        assert!(too_much.is_err(), "no more than the payment holds: {too_much:?}");
-        tx.commit().await.unwrap();
-        uid(&r)
+    let back = |amount: Decimal, note: &str, key: &str| {
+        let params = json!({"amount": amount.to_string(), "note": note});
+        ferrum_kernel::capability::Invocation::new("commerce.payment_request.refund", json!({"id": sid(&renewal), "params": params})).key(key)
     };
+    let refund = t.k.invoke(&t.ctx, back(n("100"), "A goodwill gesture", "goodwill")).await.expect("asked for");
+    let refund: Uuid = refund.result["refund"].as_str().unwrap().parse().unwrap();
+    let too_much = t.k.invoke(&t.ctx, back(total, "Everything", "everything")).await;
+    assert!(too_much.is_err(), "no more than the payment holds: {too_much:?}");
     let asked = t.get("OrderRefund", refund).await;
     assert_eq!(
         (asked["kind"].clone(), asked["status"].clone(), dec(&asked["amount"]), asked["gateway"].clone()),

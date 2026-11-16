@@ -283,7 +283,7 @@ Every minute, one replica at a time: expire overdue payment requests (cancelling
 | Stripe, PayPal, Razorpay | Built as WebAssembly plugins in `gateways/`; webhooks signed and checked | Your own provider account, keys and webhook |
 | Finance | The Store Subscriptions connector sells plans | Finance installed |
 | Stock Operations | Generate Variants | Installed |
-| Bookings and other apps | Ask for a payment or a part refund through the platform's gate: the operations `commerce.sales_invoice.request_payment` on a submitted SalesInvoice and `commerce.payment_request.refund` on a paid PaymentRequest, each once per key (`request_invoice_payment` and `refund_payment` stay until Bookings and LMS move) | The other app installed |
+| Bookings and other apps | Ask for a payment or a part refund through the platform's gate: the operations `commerce.sales_invoice.request_payment` on a submitted SalesInvoice and `commerce.payment_request.refund` on a paid PaymentRequest, each once per key | The other app installed |
 | Retail | Returns at a store against Commerce's invoice; the same stock and customers | Retail installed |
 | Mail, Campaigns | Shopper mails are message templates; events feed journeys | Mail installed |
 | Carriers | ERP's carrier shipments are read to tell the shopper | A carrier connection in ERP |
