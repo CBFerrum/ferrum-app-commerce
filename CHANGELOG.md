@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1
+
+Needs the same platform as 0.13.0. No database change. Interface only, `ui/dist` rebuilt with Ferrum-Frontend `06bd1a2`.
+
+- The two routes to the screens apps no longer have (`apps/:app/settings`, `x/:app/:page`) are gone.
+- The page starts through the frontend's `mountApp`; the interface lint has no baseline file any more.
+
 ## 0.13.0
 
 The `commerce` package is 0.6.0. No database change. Needs no newer ERP or platform.
