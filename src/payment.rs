@@ -9,7 +9,7 @@
 use crate::store::{PaymentMethod, Store, is_offline, notify_managers, valid_gateway};
 use async_trait::async_trait;
 use ferrum_app_erp::ledger::{self, Entry, Line};
-use ferrum_domain::util::{b, company, currency, d, elevated, get, id, money, round, rows, s, set, sys};
+use ferrum_domain::util::{b, company, currency, d, elevated, get, id, money, rows, s, set, sys};
 use ferrum_kernel::value::parse_datetime;
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, HookCtx, Kernel, Result, Tx, outbox};
 use rust_decimal::Decimal;
@@ -721,11 +721,12 @@ impl DocHook for PaymentEntryHook {
 
 /// Applies a web order's advance payments to its invoice when the invoice is submitted, as if the
 /// payment had referenced it (same receivable account). Each side gives up its own base, the invoice
-/// at the rate it was raised at and the payment at the rate it was received at (either all it has
-/// left when this clears it); what the two differ by, the two rates or the invoice's base rounded part
-/// by part, is an exchange difference cleared from the receivable. It is booked under the payment, as
-/// the allocations are, so cancelling the payment takes it back with them; cancelling the invoice
-/// requires cancelling the payment first, as for any allocated payment.
+/// at the rate it was raised at and the payment at the rate it was received at, converted as the
+/// company rounds (either all it has left when this clears it); what the two differ by, the two rates
+/// or the invoice's base rounded part by part, is an exchange difference cleared from the receivable.
+/// It is booked under the payment, as the allocations are, so cancelling the payment takes it back
+/// with them; cancelling the invoice requires cancelling the payment first, as for any allocated
+/// payment.
 pub struct AdvanceHook;
 
 #[async_trait]
@@ -766,7 +767,7 @@ impl DocHook for AdvanceHook {
                 continue;
             }
             let amount = inv.outstanding.min(-adv.outstanding);
-            let at = |rate: Decimal| round(amount * rate, co.precision);
+            let at = |rate: Decimal| ledger::round_as(amount * rate, co.precision, co.rounding);
             let base_inv = ledger::allocate(hc.tx, hc.ctx, co.id, invoice, "PaymentEntry", pe, on, amount, at(inv.exchange_rate)).await?;
             let base_adv = -ledger::allocate(hc.tx, hc.ctx, co.id, pe, "PaymentEntry", pe, on, -amount, -at(adv.exchange_rate)).await?;
             let diff = base_inv - base_adv;

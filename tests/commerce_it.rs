@@ -3707,3 +3707,36 @@ async fn advances_in_another_currency() {
     assert_eq!(receivable(&t, &si["customer"]).await, (n("471.52"), n("471.52")));
     assert_eq!(balance(&t, "Exchange Gain or Loss").await - losses, n("0.01"));
 }
+
+#[test]
+fn part_of_an_advance_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(part_of_an_advance()).await.unwrap() });
+}
+
+/// The part of an advance an invoice takes is converted as the company rounds. A mug and a tee are paid
+/// together, 9.07 dollars (766.42 rupees), in a company that rounds half to even; the mug ships first and
+/// is invoiced on its own: 3.49 dollars, which at 84.5 are 294.905 rupees, and the invoice is booked at
+/// 294.90 (250.12 and 44.78). The advance gives up those 294.90 for it, not 294.91: the same rate on both
+/// leaves no exchange difference, and the advance keeps 471.52.
+async fn part_of_an_advance() {
+    let Shop { t, cid, mug, .. } = dollar_shop("even-dollars").await;
+    t.k.update(&t.ctx, "Company", cid, obj(json!({"rounding_mode": "Half Even"})), None).await.expect("rounds half to even");
+    let fakepay = gateway(&t, "fakepay").await;
+    let placed = place(&t, json!([{"item": "blue-mug", "qty": 1}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "even-0001").await;
+    assert_eq!(placed.total, n("9.07"));
+    t.k.run_action(&fakepay, "PaymentRequest", placed.request.unwrap(), "mark_paid", json!({"amount": "9.07", "currency": "USD"})).await.expect("paid");
+    let so = t.get("SalesOrder", placed.so).await;
+    let mug_line = so["items"].as_array().unwrap().iter().find(|l| l["item"] == json!(mug.to_string())).unwrap()["id"].clone();
+    let shipped =
+        t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"lines": [{"line": mug_line}], "notify": "No"})).await.expect("the mug ships");
+    let note: Uuid = shipped["delivery_note"]["id"].as_str().unwrap().parse().unwrap();
+    let made = t.k.run_action(&t.ctx, "DeliveryNote", note, "make_sales_invoice", json!({})).await.expect("the mug's invoice");
+    let losses = balance(&t, "Exchange Gain or Loss").await;
+    let si = t.submit("SalesInvoice", made["id"].as_str().unwrap().parse().unwrap()).await;
+    let si = t.get("SalesInvoice", uid(&si)).await;
+    assert_eq!((dec(&si["base_rounded_total"]), dec(&si["outstanding_amount"])), (n("294.90"), Decimal::ZERO), "settled by the advance");
+    assert_eq!(receivable(&t, &si["customer"]).await, (n("-471.52"), n("-471.52")), "766.42 received, 294.90 of it taken");
+    assert_eq!(balance(&t, "Exchange Gain or Loss").await, losses, "one rate on both: no exchange difference");
+}
