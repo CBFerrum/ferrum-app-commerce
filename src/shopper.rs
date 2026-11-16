@@ -20,8 +20,8 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 /// The link in an order confirmation: the actions the store lets shoppers take, on this order, for as long
-/// as the longest of its windows (90 days at most). `None` when the store lets them none, or has no
-/// secret key to keep the token sealed while its mail waits (it is never sent in the clear). The address
+/// as the longest of its windows (90 days at most). `None` when the store lets them none, or the platform
+/// cannot keep the token sealed while its mail waits (it is never sent in the clear). The address
 /// comes in two parts, its start and its token, because a mail's HTML escapes what it prints (the slashes of
 /// an address) and a secret value is masked only where it is printed as it is: the token alone is.
 pub async fn manage_link(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: Uuid, email: Option<&str>) -> Option<(String, String)> {
@@ -34,7 +34,7 @@ pub async fn manage_link(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: 
         actions.push("web_shopper_return".to_string());
     }
     if actions.is_empty()
-        || k.settings.secret_key.is_none()
+        || !k.seals_secret_values()
         || ctx.schema.entity("SalesOrder").is_none_or(|e| e.def.actions.iter().all(|a| a.name != "web_shopper_cancel"))
     {
         return None;
