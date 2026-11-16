@@ -2321,9 +2321,8 @@ fn returns(output: &Value) -> Vec<String> {
     keys
 }
 
-/// Today the platform names an action that one package adds to another's entity after the entity's package (selling,
-/// at selling's version); once that is fixed it is `commerce.sales_invoice.request_payment`, at Commerce's version.
-const ASK: &str = "selling.sales_invoice.request_payment";
+/// An action one package adds to another's entity is the adding package's: Commerce's, at Commerce's version.
+const ASK: &str = "commerce.sales_invoice.request_payment";
 
 /// Commerce's payments as other apps (Bookings' deposits, LMS's courses) use them: operations through the platform's
 /// gate, each once per key, in the invoice's currency, checked against what the caller may do.
@@ -2345,10 +2344,10 @@ async fn payment_operations() {
     let ask = |params: Value, key: &str| ferrum_kernel::capability::Invocation::new(ASK, json!({"id": sid(&invoice), "params": params})).key(key);
 
     // ───────────── offered in the catalog, with its contract ─────────────
-    let selling = t.k.registry.catalog().package("selling").unwrap().manifest.version.clone();
+    let commerce = t.k.registry.catalog().package("commerce").unwrap().manifest.version.clone();
     let catalog = t.k.catalog(&clerk);
     let c = catalog.iter().find(|c| c.id == ASK).expect("request_payment is in the catalog");
-    assert_eq!((c.owner.as_str(), c.version.as_str()), ("selling", selling.as_str()), "named after SalesInvoice's package until the platform's fix");
+    assert_eq!((c.owner.as_str(), c.version.as_str()), ("commerce", commerce.as_str()), "the package that added it, at its version");
     assert_eq!(c.permissions, vec!["SalesInvoice:write".to_string()]);
     assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("transactional_action"));
     assert_eq!(c.input["properties"]["params"]["required"], json!(["gateway"]));
@@ -2398,7 +2397,6 @@ async fn payment_operations() {
 
     // ───────────── refund: offered in the catalog, with its contract ─────────────
     const REFUND: &str = "commerce.payment_request.refund";
-    let commerce = t.k.registry.catalog().package("commerce").unwrap().manifest.version.clone();
     let c = catalog.iter().find(|c| c.id == REFUND).expect("refund is in the catalog");
     assert_eq!((c.owner.as_str(), c.version.as_str()), ("commerce", commerce.as_str()));
     assert_eq!(c.permissions, vec!["PaymentRequest:write".to_string()]);
