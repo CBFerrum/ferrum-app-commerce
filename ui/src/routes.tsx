@@ -9,7 +9,7 @@ import { CommerceHome } from "./Home";
 import { NeedsStore } from "./NeedsStore";
 
 /** A page of the records frame, loaded when first opened. */
-const page = (name: "FormView" | "ListView" | "ReportView" | "AppSettingsPage" | "ScreenPage") => () =>
+const page = (name: "FormView" | "ListView" | "ReportView") => () =>
   import("./records").then((m) => ({ Component: m[name] }));
 
 /** Commerce's package: the sidebar shows its module. */
@@ -62,8 +62,6 @@ export const routes: RouteObject[] = [
         { path: "e/:entity", lazy: page("ListView") },
         { path: "e/:entity/:id", lazy: page("FormView") },
         { path: "r/:name", lazy: page("ReportView") },
-        { path: "apps/:app/settings", lazy: page("AppSettingsPage") },
-        { path: "x/:app/:page", lazy: page("ScreenPage") },
         { path: "*", element: <NotFound /> },
       ],
     },
