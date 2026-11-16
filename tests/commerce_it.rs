@@ -5,7 +5,6 @@
 //! public and signed in — and confirms payments the way a gateway plugin does: as its service
 //! user, through the payment request's `mark_paid` action.
 
-use ferrum_kernel::secret::SecretKey;
 use ferrum_kernel::tenant::NewTenant;
 use ferrum_kernel::{Ctx, Db, DbConfig, Doc, Error, HookRegistry, Kernel, KernelSettings, ListQuery, Site, SiteRequest};
 use ferrum_meta::{Catalog, PermissionDef};
@@ -65,9 +64,21 @@ async fn kernel(db: Db) -> Arc<Kernel> {
     for source in ferrum_app_commerce::reports() {
         ferrum_domain::reports::add_source(source);
     }
-    // Messages with a secret value (a gift card's code) are sealed with the server's key while they wait.
-    let settings = KernelSettings { secret_key: Some(SecretKey::new(SECRET)), ..Default::default() };
-    Kernel::boot(db, catalog, hooks, settings, None).await.expect("boot")
+    // Messages with a secret value (a gift card's code) are sealed by the vault while they wait; the mailer opens them.
+    Kernel::boot(db, catalog, hooks, KernelSettings::default(), Some(Arc::new(Captured))).await.expect("boot")
+}
+
+/// What the server's mailer was handed, in order: (to, subject, html). Each fresh kernel starts it afresh.
+static SENT: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+struct Captured;
+
+#[async_trait::async_trait]
+impl ferrum_kernel::Mailer for Captured {
+    async fn send(&self, to: &str, subject: &str, html: &str) -> ferrum_kernel::Result<()> {
+        SENT.lock().unwrap_or_else(|e| e.into_inner()).push((to.to_string(), subject.to_string(), html.to_string()));
+        Ok(())
+    }
 }
 
 async fn fresh_kernel() -> Arc<Kernel> {
@@ -82,29 +93,17 @@ async fn fresh_kernel() -> Arc<Kernel> {
         ..Default::default()
     };
     ferrum_kernel::vault::open(&db, opener, false).await.expect("the vault");
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let k = kernel(db).await;
     ferrum_domain::maintenance(&k).await.expect("maintenance");
     ferrum_app_erp::maintenance(&k).await.expect("maintenance");
     k
 }
 
-const SECRET: [u8; 32] = [7; 32];
-
-/// The mails queued to `to` with what the outbox holds sealed opened (a secret value's place, otherwise).
+/// The mails sent to `to`, oldest first, as the mailer got them (secret values opened): the outbox handed over.
 async fn opened_mails(t: &T, to: &str) -> Vec<(String, String)> {
-    let key = SecretKey::new(SECRET);
-    events(t, "ferrum.mail")
-        .await
-        .iter()
-        .filter(|m| m["to"] == json!(to))
-        .map(|m| match m["sealed"].as_str() {
-            Some(sealed) => {
-                let open: Value = serde_json::from_str(&key.open(&format!("{}/message", t.ctx.tenant), sealed).unwrap()).unwrap();
-                (open["subject"].as_str().unwrap().to_string(), open["html"].as_str().unwrap().to_string())
-            }
-            None => (m["subject"].as_str().unwrap_or_default().to_string(), m["html"].as_str().unwrap_or_default().to_string()),
-        })
-        .collect()
+    while t.k.dispatch_outbox_once().await.unwrap_or(0) > 0 {}
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|m| m.0 == to).map(|m| (m.1.clone(), m.2.clone())).collect()
 }
 
 /// A gateway's service user, as its plugin acts.
@@ -1414,7 +1413,7 @@ async fn gift_cards() {
     let body = &sent[0].1;
     let code = body.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
     assert!(code.len() >= 8 && body.contains("500"), "{body}");
-    // While it waits for the mailer the outbox holds the code sealed, and only a placeholder where it goes.
+    // The outbox holds only a placeholder where the code goes: the code was sealed while it waited, and the mailer opened it.
     let waiting = mails(&t, "giver@example.com").await.into_iter().filter(|(s, _)| s.contains("gift card")).collect::<Vec<_>>();
     assert!(waiting.len() == 1 && !waiting[0].1.contains(&code) && waiting[0].1.contains("••••••"), "the code is not in the clear in the outbox: {waiting:?}");
     let account = t.find_one("StoredValueAccount", json!({"kind": sid(&kind)})).await;
