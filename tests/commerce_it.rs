@@ -2396,6 +2396,48 @@ async fn payment_operations() {
     let reader = t.k.invoke(&web, ask(json!({"gateway": "fakepay", "amount": "1"}), "deposit:5")).await;
     assert_eq!(reader.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "reading invoices is not enough: {reader:?}");
     assert_eq!(asked().await, 2);
+
+    // ───────────── refund: offered in the catalog, with its contract ─────────────
+    const REFUND: &str = "commerce.payment_request.refund";
+    let commerce = t.k.registry.catalog().package("commerce").unwrap().manifest.version.clone();
+    let c = catalog.iter().find(|c| c.id == REFUND).expect("refund is in the catalog");
+    assert_eq!((c.owner.as_str(), c.version.as_str()), ("commerce", commerce.as_str()));
+    assert_eq!(c.permissions, vec!["PaymentRequest:write".to_string()]);
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["amount", "note"]));
+    assert_eq!(returns(&c.output), ["amount", "refund"]);
+    assert!(c.completion.contains("approves"), "{}", c.completion);
+
+    // ───────────── a paid request's money asked back, once ─────────────
+    let paid: Uuid = first.result["payment_request"].as_str().unwrap().parse().unwrap();
+    let unpaid: Uuid = rest.result["payment_request"].as_str().unwrap().parse().unwrap();
+    let fakepay = gateway(&t, "fakepay").await;
+    pay(&t, &fakepay, paid, n("400"), "pi_deposit").await;
+    let refunds = |pr: Uuid| t.count("OrderRefund", json!({"payment_request": pr.to_string()}));
+    let back =
+        |pr: Uuid, params: Value, key: &str| ferrum_kernel::capability::Invocation::new(REFUND, json!({"id": pr.to_string(), "params": params})).key(key);
+    let one = t.k.invoke(&clerk, back(paid, json!({"amount": "150", "note": "Cancelled in time"}), "deposit-refund:1")).await.expect("asked for");
+    let refund = t.get("OrderRefund", one.result["refund"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(
+        (refund["status"].clone(), refund["kind"].clone(), dec(&refund["amount"]), refund["payment_request"].clone(), refund["requested_by"].clone()),
+        (json!("Requested"), json!("Payment"), n("150"), json!(paid.to_string()), json!("clerk@shop.test"))
+    );
+    assert_eq!(dec(&one.result["amount"]), n("150"));
+    let again = t.k.invoke(&clerk, back(paid, json!({"amount": "150", "note": "Cancelled in time"}), "deposit-refund:1")).await.expect("answered");
+    assert!(again.repeated);
+    assert_eq!(again.result, one.result);
+    assert_eq!(refunds(paid).await, 1, "one refund, however often it is asked");
+    let too_much = t.k.invoke(&clerk, back(paid, json!({"amount": "300", "note": "The rest and more"}), "deposit-refund:2")).await;
+    assert_eq!(too_much.as_ref().map_err(Error::code).unwrap_err(), "invalid", "250 is left of 400: {too_much:?}");
+    assert_eq!(refunds(paid).await, 1);
+
+    // ───────────── refused: an unpaid request, and one who only reads requests ─────────────
+    let nothing = t.k.invoke(&clerk, back(unpaid, json!({"amount": "10", "note": "Not paid yet"}), "deposit-refund:3")).await;
+    assert_eq!(nothing.as_ref().map_err(Error::code).unwrap_err(), "invalid", "{nothing:?}");
+    assert_eq!(refunds(unpaid).await, 0);
+    let reader = person(&t, "sales@shop.test", &["Sales User"]).await;
+    let refused = t.k.invoke(&reader, back(paid, json!({"amount": "10", "note": "Goodwill"}), "deposit-refund:4")).await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    assert_eq!(refunds(paid).await, 1);
 }
 
 #[test]

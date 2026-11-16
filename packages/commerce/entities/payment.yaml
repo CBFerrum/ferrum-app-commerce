@@ -58,6 +58,20 @@
         - {name: reason, type: text, label: Reason}
         - {name: gateway_reference, type: data, label: Gateway Reference}
     - {name: report_exception, label: Report Exception, docstatus: [1, 2], permission: write, hidden: true}
+    # For other apps (Bookings' deposits, LMS's courses), through the platform's gate: not a button (src/payment.rs, `refund`).
+    - name: refund
+      label: Refund
+      docstatus: [1]
+      permission: write
+      hidden: true
+      params:
+        - {name: amount, label: Amount, required: true, description: "What goes back, as a decimal string in the request's currency: no more than the payment holds beyond its other refunds"}
+        - {name: credit_note, label: Credit Note, type: link, to: SalesInvoice, description: "The credit note the calling app made against the invoice, when it made one"}
+        - {name: note, label: Note, required: true, description: "Why, for the person who approves it"}
+      contract:
+        effect: transactional_action
+        returns: {type: object, properties: {refund: {type: string, format: uuid}, amount: {type: string}}}
+        completion: "A refund in state Requested for part or all of a paid request, committed with this receipt; a person approves it and the gateway sends the money after the commit"
   list: {columns: [number, order_number, gateway, amount, status], sort: created_at desc}
 
 - name: PaymentException

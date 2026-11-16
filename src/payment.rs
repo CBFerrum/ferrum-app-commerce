@@ -506,6 +506,17 @@ async fn report_exception(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Re
     Ok(json!({"exception": made}))
 }
 
+/// `refund`, for other apps through the platform's gate: `amount` of a paid request asked back, with `refund_payment`.
+async fn refund(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Value> {
+    let amount = param_amount(params, "amount")?.ok_or_else(|| Error::field("amount", "is required"))?;
+    let note = param_text(params, "note", 2000)?.ok_or_else(|| Error::field("note", "is required"))?;
+    let credit_note =
+        param_text(params, "credit_note", 40)?.map(|c| c.parse::<Uuid>().map_err(|_| Error::field("credit_note", "is not a record id"))).transpose()?;
+    let pr = id(doc, "id").ok_or_else(|| Error::internal("payment request without id"))?;
+    let made = crate::refund::refund_payment(hc.kernel, hc.ctx, hc.tx, pr, amount, credit_note, &note).await?;
+    Ok(json!({"refund": id(&made, "id"), "amount": money(d(&made, "amount"))}))
+}
+
 /// Money a gateway took and could not book. A person decides what happens to it: a gateway may
 /// report one and carry out the refund it was told to, but it never approves one, so a gateway that
 /// goes wrong cannot send money out by itself.
@@ -625,6 +636,7 @@ impl DocHook for PaymentRequestHook {
             "mark_failed" => mark_failed(hc, doc, params).await?,
             "report_exception" => report_exception(hc, doc, params).await?,
             "set_gateway_details" => set_gateway_details(hc, doc, params).await?,
+            "refund" => refund(hc, doc, params).await?,
             _ => return Ok(None),
         }))
     }
