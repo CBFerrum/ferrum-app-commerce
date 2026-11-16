@@ -9,6 +9,7 @@ use crate::shipping::{Place, Rule, enabled_rules};
 use crate::store::{Store, valid_country};
 use crate::token;
 use async_trait::async_trait;
+use ferrum_app_erp::portal;
 use ferrum_app_erp::pricing::{Side, calculate};
 use ferrum_app_erp::promotion;
 use ferrum_domain::util::{b, d, get, id, money, round, rows, s, set};
@@ -162,7 +163,7 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
     // A recognised customer (the cart's, or the signed-in shopper's) is priced from their own price list.
     let customer = match (id(doc, "customer"), s(doc, "user_email")) {
         (Some(c), _) => Some(c),
-        (None, Some(email)) => crate::orders::linked_customers(k, ctx, tx, email).await?.into_iter().next(),
+        (None, Some(email)) => portal::customers_of(k, ctx, tx, email).await?.into_iter().next(),
         _ => None,
     };
     let store = Store::load(k, ctx, tx).await?.for_customer(tx, ctx.tenant, customer).await?;

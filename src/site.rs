@@ -9,6 +9,7 @@ use crate::checkout::{self, Checkout};
 use crate::store::Store;
 use crate::{cart, edit, orders, refund, subscriptions, token};
 use async_trait::async_trait;
+use ferrum_app_erp::portal::customers_of;
 use ferrum_domain::util::{id, s};
 use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
 use rust_decimal::Decimal;
@@ -83,7 +84,7 @@ fn qty(body: &Map<String, Value>, default: Option<Decimal>) -> Result<Decimal> {
 /// The signed-in caller's customer (for their prices), if any.
 async fn customer_of(k: &Kernel, r: &Req<'_>, tx: &mut Tx) -> Result<Option<Uuid>> {
     match r.user {
-        Some(u) => Ok(orders::linked_customers(k, &r.ctx, tx, &u.email).await?.into_iter().next()),
+        Some(u) => Ok(customers_of(k, &r.ctx, tx, &u.email).await?.into_iter().next()),
         None => Ok(None),
     }
 }
@@ -127,7 +128,7 @@ async fn cart_op(k: &Kernel, r: &Req<'_>, op: CartOp) -> Result<Value> {
 async fn attach_user(k: &Kernel, r: &Req<'_>, tx: &mut Tx, cart: Doc) -> Result<Doc> {
     let Some(u) = r.user else { return Ok(cart) };
     let email = u.email.to_lowercase();
-    let customer = if id(&cart, "customer").is_none() { orders::linked_customers(k, &r.ctx, tx, &email).await?.into_iter().next() } else { None };
+    let customer = if id(&cart, "customer").is_none() { customers_of(k, &r.ctx, tx, &email).await?.into_iter().next() } else { None };
     if customer.is_none() && s(&cart, "user_email") == Some(email.as_str()) {
         return Ok(cart);
     }

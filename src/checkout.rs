@@ -58,7 +58,7 @@ fn from_cart(store: &Store, cart: &Doc) -> Doc {
 /// checkout makes a new guest customer.
 async fn resolve_customer(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, user: Option<&Ctx>) -> Result<(Uuid, bool)> {
     if let Some(u) = user {
-        if let Some(c) = orders::linked_customers(k, ctx, tx, &u.email).await?.first() {
+        if let Some(c) = portal::customers_of(k, ctx, tx, &u.email).await?.first() {
             return Ok((*c, false));
         }
         let (c, made) = portal::customer_for(k, ctx, tx, s(cart, "contact_name").unwrap_or(&u.email), Some(&u.email), s(cart, "phone")).await?;

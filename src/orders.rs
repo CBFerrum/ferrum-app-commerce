@@ -2,13 +2,15 @@
 //! checkout), signed-in customers' orders and invoices, reordering and paying again after a
 //! failed or expired payment.
 //!
-//! A signed-in user is linked to the customers whose email is theirs — on the customer, or on
-//! a CRM contact of it — except guest customers: their email was never verified, so whoever
-//! typed it must not inherit (or expose) those orders.
+//! A signed-in user acts for the customers ERP's portal finds for their address
+//! (`portal::customers_of`: the customer's own email, or one of its contacts'), never a guest
+//! customer, whose email was never verified, so whoever typed it must not inherit (or expose)
+//! those orders.
 
 use crate::cart;
 use crate::store::{Store, valid_gateway};
 use crate::{payment, token};
+use ferrum_app_erp::portal::customers_of;
 use ferrum_domain::util::{b, currency, d, find, get, id, rows, s};
 use ferrum_kernel::vault::Derived;
 use ferrum_kernel::{Ctx, Doc, Error, Filter, Kernel, ListQuery, Op, Result, Tx};
@@ -16,31 +18,6 @@ use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
-
-/// Customers a signed-in email may act for, oldest first.
-pub async fn linked_customers(k: &Kernel, ctx: &Ctx, tx: &mut Tx, email: &str) -> Result<Vec<Uuid>> {
-    let email = email.trim().to_lowercase();
-    if email.is_empty() {
-        return Ok(vec![]);
-    }
-    let mut out: Vec<Uuid> = Vec::new();
-    let direct =
-        find(k, ctx, tx, "Customer", vec![Filter::eq("email", email.clone()), Filter::eq("commerce_guest", false)], Some("created_at asc"), 50).await?;
-    out.extend(direct.iter().filter(|c| !b(c, "disabled")).filter_map(|c| id(c, "id")));
-    if ctx.schema.entity("Contact").is_some_and(|c| c.field("emails").is_some() && c.field("customer").is_some()) {
-        let contacts = find(k, ctx, tx, "Contact", vec![Filter::eq("emails.email", email)], Some("created_at asc"), 50).await?;
-        for cust in contacts.iter().filter_map(|c| id(c, "customer")) {
-            if out.contains(&cust) {
-                continue;
-            }
-            let c = get(k, ctx, tx, "Customer", cust).await?;
-            if !b(&c, "commerce_guest") && !b(&c, "disabled") {
-                out.push(cust);
-            }
-        }
-    }
-    Ok(out)
-}
 
 pub fn request_view(pr: &Doc, store: &Store) -> Value {
     let gateway = s(pr, "gateway").unwrap_or_default();
@@ -243,7 +220,7 @@ pub async fn guest_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, number: &str, email
 /// A signed-in customer's own order by number.
 pub async fn own_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, user: &Ctx, number: &str) -> Result<Doc> {
     let so = web_order_any(k, ctx, tx, number).await?.ok_or_else(|| Error::NotFound("order".into()))?;
-    let mine = linked_customers(k, ctx, tx, &user.email).await?;
+    let mine = customers_of(k, ctx, tx, &user.email).await?;
     if !id(&so, "customer").is_some_and(|c| mine.contains(&c)) {
         return Err(Error::NotFound("order".into()));
     }
@@ -329,7 +306,7 @@ async fn code_of(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cache: &mut HashMap<Uuid, S
 /// A page of the signed-in customer's orders (newest first) or invoices.
 pub async fn own_documents(k: &Kernel, ctx: &Ctx, user: &Ctx, entity: &str, cursor: Option<String>) -> Result<Value> {
     let mut tx = k.db.tenant_tx(ctx.tenant).await?;
-    let mine = linked_customers(k, ctx, &mut tx, &user.email).await?;
+    let mine = customers_of(k, ctx, &mut tx, &user.email).await?;
     let key = if entity == "SalesOrder" { "orders" } else { "invoices" };
     if mine.is_empty() {
         tx.commit().await?;
