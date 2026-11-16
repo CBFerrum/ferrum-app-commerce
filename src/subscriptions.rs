@@ -4,11 +4,12 @@
 //! makes gets a payment request through the order's payment method, and the customer sees, pays and
 //! cancels their own subscriptions in the portal. Cancelling the web order cancels what it started.
 
-use crate::orders::{linked_customers, request_view};
+use crate::orders::request_view;
 use crate::payment;
 use crate::store::Store;
 use async_trait::async_trait;
 use chrono::{Duration, Months, NaiveDate};
+use ferrum_app_erp::portal::customers_of;
 use ferrum_domain::util::{b, d, elevated, find, get, id, rows, s, sys};
 use ferrum_kernel::value::parse_date;
 use ferrum_kernel::{Ctx, Doc, DocHook, Error, Filter, HookCtx, Kernel, Result, Tx};
@@ -139,7 +140,7 @@ pub async fn entitled(tx: &mut Tx, tenant: Uuid, customer: Uuid, plan: Uuid) -> 
 /// The signed-in user's store subscriptions: each with its plans, its status and whether it gives
 /// what it sells, its period, and its renewal invoices still to pay with the request that pays each.
 pub async fn own(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, user: &Ctx) -> Result<Value> {
-    let customers = linked_customers(k, ctx, tx, &user.email).await?;
+    let customers = customers_of(k, ctx, tx, &user.email).await?;
     let subs: Vec<Uuid> = sqlx::query_scalar(
         "select id from e_subscription where tenant_id = $1 and customer = any($2) and csub_sales_order is not null order by created_at desc limit 100",
     )
@@ -192,7 +193,7 @@ async fn unpaid(k: &Kernel, ctx: &Ctx, tx: &mut Tx, sub: Uuid) -> Result<Vec<Doc
 
 /// One of the signed-in user's store subscriptions, by number.
 async fn own_one(k: &Kernel, ctx: &Ctx, tx: &mut Tx, user: &Ctx, number: &str) -> Result<Doc> {
-    let customers = linked_customers(k, ctx, tx, &user.email).await?;
+    let customers = customers_of(k, ctx, tx, &user.email).await?;
     let sid: Option<Uuid> =
         sqlx::query_scalar("select id from e_subscription where tenant_id = $1 and number = $2 and customer = any($3) and csub_sales_order is not null")
             .bind(ctx.tenant)

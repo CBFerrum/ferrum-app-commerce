@@ -177,9 +177,9 @@ rows no longer available / out of stock, `coupon_code`), `409` (`expected_total`
 the message has the new total —, cart already ordered or expired), `403` guest checkout
 disabled. Keep `order_token`: it is the guest's key to the order. It is `v{n}.{mac}`, an HMAC-SHA256 of the
 order under a key derived from Commerce's own key in the platform's vault (`order-links`, version `n`), kept nowhere;
-while the vault is closed, checkout and the order endpoints answer `503`. A token from before 0.11 (43 characters, no
-dot) was signed with the key then kept in `commerce_secret`: that key, sealed in the vault since, still opens the
-orders made before 0.11, never one made since (`commerce_order_signed`).
+while the vault is closed, checkout and the order endpoints answer `503`. A new version of Commerce's key signs from
+then on, and what an earlier version signed keeps opening its order while that version is kept. A token that names no
+version is refused like any other that does not match (`404`).
 
 With `gift_card`, the store's Gift Cards kind pays what it holds of the order (ERP's stored value, which
 pays invoices: the order is invoiced at checkout, and the card is redeemed through ERP's prove step, its

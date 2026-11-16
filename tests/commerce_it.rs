@@ -41,9 +41,6 @@ fn db_url() -> String {
     std::env::var("FERRUM_COMMERCE_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://ferrum:ferrum@localhost:5432/ferrum_commerce_test".into())
 }
 
-/// Commerce's own handle on the vault, from the last registration: to look at what Commerce keeps there.
-static COMMERCE_VAULT: Mutex<Option<ferrum_kernel::vault::Vault>> = Mutex::new(None);
-
 /// A kernel on the test database as the server boots one (the apps registered each as itself), the vault open or not.
 async fn kernel(db: Db) -> Arc<Kernel> {
     let mut packages = ferrum_domain::packages().expect("platform packages");
@@ -61,10 +58,7 @@ async fn kernel(db: Db) -> Arc<Kernel> {
     for source in ferrum_app_erp::reports() {
         ferrum_domain::reports::add_source(source);
     }
-    hooks.app("commerce", &[], |h| {
-        ferrum_app_commerce::register(h);
-        *COMMERCE_VAULT.lock().unwrap() = Some(h.vault());
-    });
+    hooks.app("commerce", &[], ferrum_app_commerce::register);
     ferrum_app_crm::register(&mut hooks);
     ferrum_finance::register(&mut hooks);
     ferrum_stock_ops::register(&mut hooks);
@@ -3453,89 +3447,40 @@ fn order_links_from_the_vault_end_to_end() {
     rt.block_on(async { tokio::spawn(order_links_from_the_vault()).await.unwrap() });
 }
 
-/// An order's token is signed with a key derived from Commerce's own key in the vault (src/keys.rs). The key the build
-/// before kept unsealed signs nothing, and checks the tokens of orders made before this build, never of one it made.
+/// An order's token is signed with a key derived from Commerce's own key in the vault (src/keys.rs) and names the version
+/// it came from. A new version signs from then on, and what the version before signed keeps opening its order; a token
+/// that names no version is refused like any other malformed one, on every route that takes one.
 async fn order_links_from_the_vault() {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     let Shop { t, tenant, .. } = small_shop("vault").await;
-    let vault = COMMERCE_VAULT.lock().unwrap().clone().expect("Commerce's handle");
-    let scope = ferrum_kernel::vault::Scope::Workspace(tenant);
     let track = |number: String, token: String| {
         let t = &t;
         async move { t.call(None, "POST", "/orders/track", &[], Some(json!({"number": number, "token": token}))).await }
     };
-    let mac = |key: &[u8], order: Uuid| {
-        use hmac::Mac;
-        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
-        m.update(b"ferrum-commerce-order:");
-        m.update(order.as_bytes());
-        B64URL.encode(m.finalize().into_bytes())
-    };
-    let sql = |q: &'static str, order: Option<Uuid>| {
-        let k = t.k.clone();
-        async move {
-            let mut tx = k.db.tenant_tx(tenant).await.unwrap();
-            sqlx::query(q).bind(tenant).bind(order).bind(&[4u8; 32][..]).execute(&mut *tx).await.unwrap();
-            tx.commit().await.unwrap();
-        }
-    };
-    let ddl = |q: &'static str| {
-        let k = t.k.clone();
-        async move {
-            let mut tx = k.db.tenant_tx(tenant).await.unwrap();
-            sqlx::raw_sql(q).execute(&mut *tx).await.unwrap();
-            tx.commit().await.unwrap();
-        }
-    };
-    // What this build signs names the version of Commerce's key, and the order is listed as made here.
+    // What checkout signs names the version of Commerce's key, and opens the order.
     let a = place(&t, json!([{"item": "blue-mug", "qty": 1}]), GUEST, "Cash on Delivery", "vault-a-0001").await;
     assert!(a.token.starts_with("v1."), "{}", a.token);
     track(a.number.clone(), a.token.clone()).await.expect("its link opens it");
-    // An order the build before made (no mark), and the key it kept unsealed, which signed the order's token.
+    let request = a.request.expect("a payment request");
+    t.ok(None, "GET", &format!("/payment-requests/{request}"), &[("x-order-token", a.token.as_str())], None).await;
+    // The same MAC without its version is refused, as anything malformed is: the link, the lookup and the payment request.
+    let bare = a.token.strip_prefix("v1.").unwrap().to_string();
+    let refused = [
+        track(a.number.clone(), bare.clone()).await,
+        t.call(None, "POST", "/orders/lookup", &[], Some(json!({"number": a.number, "email": GUEST, "token": bare}))).await,
+        t.call(None, "GET", &format!("/payment-requests/{request}"), &[("x-order-token", bare.as_str())], None).await,
+    ];
+    for r in refused {
+        assert!(matches!(r, Err(Error::NotFound(_))), "a token without its version: {r:?}");
+    }
+    // A new version of Commerce's key signs from then on, and what the version before signed still opens its order.
+    assert_eq!(t.k.rotate_owner_key(ferrum_kernel::vault::Scope::Workspace(tenant), "commerce").await.expect("a new version"), 2);
     let b = place(&t, json!([{"item": "blue-mug", "qty": 1}]), GUEST, "Cash on Delivery", "vault-b-0001").await;
-    sql("delete from commerce_order_signed where tenant_id = $1 and sales_order = $2 and $3::bytea is not null", Some(b.so)).await;
-    sql("insert into commerce_secret (tenant_id, secret) select $1, $3 where $2::uuid is null", None).await;
-    let old_key = [4u8; 32];
-    let old_b = mac(&old_key, b.so);
-    // Followed at once, as replicas would, the old key moves into the vault once, and each is honoured.
-    let mut followed = Vec::new();
-    for _ in 0..8 {
-        let (k, site, number, token) = (t.k.clone(), t.site.clone(), b.number.clone(), old_b.clone());
-        followed.push(tokio::spawn(async move {
-            let body = json!({"number": number, "token": token}).to_string().into_bytes();
-            let req = SiteRequest {
-                tenant,
-                user: None,
-                method: "POST".into(),
-                path: "/orders/track".into(),
-                query: Map::new(),
-                headers: Map::new(),
-                body,
-                client_ip: "127.0.0.1".into(),
-            };
-            site.handle(&k, req).await
-        }));
-    }
-    for f in followed {
-        assert_eq!(f.await.unwrap().expect("an old link still opens its order").status, 200);
-    }
-    let moved = vault.describe(&t.k, scope, "old-signing-key").await.unwrap().expect("moved");
-    assert_eq!((moved.version, moved.rule.reveal, moved.rule.expires_at), (1, false, None), "moved once, never revealed, for good");
-    // Whatever it is given, the old key opens no order this build made.
-    assert!(track(a.number.clone(), mac(&old_key, a.so)).await.is_err(), "not an order made here");
-    assert!(track(b.number.clone(), mac(&[5u8; 32], b.so)).await.is_err(), "another key");
-    let looked = t.ok(None, "POST", "/orders/lookup", &[], Some(json!({"number": b.number, "email": GUEST, "token": old_b}))).await;
-    assert_eq!(looked["order"]["number"], json!(b.number));
-    // From now on nothing reads the unsealed table: with it out of reach, Commerce signs and checks as before, the old
-    // link included, and what it signs does not check with the old key.
-    ddl("alter table commerce_secret rename to commerce_secret_parked").await;
-    let c = place(&t, json!([{"item": "logo-tee", "qty": 1}]), GUEST, "Cash on Delivery", "vault-c-0001").await;
-    assert_ne!(c.token.split_once('.').unwrap().1, mac(&old_key, c.so), "not the old key's");
-    track(c.number.clone(), c.token.clone()).await.expect("signed and checked without the old key");
-    track(b.number.clone(), old_b.clone()).await.expect("the old key checks from the vault");
-    ddl("alter table commerce_secret_parked rename to commerce_secret").await;
-    // A sandbox of this workspace (a copy under another id, marked as the platform marks one) never takes the old key.
+    assert!(b.token.starts_with("v2."), "{}", b.token);
+    track(b.number.clone(), b.token.clone()).await.expect("the new version's token opens its order");
+    track(a.number.clone(), a.token.clone()).await.expect("signed by the version before, still open");
+    assert!(track(b.number.clone(), a.token.clone()).await.is_err(), "another order's token");
+    // A sandbox of this workspace (a copy under another id, marked as the platform marks one) has keys of its own: the
+    // live workspace's link opens nothing there.
     let copy =
         t.k.create_tenant(NewTenant {
             slug: "vault-try".into(),
@@ -3554,13 +3499,12 @@ async fn order_links_from_the_vault() {
             "alter table tenant disable trigger tenant_sandbox_kept",
             "update tenant set sandbox_of = $1, sandbox_from = 'here', sandbox_until = current_date + 30 where id = $2",
             "alter table tenant enable trigger tenant_sandbox_kept",
-            "insert into commerce_secret (tenant_id, secret) select $2, secret from commerce_secret where tenant_id = $1",
         ] {
             sqlx::query(q).bind(tenant).bind(copy).execute(&mut *tx).await.unwrap();
         }
         tx.commit().await.unwrap();
     }
-    let body = json!({"number": b.number, "token": old_b}).to_string().into_bytes();
+    let body = json!({"number": a.number, "token": a.token}).to_string().into_bytes();
     let req = SiteRequest {
         tenant: copy,
         user: None,
@@ -3572,17 +3516,8 @@ async fn order_links_from_the_vault() {
         client_ip: "127.0.0.1".into(),
     };
     assert!(t.site.handle(&t.k, req).await.is_err(), "the live workspace's link opens nothing in the copy");
-    let copy_scope = ferrum_kernel::vault::Scope::Workspace(copy);
-    assert!(vault.describe(&t.k, copy_scope, "old-signing-key").await.unwrap().is_none(), "never in a sandbox");
-    // Upkeep moves what is left, once.
-    assert!(vault.remove(&t.k, scope, "old-signing-key").await.unwrap());
-    sql("update commerce_secret set retired_at = null where tenant_id = $1 and $2::uuid is null and $3::bytea is not null", None).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
-    assert_eq!(vault.describe(&t.k, scope, "old-signing-key").await.unwrap().map(|d| d.version), Some(1), "moved by upkeep");
-    track(b.number.clone(), old_b.clone()).await.expect("and it checks again");
 
     // ── a replica whose vault is closed: Commerce refuses to sign or check, plainly, and signs nothing else ──
-    // (Last: registering Commerce again gives the process that kernel's handle.)
     let db = Db::connect(DbConfig { url: db_url(), max_connections: 8, ..Default::default() }).await.expect("connect");
     let closed = kernel(db).await;
     let ctx = closed.load_ctx(tenant, t.ctx.user, None, "it".into()).await.unwrap();
@@ -3592,7 +3527,6 @@ async fn order_links_from_the_vault() {
     let refusals = [
         t.checkout(None, &cart, "vault-d-0001", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect_err("no token"),
         t.call(None, "POST", "/orders/track", &[], Some(json!({"number": a.number, "token": a.token}))).await.expect_err("no check"),
-        t.call(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": old_b}))).await.expect_err("nor of an old one"),
     ];
     for e in refusals {
         assert_eq!(e.code(), "unavailable", "{e}");
@@ -3739,4 +3673,84 @@ async fn part_of_an_advance() {
     assert_eq!((dec(&si["base_rounded_total"]), dec(&si["outstanding_amount"])), (n("294.90"), Decimal::ZERO), "settled by the advance");
     assert_eq!(receivable(&t, &si["customer"]).await, (n("-471.52"), n("-471.52")), "766.42 received, 294.90 of it taken");
     assert_eq!(balance(&t, "Exchange Gain or Loss").await, losses, "one rate on both: no exchange difference");
+}
+
+#[test]
+fn first_orders_at_once_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(first_orders_at_once()).await.unwrap() });
+}
+
+/// A signed-in shopper's first two orders, placed at once (two tabs), make one customer. The first holds the lock on her
+/// address from finding no customer to its commit: here it is held on after making hers, by the mug's stock lock, which
+/// the test takes first. The second waits for it, then finds the customer it made.
+async fn first_orders_at_once() {
+    let Shop { t, tenant, mug, .. } = small_shop("first-orders").await;
+    let user = t.k.create_user(&t.ctx, "meena@example.com", "Meena", Some("Correct-Horse-9"), &[], false).await.unwrap();
+    let meena = t.k.load_ctx(tenant, user, None, "portal".into()).await.unwrap();
+    let mut carts = Vec::new();
+    for item in ["blue-mug", "logo-tee"] {
+        let (cart, _) = t.new_cart(Some(&meena), json!([{"item": item, "qty": 1}])).await;
+        t.ok(Some(&meena), "PUT", "/cart/details", &[("x-cart-token", cart.as_str())], Some(details("meena@example.com", "Meena Iyer", "IN"))).await;
+        carts.push(cart);
+    }
+    let checkout = |cart: String, key: &'static str| {
+        let (k, site, user) = (t.k.clone(), t.site.clone(), meena.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: Some(user),
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", cart.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await
+        })
+    };
+    // The backend a pid holds up, if any.
+    let blocked_by = |pid: i32| {
+        let k = t.k.clone();
+        async move {
+            let found: Option<i32> = sqlx::query_scalar("select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid)) limit 1")
+                .bind(pid)
+                .fetch_optional(&k.db.pool)
+                .await
+                .unwrap();
+            found
+        }
+    };
+    let mut hold = t.k.db.tenant_tx(tenant).await.unwrap();
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))").bind(format!("commerce:stock:{tenant}:{mug}")).execute(&mut *hold).await.unwrap();
+    let held: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut *hold).await.unwrap();
+    let first = checkout(carts[0].clone(), "first-order-01");
+    let mut first_pid = None;
+    for _ in 0..2400 {
+        first_pid = blocked_by(held).await;
+        if first_pid.is_some() || first.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let first_pid = first_pid.expect("the first checkout made her customer and waits for the mug");
+    let second = checkout(carts[1].clone(), "second-order-01");
+    // Until the second waits for the first, or (without a lock) is done: either comes, however loaded the machine.
+    let mut waited = false;
+    for _ in 0..2400 {
+        waited = blocked_by(first_pid).await.is_some();
+        if waited || second.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    hold.commit().await.unwrap();
+    first.await.unwrap().expect("the first order");
+    second.await.unwrap().expect("the second order");
+    assert_eq!(t.count("Customer", json!({"email": "meena@example.com"})).await, 1, "two first orders at once, one customer");
+    let customer = t.find_one("Customer", json!({"email": "meena@example.com"})).await;
+    assert_eq!(t.count("SalesOrder", json!({"customer": customer["id"]})).await, 2, "both orders hers");
+    assert!(waited, "the second checkout waited for the first one");
 }

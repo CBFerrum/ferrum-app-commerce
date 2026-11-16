@@ -63,7 +63,6 @@ pub fn register(hooks: &mut HookRegistry) {
         .register("ReturnRequest", Arc::new(shopper::ReturnRequestHook))
         .register("DeliveryNote", Arc::new(ship::DeliveryHook))
         .register("SalesOrder", Arc::new(payment::WebOrderHook))
-        .register("SalesOrder", Arc::new(token::MadeHere))
         .register("SalesInvoice", Arc::new(payment::AdvanceHook))
         .register("PaymentEntry", Arc::new(payment::PaymentEntryHook));
     // The connector with Finance: only where Store Subscriptions is installed.

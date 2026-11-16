@@ -6,6 +6,7 @@ use crate::store::Store;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ferrum_app_erp::portal;
 use ferrum_app_erp::pricing::{self, Side, calculate};
 use ferrum_calc::{CalcInput, ChargeType, LineIn, Rounding, TaxIn};
 use ferrum_domain::util::{b, d, find, get, id, rows, s, set, sys};
@@ -1044,7 +1045,7 @@ pub async fn submit_review(k: &Kernel, ctx: &Ctx, tx: &mut Tx, slug: &str, body:
     let review = text_field(body, "review", 5000)?;
     let (email, name, customer) = match user {
         Some(u) => {
-            let customer = crate::orders::linked_customers(k, ctx, tx, &u.email).await?.into_iter().next();
+            let customer = portal::customers_of(k, ctx, tx, &u.email).await?.into_iter().next();
             let name = text_field(body, "name", 100)?.unwrap_or_else(|| u.full_name.clone());
             (u.email.to_lowercase(), name, customer)
         }

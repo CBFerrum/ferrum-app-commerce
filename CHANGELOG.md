@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.12.0
+
+Needs ERP 0.28.3 (`requires: {erp: ">=0.28.3"}`), for `portal::customer_for`. No interface change. The package's SQL
+reads as its final schema: `commerce_secret`, `002_order_links.sql` (its `retired_at` column and
+`commerce_order_signed`) are gone, and `001_commerce.sql` keeps the open orders' index. No installation was ever made
+from them, so a database is made afresh.
+
+**One way to sign and check an order's token.** Before 0.11 one key per workspace signed orders' tokens, unsealed in
+`commerce_secret`; 0.11.0 kept it to check what it had signed, moved into the vault as `old-signing-key` at the first
+check or by upkeep (under its row's lock, taken without waiting and retried), and listed every order made since in
+`commerce_order_signed` so that it never opened one. No such key ever signed a link someone outside holds, so it goes
+with its table, its move, its upkeep step and the list. A token is `v{n}.{mac}` and names the version of Commerce's key
+that signed it; one that names none is refused like any other that does not match (`404`), on the tracking link, the
+lookup, paying again and the payment request.
+
+**A signed-in shopper's first orders at once make one customer.** Checkout found no customer for the address and made
+one with no lock, so two first orders placed together (two tabs) made two customers. It now asks ERP's
+`portal::customer_for`, which finds or makes the person's customer under a lock on the address held to the end of the
+checkout: the second waits for the first and finds its customer. Only a customer made then takes the cart's addresses
+and the store's group. Guest checkout still makes a new guest customer every time.
+
+**The customers a signed-in shopper acts for are ERP's portal's** (`portal::customers_of`), for checkout, the portal's
+orders, invoices and subscriptions, prices and reviews; Commerce's copy of it goes. It filtered the same: never a web
+guest, never a disabled customer.
+
+Tests: the vault suite refuses a token without its version on the tracking link, the lookup and the payment request,
+makes a new version of Commerce's key (what version 1 signed still opens its order, what is signed after names version
+2), and keeps the sandbox and closed-vault checks; the checks of the old key went with it. A new suite,
+`first_orders_at_once_end_to_end`, holds the first checkout's transaction after it made the customer and shows the
+second waiting for it, then one customer with both orders.
+
 ## 0.11.2
 
 Needs ERP 0.28.2 (`requires: {erp: ">=0.28.2"}`), whose `ledger::allocate` answers the base it took. No database or
