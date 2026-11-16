@@ -3674,3 +3674,83 @@ async fn part_of_an_advance() {
     assert_eq!(receivable(&t, &si["customer"]).await, (n("-471.52"), n("-471.52")), "766.42 received, 294.90 of it taken");
     assert_eq!(balance(&t, "Exchange Gain or Loss").await, losses, "one rate on both: no exchange difference");
 }
+
+#[test]
+fn first_orders_at_once_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(first_orders_at_once()).await.unwrap() });
+}
+
+/// A signed-in shopper's first two orders, placed at once (two tabs), make one customer. The first holds the lock on her
+/// address from finding no customer to its commit: here it is held on after making hers, by the mug's stock lock, which
+/// the test takes first. The second waits for it, then finds the customer it made.
+async fn first_orders_at_once() {
+    let Shop { t, tenant, mug, .. } = small_shop("first-orders").await;
+    let user = t.k.create_user(&t.ctx, "meena@example.com", "Meena", Some("Correct-Horse-9"), &[], false).await.unwrap();
+    let meena = t.k.load_ctx(tenant, user, None, "portal".into()).await.unwrap();
+    let mut carts = Vec::new();
+    for item in ["blue-mug", "logo-tee"] {
+        let (cart, _) = t.new_cart(Some(&meena), json!([{"item": item, "qty": 1}])).await;
+        t.ok(Some(&meena), "PUT", "/cart/details", &[("x-cart-token", cart.as_str())], Some(details("meena@example.com", "Meena Iyer", "IN"))).await;
+        carts.push(cart);
+    }
+    let checkout = |cart: String, key: &'static str| {
+        let (k, site, user) = (t.k.clone(), t.site.clone(), meena.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: Some(user),
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", cart.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await
+        })
+    };
+    // The backend a pid holds up, if any.
+    let blocked_by = |pid: i32| {
+        let k = t.k.clone();
+        async move {
+            let found: Option<i32> = sqlx::query_scalar("select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid)) limit 1")
+                .bind(pid)
+                .fetch_optional(&k.db.pool)
+                .await
+                .unwrap();
+            found
+        }
+    };
+    let mut hold = t.k.db.tenant_tx(tenant).await.unwrap();
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))").bind(format!("commerce:stock:{tenant}:{mug}")).execute(&mut *hold).await.unwrap();
+    let held: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut *hold).await.unwrap();
+    let first = checkout(carts[0].clone(), "first-order-01");
+    let mut first_pid = None;
+    for _ in 0..2400 {
+        first_pid = blocked_by(held).await;
+        if first_pid.is_some() || first.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let first_pid = first_pid.expect("the first checkout made her customer and waits for the mug");
+    let second = checkout(carts[1].clone(), "second-order-01");
+    // Until the second waits for the first, or (without a lock) is done: either comes, however loaded the machine.
+    let mut waited = false;
+    for _ in 0..2400 {
+        waited = blocked_by(first_pid).await.is_some();
+        if waited || second.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    hold.commit().await.unwrap();
+    first.await.unwrap().expect("the first order");
+    second.await.unwrap().expect("the second order");
+    assert_eq!(t.count("Customer", json!({"email": "meena@example.com"})).await, 1, "two first orders at once, one customer");
+    let customer = t.find_one("Customer", json!({"email": "meena@example.com"})).await;
+    assert_eq!(t.count("SalesOrder", json!({"customer": customer["id"]})).await, 2, "both orders hers");
+    assert!(waited, "the second checkout waited for the first one");
+}

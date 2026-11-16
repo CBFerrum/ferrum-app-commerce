@@ -7,6 +7,7 @@ use crate::cart::{self, address_text, goods};
 use crate::catalog::{allocate, available, available_by_warehouse, stock_items};
 use crate::store::Store;
 use crate::{coupon, gift_card, orders, payment, token};
+use ferrum_app_erp::portal;
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
 use ferrum_kernel::vault::Derived;
 use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, Kernel, Result, Tx, outbox, with_retry};
@@ -41,32 +42,40 @@ fn split_name(full: &str) -> (String, Option<String>) {
     }
 }
 
-async fn new_customer(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, email: &str, guest: bool) -> Result<Uuid> {
+/// What a customer made at checkout takes from the cart and the store: its addresses and the store's group.
+fn from_cart(store: &Store, cart: &Doc) -> Doc {
     let mut c = Doc::new();
-    set(&mut c, "customer_name", s(cart, "contact_name").unwrap_or(email).to_string());
-    set(&mut c, "customer_type", "Individual");
-    set(&mut c, "email", email.to_lowercase());
-    set(&mut c, "phone", json!(s(cart, "phone")));
     set(&mut c, "shipping_address", json!(address_text(cart, "ship")));
     set(&mut c, "billing_address", json!(address_text(cart, "bill")));
     set(&mut c, "customer_group", json!(store.default_customer_group.map(|g| g.to_string())));
-    set(&mut c, "commerce_guest", guest);
-    let doc = k.insert_tx(ctx, tx, "Customer", c).await?;
-    id(&doc, "id").ok_or_else(|| Error::internal("customer without id"))
+    c
 }
 
-/// The customer an order belongs to. A signed-in user proved their email: their linked
-/// customer, or a new one. A guest never attaches to an existing customer — that would hand
-/// them its history and addresses — so every guest checkout makes a new guest customer.
+/// The customer an order belongs to, and whether it was made now. A signed-in user proved their email: a customer it
+/// is linked to, else theirs, found or made by ERP under a lock on the address held to the end of this transaction, so
+/// two first orders at once make one customer; only the one made now takes the cart's addresses and the store's group.
+/// A guest never attaches to an existing customer (that would hand them its history and addresses), so every guest
+/// checkout makes a new guest customer.
 async fn resolve_customer(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, user: Option<&Ctx>) -> Result<(Uuid, bool)> {
     if let Some(u) = user {
         if let Some(c) = orders::linked_customers(k, ctx, tx, &u.email).await?.first() {
             return Ok((*c, false));
         }
-        return Ok((new_customer(k, ctx, tx, store, cart, &u.email, false).await?, true));
+        let (c, made) = portal::customer_for(k, ctx, tx, s(cart, "contact_name").unwrap_or(&u.email), Some(&u.email), s(cart, "phone")).await?;
+        if made {
+            k.set_values_tx(ctx, tx, "Customer", c, from_cart(store, cart)).await?;
+        }
+        return Ok((c, made));
     }
-    let email = s(cart, "email").ok_or_else(|| Error::field("email", "is required to check out"))?.to_string();
-    Ok((new_customer(k, ctx, tx, store, cart, &email, true).await?, true))
+    let email = s(cart, "email").ok_or_else(|| Error::field("email", "is required to check out"))?;
+    let mut c = from_cart(store, cart);
+    set(&mut c, "customer_name", s(cart, "contact_name").unwrap_or(email).to_string());
+    set(&mut c, "customer_type", "Individual");
+    set(&mut c, "email", email.to_lowercase());
+    set(&mut c, "phone", json!(s(cart, "phone")));
+    set(&mut c, "commerce_guest", true);
+    let doc = k.insert_tx(ctx, tx, "Customer", c).await?;
+    Ok((id(&doc, "id").ok_or_else(|| Error::internal("customer without id"))?, true))
 }
 
 /// CRM contact and addresses for a new customer when the tenant runs the CRM package. Best
