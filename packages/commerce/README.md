@@ -2,18 +2,18 @@
 
 Sell online from the same items, prices, stock and books as the rest of Ferrum. Package
 `commerce` (depends on `core`, `selling`, `inventory`, `accounting`); logic in
-`crates/pkg-commerce`.
+`src/` of this repository.
 
 * **Catalog** — `ItemCategory` (a tree), `WebsiteItem` (the published face of an `Item`: slug,
   title, descriptions, images, categories, related items, SEO, ranking, weight, order limit) and
   moderated `ItemReview`s. A `WebsiteItem` can be a **variant** of another (`variant_of`, plus
   `options`: Size M, Colour Red): see "Variants".
 * **Carts** — `ShoppingCart` is a sales-shaped document. Every change re-prices it with the
-  selling engine (`ferrum_domain::pricing::calculate`: price list, pricing rules, tax template,
+  selling engine (`ferrum_app_erp::pricing::calculate`: price list, pricing rules, tax template,
   rounding), so cart, sales order and invoice agree to the cent. Clients choose items,
   quantities and details — never prices, totals, customers or statuses.
 * **Shipping** — `ShippingRule`: a fixed charge or bands over the cart subtotal or weight,
-  limited to countries. The charge is a service line (the store's *Shipping Item*), so it is
+  limited to countries, regions and postal ranges. The charge is a service line (the store's *Shipping Item*), so it is
   taxed, invoiced and booked like any other line.
 * **Coupons** — `CouponCode` unlocks a `PricingRule` (validity dates, total and per-customer
   limits, minimum order). Saving a coupon writes `doc.coupon_rule == '<rule id>'` into the rule's
@@ -118,6 +118,10 @@ only, newest first; reviewer emails are never shown.
 user's email and name) → `201 {status: "Pending", message}`. Held for moderation; *verified
 purchase* is set when that email (or the signed-in customer) bought the item. Errors: `422`
 rating/name/email, `409` this email already reviewed the item, `404` item.
+
+**`POST /items/{slug}/stock-alert`** `{email}` → `201 {status: "Waiting"}`. A shopper asks to be told once, by e-mail,
+when an out-of-stock item is back. The same address asking again for the same item changes nothing. `422` for a bad
+e-mail address, an item that can be bought now, or an address already waiting for ten items; `404` item.
 
 ### Cart
 
@@ -269,7 +273,7 @@ repository secrets of the same names. Live keys are refused.
 
 ## Gateway plugin contract
 
-A payment gateway is a Ferrum plugin (see `docs/plugins.md`). Its **name** is what store
+A payment gateway is a Ferrum plugin (see `docs/plugins.md` in the Ferrum repository). Its **name** is what store
 settings use as the payment method's `gateway`.
 
 **Manifest.**
@@ -372,13 +376,17 @@ the bank the payment came into and matched to what the credit note owes, and the
 nothing is left to ship (a cancellation reverses the payment entry and cancels the order instead). If the
 books refuse (a closed period, a missing account, a payment in another currency than the company's), the
 call still succeeds: the refund is `Refunded`, `booked` is false and `booking_error` says why, the
-managers are told, and `post_books` tries again. The gateways in `gateways/` do not carry these out yet;
-until they do, a person records the refund with `mark_refunded` after sending it from the provider.
+managers are told, and `post_books` tries again. The gateways in `gateways/` carry these out; for cash, a bank
+transfer or a refund sent from the provider's dashboard, a person records it with `mark_refunded`.
 
 `POST /api/app/commerce/desk/refund-plan` (signed in; needs create on `OrderRefund` and read on the order)
 is what the dialog asks: `{sales_order, kind?, lines?, include_shipping?}` → what may still come back per
 line, the payment and what it holds, whether the order can be cancelled, and the amount the choice comes
 to. It writes nothing.
+
+`POST /api/app/commerce/desk/change-preview` (signed in; needs read on the order) takes `{sales_order, …}` as Update
+Web Order does and answers what the change would do: the lines as priced again, the totals, the difference and how it
+is settled. It runs the save's own work in a transaction that is thrown away, so nothing is written.
 
 ## The store's desk
 
@@ -390,7 +398,7 @@ and the invoice that applies the shopper's payment; all or nothing), `web_invoic
 `SalesOrder` the *Web Payment Method*. A queue, per order, is read from `status`, `per_delivered`,
 `per_billed`, the web payment status and method; the admin's rules for it are in `ui/src/queues.ts`.
 
-## After sales (0.9.0)
+## After sales
 
 * **Cancel Web Order** (desk) and the shopper's **Cancel My Order** make a cancellation refund for each payment of an order
   nothing of which shipped (a gift card's first: it is given back last, once the provider's part has gone). **Update Web
@@ -445,15 +453,16 @@ contactable), `conversion_funnel` (carts created → with items → checked out 
 
 Every minute (one replica at a time): expire overdue payment requests (cancelling unpaid orders
 as configured), mark carts with items idle for *abandon after hours* as `Abandoned` (a returning
-shopper revives them) and carts idle for *cart expiry days* as `Expired` (frozen).
+shopper revives them) and carts idle for *cart expiry days* as `Expired` (frozen), remind shoppers who agreed to a
+cart reminder, tell shoppers waiting for an item that it is back, and read ERP's carrier shipments to tell shoppers about
+delivery.
 
 ## Known limits
 
 * One store per tenant; prices come from one price list read as company-currency prices (the
   selling engine converts them to a foreign store currency at the day's rate).
 * Item variants are not modelled by `Item`: each variant is a store item of its own (see "Variants"), made
-  one by one; there is no generator for all the combinations of a size and a colour. A default territory
-  is not set on customers (core customers have no territory).
+  by Generate Variants. A default territory is not set on customers (core customers have no territory).
 * Reports count orders as they were placed: refunds are not netted from `web_sales` or `top_products`.
 * A refund is booked in the company's currency only (a payment in another currency is refunded, then
   posted by hand), and an order must be invoiced before goods can be returned. A tax template with fixed

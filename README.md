@@ -13,7 +13,7 @@
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-data-336791?style=flat-square&logo=postgresql&logoColor=white)
 ![React](https://img.shields.io/badge/React%20%2B%20TypeScript-interface-0ea5e9?style=flat-square&logo=react&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-66%20Rust%20%2B%2016%20UI%20files-16a34a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-72%20Rust%20%2B%2016%20UI%20files-16a34a?style=flat-square)
 
 ### Sell online from the items, prices, stock and books you already keep in Ferrum.
 
@@ -45,7 +45,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 | **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.28.3` (installing Commerce installs ERP) |
 | **Works with** | ERP (items, customers, stock, orders, invoices, promotions, gift cards), Finance (subscriptions), Stock Operations (variants), Bookings (deposits), Retail (returns at a till), Campaigns and Mail (events and messages) |
 | **Languages** | Admin in English, Arabic, Hindi; storefront words English with per-language overrides |
-| **Tests** | 67 Rust tests against a real PostgreSQL, 16 interface test files, gateway tests against scripted and mock providers |
+| **Tests** | 72 Rust tests against a real PostgreSQL, 16 interface test files, 27 gateway tests against scripted and mock providers |
 | **Licence** | AGPL-3.0-only |
 
 ## 📸 Screenshots
@@ -273,13 +273,13 @@ Lines and child tables (cart items, website item images, categories, related ite
 
 ### ⏱️ Upkeep
 
-Every minute, one replica at a time: expire overdue payment requests (cancelling unpaid orders as configured and releasing their stock), mark idle carts Abandoned and old carts Expired, send cart reminders, and read carrier shipments to tell shoppers about delivery.
+Every minute, one replica at a time: expire overdue payment requests (cancelling unpaid orders as configured and releasing their stock), mark idle carts Abandoned and old carts Expired, send cart reminders, tell shoppers a back-in-stock alert is answered, and read carrier shipments to tell shoppers about delivery.
 
 ## 🔌 Integrations
 
 | With | How | Needs |
 |---|---|---|
-| ERP | Items, customers, price lists, stock, sales orders, invoices, promotions, gift cards and store credit are ERP's | ERP 0.24 or later (ERP 0.25 for the carrier tests) |
+| ERP | Items, customers, price lists, stock, sales orders, invoices, promotions, gift cards and store credit are ERP's | ERP 0.28.3 or later |
 | Stripe, PayPal, Razorpay | Built as WebAssembly plugins in `gateways/`; webhooks signed and checked | Your own provider account, keys and webhook |
 | Finance | The Store Subscriptions connector sells plans | Finance installed |
 | Stock Operations | Generate Variants | Installed |
@@ -374,8 +374,8 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 - [x] **0.13.2** — `request_payment` is listed as Commerce's own operation, `commerce.sales_invoice.request_payment`, as the platform now names an added action.
 - [x] **0.13.1** — Rebuilt on Ferrum-Frontend 06bd1a2: its start through `mountApp`, and no routes to the screens apps no longer have.
 - [x] **0.13.0** — Other apps ask for a payment of an invoice and a refund of a paid request as operations through the platform's gate, each once per key.
-- [x] **0.12.0** — An order's token names the version of Commerce's key that signed it, or is refused; the key kept unsealed before 0.11 is gone; a signed-in shopper's first orders at once make one customer.
-- [x] **0.11.0** — An order's token is signed with a key from the platform's vault; the key kept unsealed before opens only the orders made before.
+- [x] **0.12.0** — An order's token names the version of Commerce's key that signed it, or is refused; a signed-in shopper's first orders at once make one customer.
+- [x] **0.11.0** — An order's token is signed with a key from the platform's vault.
 - [x] **0.10.4** — Store Settings pickers offer the store's company's warehouses, taxes and accounts.
 - [x] **0.10.3** — Choices limited to the company; Store Settings fills the company in; the refusal names the records.
 - [x] **0.10.2** — Reports take the store's company; a first-run state says the store is not set up yet.
@@ -431,7 +431,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ## 🚀 Install
 
-Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.24`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.3.6, <0.4`.
+Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.28.3`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.3.8, <0.4`.
 
 After installing:
 
