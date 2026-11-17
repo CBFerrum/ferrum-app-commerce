@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.14.1
+
+Needs the same platform and ERP as 0.14.0. No database change, no interface change.
+
+- **What the store books is dated on the workspace's day, not UTC's.** Commerce had its own `today()`, the UTC day, and
+  dated with it the payment entry a gateway's confirmation books (its posting and reference date), a refund's journal
+  entry and its matching to the credit note, a refund put back onto a gift card, the web order, a review's published
+  date, and the day prices, coupons and exchange rates are read on. A card payment at 02:00 on 1 April in India was
+  booked on 31 March, into the year before; an evening refund in New York on the next day; and east of Greenwich,
+  early in the day, an item priced that day was not for sale yet. Each now takes the day of the workspace's time zone
+  from the platform (`ctx.today()`), the gateway's and upkeep's included. Instants stay as they were: a payment
+  request's expiry, when it was paid or approved, the windows to cancel, return and send a mail again.
+
+Tests: `workspace_day_end_to_end` runs a shop in a zone whose day is not UTC's at whatever hour it runs, and finds the
+order, the payment entry and the refund's journal dated on the workspace's day. `refunded_credit_note_end_to_end` shows
+a refund leaving its credit note's outstanding amount at what it was (-295) while its open item is settled; it is
+ignored until ERP's `ledger::allocate` keeps an invoice's outstanding amount in step for every caller.
+
 ## 0.14.0
 
 Needs the same platform as 0.13.2. No database change, no interface change. The crate's Rust surface is smaller.
