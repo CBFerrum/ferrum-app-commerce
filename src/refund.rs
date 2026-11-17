@@ -1123,8 +1123,8 @@ async fn money_out(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
             continue;
         }
         let x = left.min(-item.outstanding);
-        ledger::allocate(hc.tx, hc.ctx, co.id, *note, "JournalEntry", je, today, -x, -x).await?;
-        ledger::allocate(hc.tx, hc.ctx, co.id, owed, "JournalEntry", je, today, x, x).await?;
+        ledger::allocate(hc.kernel, hc.tx, hc.ctx, co.id, *note, "JournalEntry", je, today, -x, -x).await?;
+        ledger::allocate(hc.kernel, hc.tx, hc.ctx, co.id, owed, "JournalEntry", je, today, x, x).await?;
         left -= x;
     }
     Ok(je)
