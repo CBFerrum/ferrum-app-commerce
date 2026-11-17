@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.14.1-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.14.2-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,10 +39,10 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.14.1 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.14.2 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
-| **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.28.3` (installing Commerce installs ERP) |
+| **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.31.0` (installing Commerce installs ERP) |
 | **Works with** | ERP (items, customers, stock, orders, invoices, promotions, gift cards), Finance (subscriptions), Stock Operations (variants), Bookings (deposits), Retail (returns at a till), Campaigns and Mail (events and messages) |
 | **Languages** | Admin in English, Arabic, Hindi; storefront words English with per-language overrides |
 | **Tests** | 72 Rust tests against a real PostgreSQL, 16 interface test files, 27 gateway tests against scripted and mock providers |
@@ -279,7 +279,7 @@ Every minute, one replica at a time: expire overdue payment requests (cancelling
 
 | With | How | Needs |
 |---|---|---|
-| ERP | Items, customers, price lists, stock, sales orders, invoices, promotions, gift cards and store credit are ERP's | ERP 0.28.3 or later |
+| ERP | Items, customers, price lists, stock, sales orders, invoices, promotions, gift cards and store credit are ERP's | ERP 0.31.0 or later |
 | Stripe, PayPal, Razorpay | Built as WebAssembly plugins in `gateways/`; webhooks signed and checked | Your own provider account, keys and webhook |
 | Finance | The Store Subscriptions connector sells plans | Finance installed |
 | Stock Operations | Generate Variants | Installed |
@@ -370,6 +370,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.14.2** — A refund leaves its credit note owing nothing, as ERP 0.31.0's allocation keeps the invoice in step.
 - [x] **0.14.1** — Payments, refunds and web orders are dated on the workspace's day, not UTC's.
 - [x] **0.14.0** — Other apps reach payments only through the operations: the two Rust functions they called are gone.
 - [x] **0.13.2** — `request_payment` is listed as Commerce's own operation, `commerce.sales_invoice.request_payment`, as the platform now names an added action.
@@ -432,7 +433,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ## 🚀 Install
 
-Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.28.3`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.3.8, <0.4`.
+Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.31.0`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.3.8, <0.4`.
 
 After installing:
 
@@ -519,7 +520,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.14.1**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.14.2**.
 
 ## 🤝 Contributing
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.2
+
+Needs ERP 0.31.0 (`requires: {erp: ">=0.31.0"}`), whose `ledger::allocate` takes the kernel first and keeps an
+invoice's outstanding amount in step. No database or interface change.
+
+- **A refund leaves its credit note owing nothing, on the note as in the ledger.** A refund paid back to the card
+  matched the credit note to its journal and left the note showing the credit it had just paid out (-295 in the
+  suite) while its open item was settled. ERP's allocation now keeps the invoice in step for every caller; Commerce
+  passes it the kernel and drops its own copy of that step after applying a web order's advance to its invoice.
+
+Tests: `refunded_credit_note_end_to_end` is no longer ignored.
+
 ## 0.14.1
 
 Needs the same platform and ERP as 0.14.0. No database change, no interface change.
