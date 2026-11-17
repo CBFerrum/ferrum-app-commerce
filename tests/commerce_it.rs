@@ -3948,3 +3948,23 @@ async fn workspace_day() {
         "the order, the payment its gateway confirmed (and its reference) and the refund's journal, in {zone}"
     );
 }
+
+#[test]
+#[ignore = "waits for ERP's allocate to keep outstanding in step"]
+fn refunded_credit_note_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(refunded_credit_note()).await.unwrap() });
+}
+
+/// A refund paid out against its credit note leaves the note owing the shopper nothing, on the note as in the ledger.
+async fn refunded_credit_note() {
+    let Shop { t, .. } = small_shop("refunded-credit-note").await;
+    let done = returned_mug(&t, "credit-note-01").await;
+    let note: Uuid = done["credit_note"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        (dec(&t.get("SalesInvoice", note).await["outstanding_amount"]), outstanding(&t, note).await),
+        (Decimal::ZERO, Decimal::ZERO),
+        "the credit note's outstanding amount, and its open item's"
+    );
+}
