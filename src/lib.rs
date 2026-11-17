@@ -36,7 +36,7 @@ mod upkeep;
 mod variants;
 mod words;
 
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use ferrum_domain::reports::ReportSource;
 use ferrum_kernel::{Ctx, HookRegistry, Kernel, Result};
 use std::sync::Arc;
@@ -99,16 +99,13 @@ pub(crate) fn installed(ctx: &Ctx) -> bool {
     ctx.schema.packages.iter().any(|p| p == "commerce")
 }
 
+/// The instant, for timestamps and expiries. A date is the workspace's day, `ctx.today()`, never UTC's.
 pub(crate) fn now() -> DateTime<Utc> {
     Utc::now()
 }
 
 pub(crate) fn now_str() -> String {
     now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-pub(crate) fn today() -> NaiveDate {
-    now().date_naive()
 }
 
 include!(concat!(env!("OUT_DIR"), "/packages.rs"));

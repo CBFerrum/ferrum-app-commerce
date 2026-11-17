@@ -305,7 +305,7 @@ async fn refresh_rating(hc: &mut HookCtx<'_>, website_item: Uuid, excluding: Opt
 impl DocHook for ReviewHook {
     async fn before_validate(&self, hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
         if s(doc, "status") == Some("Approved") && s(doc, "published_on").is_none() {
-            set(doc, "published_on", crate::today().to_string());
+            set(doc, "published_on", hc.ctx.today().to_string());
         }
         let verified = match id(doc, "website_item") {
             Some(wi) => {
@@ -404,7 +404,7 @@ pub async fn price_items(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, item
     let ent = k.entity(ctx, "ShoppingCart")?;
     let mut doc = Doc::new();
     set(&mut doc, "company", store.company.to_string());
-    set(&mut doc, "posting_date", crate::today().to_string());
+    set(&mut doc, "posting_date", ctx.today().to_string());
     set(&mut doc, "currency", store.currency.to_string());
     set(&mut doc, "price_list", store.price_list.to_string());
     if let Some(t) = store.tax_template {
@@ -593,7 +593,7 @@ async fn category_ids(tx: &mut Tx, tenant: Uuid, slug: &str) -> Result<Option<Ve
 /// Rate from the store currency to the company currency (list prices are company prices).
 async fn to_company_rate(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store) -> Result<Decimal> {
     let co = ferrum_domain::util::company(k, ctx, tx, store.company).await?;
-    ferrum_domain::util::exchange_rate(k, ctx, tx, store.currency, co.currency_id, crate::today()).await
+    ferrum_domain::util::exchange_rate(k, ctx, tx, store.currency, co.currency_id, ctx.today()).await
 }
 
 /// One page of website item cards. Returns the cards and the cursor of the next page.
@@ -623,7 +623,7 @@ pub async fn cards(
         },
         None => None,
     };
-    let today = crate::today();
+    let today = ctx.today();
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("with onhand as (select item_id as item, sum(qty) as qty from stock_balance where tenant_id = ");
     qb.push_bind(tenant).push(" and warehouse_id = any(").push_bind(store.warehouses.clone()).push(") group by item_id), ");
     qb.push("reserved as (select si.item, sum(greatest(si.qty - coalesce(si.delivered_qty, 0), 0)) as qty from e_sales_order so ");
