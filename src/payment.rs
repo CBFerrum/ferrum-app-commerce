@@ -810,7 +810,6 @@ impl DocHook for AdvanceHook {
         }
         let co = company(hc.kernel, &sys(hc.ctx), hc.tx, company_id).await?;
         let on = ferrum_domain::util::date(doc, "posting_date")?;
-        let mut applied = false;
         for pe in payments {
             let Some(inv) = ledger::load_open_item(hc.tx, hc.ctx.tenant, invoice, true).await? else { break };
             if inv.outstanding <= Decimal::ZERO {
@@ -822,8 +821,8 @@ impl DocHook for AdvanceHook {
             }
             let amount = inv.outstanding.min(-adv.outstanding);
             let at = |rate: Decimal| ledger::round_as(amount * rate, co.precision, co.rounding);
-            let base_inv = ledger::allocate(hc.tx, hc.ctx, co.id, invoice, "PaymentEntry", pe, on, amount, at(inv.exchange_rate)).await?;
-            let base_adv = -ledger::allocate(hc.tx, hc.ctx, co.id, pe, "PaymentEntry", pe, on, -amount, -at(adv.exchange_rate)).await?;
+            let base_inv = ledger::allocate(hc.kernel, hc.tx, hc.ctx, co.id, invoice, "PaymentEntry", pe, on, amount, at(inv.exchange_rate)).await?;
+            let base_adv = -ledger::allocate(hc.kernel, hc.tx, hc.ctx, co.id, pe, "PaymentEntry", pe, on, -amount, -at(adv.exchange_rate)).await?;
             let diff = base_inv - base_adv;
             if !diff.is_zero() {
                 let gl = co.require("exchange_gain_loss_account", "exchange gain/loss account")?;
@@ -839,10 +838,6 @@ impl DocHook for AdvanceHook {
                 entry.lines.push(Line::new(gl, diff, &co.currency_code).remarks("Exchange difference"));
                 ledger::post(hc.tx, hc.ctx, entry, co.precision).await?;
             }
-            applied = true;
-        }
-        if applied {
-            ferrum_app_erp::flow::sync_invoice_outstanding(hc.kernel, hc.ctx, hc.tx, "SalesInvoice", invoice).await?;
         }
         Ok(())
     }

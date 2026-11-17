@@ -3950,7 +3950,6 @@ async fn workspace_day() {
 }
 
 #[test]
-#[ignore = "waits for ERP's allocate to keep outstanding in step"]
 fn refunded_credit_note_end_to_end() {
     let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
