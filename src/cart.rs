@@ -167,7 +167,7 @@ pub async fn recalc(k: &Kernel, ctx: &Ctx, tx: &mut Tx, ent: &EffEntity, doc: &m
         _ => None,
     };
     let store = Store::load(k, ctx, tx).await?.for_customer(tx, ctx.tenant, customer).await?;
-    let today = crate::today().to_string();
+    let today = ctx.today().to_string();
     set(doc, "company", store.company.to_string());
     set(doc, "currency", store.currency.to_string());
     set(doc, "price_list", store.price_list.to_string());
@@ -367,16 +367,16 @@ pub async fn website_item(k: &Kernel, ctx: &Ctx, tx: &mut Tx, reference: &str) -
 }
 
 /// List price of an item for the store today (price list, else the item's standard rate).
-async fn has_price(tx: &mut Tx, tenant: Uuid, store: &Store, item: Uuid) -> Result<bool> {
+async fn has_price(tx: &mut Tx, ctx: &Ctx, store: &Store, item: Uuid) -> Result<bool> {
     let price: Option<Option<Decimal>> = sqlx::query_scalar(
         "select coalesce((select p.rate from e_item_price p where p.tenant_id = i.tenant_id and p.item = i.id and p.price_list = $3 \
            and p.valid_from <= $4 and (p.valid_upto is null or p.valid_upto >= $4) order by p.valid_from desc limit 1), nullif(i.standard_rate, 0)) \
          from e_item i where i.tenant_id = $1 and i.id = $2",
     )
-    .bind(tenant)
+    .bind(ctx.tenant)
     .bind(item)
     .bind(store.price_list)
-    .bind(crate::today())
+    .bind(ctx.today())
     .fetch_optional(&mut **tx)
     .await?;
     Ok(price.flatten().is_some_and(|p| p > Decimal::ZERO))
@@ -436,7 +436,7 @@ pub async fn add_item(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
     if sold_by_variants {
         return Err(Error::field("item", "choose one of its variants, such as a size or a colour"));
     }
-    if !has_price(tx, ctx.tenant, store, item).await? {
+    if !has_price(tx, ctx, store, item).await? {
         return Err(Error::field("item", "this item is not for sale"));
     }
     let mut lines = goods(cart);
@@ -599,7 +599,7 @@ pub async fn apply_coupon(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, car
         return save(k, ctx, tx, cart, patch).await;
     };
     let rule = id(&c, "pricing_rule").ok_or_else(unknown)?;
-    let today = crate::today().to_string();
+    let today = ctx.today().to_string();
     coupon::check(tx, ctx.tenant, &c, list_subtotal(cart, store.precision), id(cart, "customer"), s(cart, "email"), cart_id(cart)?, &today).await?;
     let before: Decimal = goods(cart).iter().map(|l| d(l, "amount")).sum();
     let mut patch = Doc::new();

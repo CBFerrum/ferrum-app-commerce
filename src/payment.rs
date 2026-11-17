@@ -346,14 +346,14 @@ async fn mark_paid(hc: &mut HookCtx<'_>, doc: &Doc, params: &Value) -> Result<Va
     let number = s(doc, "number").unwrap_or_default();
     let mut pe = Doc::new();
     set(&mut pe, "company", co.id.to_string());
-    set(&mut pe, "posting_date", crate::today().to_string());
+    set(&mut pe, "posting_date", hc.ctx.today().to_string());
     set(&mut pe, "payment_type", "Receive");
     set(&mut pe, "customer", customer.to_string());
     set(&mut pe, "bank_account", bank.to_string());
     set(&mut pe, "currency", s(doc, "currency").unwrap_or_default());
     set(&mut pe, "paid_amount", money(amount));
     set(&mut pe, "reference_no", reference.clone().unwrap_or_else(|| number.to_string()));
-    set(&mut pe, "reference_date", crate::today().to_string());
+    set(&mut pe, "reference_date", hc.ctx.today().to_string());
     set(&mut pe, "references", Value::Array(references));
     let what = format!("{} {}", if paid_for == "SalesOrder" { "Web order" } else { "Invoice" }, s(&paying, "number").unwrap_or_default());
     set(&mut pe, "remarks", format!("{what} paid via {gateway} ({number})"));

@@ -1132,6 +1132,11 @@ async fn small_shop(slug: &str) -> Shop {
 }
 
 async fn shop_with(slug: &str, packages: &[&str]) -> Shop {
+    shop_in(slug, packages, json!({"fiscal_year_start_month": 4})).await
+}
+
+/// A small shop in a workspace with these settings.
+async fn shop_in(slug: &str, packages: &[&str], settings: Value) -> Shop {
     let k = fresh_kernel().await;
     let tenant = k
         .create_tenant(NewTenant {
@@ -1141,7 +1146,7 @@ async fn shop_with(slug: &str, packages: &[&str]) -> Shop {
             admin_password: "Correct-Horse-9".into(),
             admin_name: None,
             packages: packages.iter().map(|p| p.to_string()).collect(),
-            settings: Some(json!({"fiscal_year_start_month": 4})),
+            settings: Some(settings),
         })
         .await
         .expect("tenant");
@@ -3891,4 +3896,75 @@ async fn first_orders_at_once() {
     let customer = t.find_one("Customer", json!({"email": "meena@example.com"})).await;
     assert_eq!(t.count("SalesOrder", json!({"customer": customer["id"]})).await, 2, "both orders hers");
     assert!(waited, "the second checkout waited for the first one");
+}
+
+/// One mug ordered and paid by card, shipped and invoiced, then sent back and its money refunded to the card.
+async fn returned_mug(t: &T, key: &str) -> Doc {
+    let fakepay = gateway(t, "fakepay").await;
+    let placed = place(t, json!([{"item": "blue-mug", "qty": 1}]), GUEST, "fakepay", key).await;
+    pay(t, &fakepay, placed.request.unwrap(), placed.total, &format!("pi-{key}")).await;
+    t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"invoice": "Yes", "notify": "No"})).await.expect("shipped and invoiced");
+    let line = t.get("SalesOrder", placed.so).await["items"][0]["id"].clone();
+    let reason = t.find_one("ReturnReason", json!({"reason": "Changed their mind"})).await;
+    let asked = t
+        .insert(
+            "OrderRefund",
+            json!({"sales_order": placed.so.to_string(), "kind": "Return", "reason": reason["id"], "lines": [{"sales_order_line": line, "qty": "1"}]}),
+        )
+        .await;
+    t.k.run_action(&t.ctx, "OrderRefund", uid(&asked), "approve_refund", json!({})).await.expect("approved");
+    t.k.run_action(&fakepay, "OrderRefund", uid(&asked), "refund_done", json!({"refund_reference": format!("re-{key}")})).await.expect("refunded");
+    let done = t.get("OrderRefund", uid(&asked)).await;
+    assert_eq!((done["booked"].clone(), done["booking_error"].clone()), (json!(true), Value::Null), "{done:?}");
+    done
+}
+
+#[test]
+fn workspace_day_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(workspace_day()).await.unwrap() });
+}
+
+/// What the store books is dated on the workspace's day, not UTC's: the order, the payment its gateway confirms and the
+/// refund's journal. The workspace is in a zone whose day is not UTC's at whatever hour this runs, as the platform's
+/// suites pick one (Kolkata's day is not UTC's only from 18:30 UTC).
+async fn workspace_day() {
+    use chrono::Timelike;
+    let zone = if chrono::Utc::now().hour() < 10 { "Pacific/Pago_Pago" } else { "Pacific/Kiritimati" };
+    let Shop { t, .. } = shop_in("workspace-day", &["commerce"], json!({"fiscal_year_start_month": 4, "timezone": zone})).await;
+    let today = json!(t.ctx.today().to_string());
+    assert_ne!(today, json!(chrono::Utc::now().date_naive().to_string()), "{zone}'s day is not UTC's");
+    // The prices start before both days, so the sale goes through whichever day the store reads them on.
+    t.sql("update e_item_price set valid_from = valid_from - 2").await;
+    let done = returned_mug(&t, "workspace-day-01").await;
+    let at = |v: &Value| v.as_str().unwrap().parse::<Uuid>().unwrap();
+    let so = t.get("SalesOrder", at(&done["sales_order"])).await;
+    let pe = t.get("PaymentEntry", at(&t.get("PaymentRequest", at(&done["payment_request"])).await["payment_entry"])).await;
+    let je = t.get("JournalEntry", at(&done["journal_entry"])).await;
+    assert_eq!(
+        [&so["posting_date"], &pe["posting_date"], &pe["reference_date"], &je["posting_date"]],
+        [&today; 4],
+        "the order, the payment its gateway confirmed (and its reference) and the refund's journal, in {zone}"
+    );
+}
+
+#[test]
+#[ignore = "waits for ERP's allocate to keep outstanding in step"]
+fn refunded_credit_note_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(refunded_credit_note()).await.unwrap() });
+}
+
+/// A refund paid out against its credit note leaves the note owing the shopper nothing, on the note as in the ledger.
+async fn refunded_credit_note() {
+    let Shop { t, .. } = small_shop("refunded-credit-note").await;
+    let done = returned_mug(&t, "credit-note-01").await;
+    let note: Uuid = done["credit_note"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        (dec(&t.get("SalesInvoice", note).await["outstanding_amount"]), outstanding(&t, note).await),
+        (Decimal::ZERO, Decimal::ZERO),
+        "the credit note's outstanding amount, and its open item's"
+    );
 }

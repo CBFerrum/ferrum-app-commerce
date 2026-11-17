@@ -1102,7 +1102,7 @@ async fn money_out(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let of = if id(refund, "sales_order").is_some() { "web order" } else { "the payment of" };
     let remark = format!("Refund {} of {of} {}", s(refund, "number").unwrap_or_default(), s(refund, "order_number").unwrap_or_default());
     let entry = json!({
-        "company": co.id, "posting_date": crate::today().to_string(), "remark": remark,
+        "company": co.id, "posting_date": hc.ctx.today().to_string(), "remark": remark,
         "accounts": [
             {"account": receivable, "party_type": "Customer", "customer": customer, "debit": money(amount), "remarks": remark},
             {"account": bank, "credit": money(amount), "remarks": remark},
@@ -1112,7 +1112,7 @@ async fn money_out(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let je = id(&draft, "id").ok_or_else(|| Error::internal("journal entry without id"))?;
     let posted = hc.kernel.submit_tx(actor, hc.tx, "JournalEntry", je, None).await?;
     let owed = rows(&posted, "accounts").iter().find(|l| s(l, "party_type") == Some("Customer")).and_then(|l| id(l, "id"));
-    let (Some(owed), today) = (owed, crate::today()) else { return Err(Error::internal("the refund's journal entry has no customer line")) };
+    let (Some(owed), today) = (owed, hc.ctx.today()) else { return Err(Error::internal("the refund's journal entry has no customer line")) };
     let mut left = amount;
     for note in credits {
         if left <= Decimal::ZERO {
@@ -1151,7 +1151,7 @@ async fn onto_card(hc: &mut HookCtx<'_>, actor: &Ctx, refund: &Doc, pe: &Doc, cr
     let remark =
         format!("Refund {} of web order {} onto its gift card", s(refund, "number").unwrap_or_default(), s(refund, "order_number").unwrap_or_default());
     let entry = json!({
-        "company": s(refund, "company"), "posting_date": crate::today().to_string(), "payment_type": "Pay", "is_refund": true,
+        "company": s(refund, "company"), "posting_date": hc.ctx.today().to_string(), "payment_type": "Pay", "is_refund": true,
         "customer": s(pe, "customer"), "currency": s(pe, "currency"), "paid_amount": money(amount), "references": references,
         "stored_value_account": account.to_string(), "remarks": remark, "commerce_sales_order": s(refund, "sales_order"),
     });

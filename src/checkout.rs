@@ -278,7 +278,7 @@ async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
         so.insert(f.into(), cart.get(f).cloned().unwrap_or(Value::Null));
     }
     set(&mut so, "customer", customer.to_string());
-    set(&mut so, "posting_date", crate::today().to_string());
+    set(&mut so, "posting_date", ctx.today().to_string());
     set(&mut so, "set_warehouse", store.fulfilment_warehouse.to_string());
     set(&mut so, "items", Value::Array(items));
     if let Some(a) = ship_to {
@@ -395,7 +395,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     verify_lines(k, ctx, tx, &store, &cart).await?;
     if let Some(cid) = id(&cart, "coupon") {
         let locked = k.get_tx(ctx, tx, "CouponCode", cid, true).await?;
-        let today = crate::today().to_string();
+        let today = ctx.today().to_string();
         coupon::check(tx, ctx.tenant, &locked, cart::list_subtotal(&cart, store.precision), Some(customer), s(&cart, "email"), cart_id, &today).await?;
     }
     if let Some(exp) = expected
