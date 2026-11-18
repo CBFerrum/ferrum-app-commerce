@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.14.2-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.15.1-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.15.0 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.15.1 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -301,7 +301,7 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 | Product attributes, filters and facets on listings | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Bundles and kits | 🟡 [1] | ✅ | 🟡 | 🟡 | ✅ | ✅ |
 | Digital goods and downloads | ❌ | 🟡 | ✅ | ✅ | ✅ | 🟡 |
-| Pre-orders and back-orders | ❌ | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| Pre-orders and back-orders | 🟡 [9] | 🟡 | ✅ | ✅ | ✅ | ✅ |
 | Guest and signed-in checkout | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Customer account pages on the storefront | 🟡 [2] | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Promotions: percent, amount, buy and get, free shipping, stacking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -338,14 +338,15 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 
 Notes. 🟡 for a leader means an app or extension, a higher plan, or only part of the feature. Adobe Commerce 🟡 for open source means its Open Source edition is free but the commercial edition is not; Odoo 🟡 means the Community edition is open source and Enterprise is not.
 
-1. Promotions can bundle (buy and get, bundle prices) and ERP's Stock Operations has product bundles, but Commerce does not yet sell a bundle as one product stocked as parts.
+1. Promotions can bundle (buy and get, bundle prices) and ERP's Stock Operations add-on has product bundles (a non-stock item whose delivery moves its components), but Commerce does not read them: a bundle sells without a check of its components' stock.
 2. The signed-in API has a customer's orders, invoices, reorder and subscriptions; no storefront page signs in yet. Order tracking works by link.
 3. The cart carries the delivery country and region and ERP's country rules read them; no automatic tax-rate service, and no tax IDs or exemptions at checkout.
-4. Reviews are taken by the API and moderated; the storefront pages show them but do not yet have a review form.
+4. Reviews are taken by the API, moderated, marked as a verified purchase and shown on the product page; what is missing is the form on that page.
 5. Ferrum's Website app serves pages and a blog on its own host; the store's own host serves only the shop.
 6. Words are translatable per language and right-to-left is handled; English is the only language that ships, product text is not translated, and the header, listing and product page words the server writes are still English.
 7. A Finance plan can be sold as an item with renewals paid online; no saved cards for automatic renewal and no plan change from the portal.
 8. Documented REST, public and signed-in; no GraphQL and no API keys for the storefront routes.
+9. With *Refuse quantities beyond the available stock* off in Store Settings the store sells past what it holds, for every item; there is no setting per item, no limit and no ships-from date yet.
 
 ### 🏆 Where Ferrum Commerce stands out
 
@@ -370,6 +371,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.15.1**: Someone who can only read sales orders can no longer cancel a web order or open a return on it; the shopper's link and the store's desk still can.
 - [x] **0.15.0**: Upkeep runs one workspace at a time, on whichever replica is free.
 - [x] **0.14.2** — A refund leaves its credit note owing nothing, as ERP 0.31.0's allocation keeps the invoice in step.
 - [x] **0.14.3** — Commerce compiles in a release build, the kind the server image is made from.
@@ -522,7 +524,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.14.2**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.15.1**.
 
 ## 🤝 Contributing
 
