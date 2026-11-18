@@ -89,6 +89,19 @@
        confirm: "Make the combinations as ERP's item variants (the missing ones), each with a website item and the price of this one?",
        params: [{name: options, label: Options, type: text, required: true, description: "What it comes in, as JSON: {\"Size\": [\"S\", \"M\", \"L\"], \"Colour\": [\"Red\", \"Blue\"]}"},
                 {name: disabled, label: "Values not sold", type: text, description: "Values the store does not sell, as JSON: {\"Size\": [\"L\"]}; their combinations are made unpublished"}]}
+    # A shopper's review and back-in-stock alert, as the storefront's routes ask for them and as an agent may.
+    - {name: submit_review, label: Leave a Review, permission: write, hidden: true,
+       params: [{name: rating, label: Rating, type: int, required: true, description: "1 to 5"},
+                {name: title, label: Title}, {name: review, label: Review, type: text},
+                {name: name, label: Reviewer's Name, required: true, secret: true},
+                {name: email, label: Reviewer's Email, required: true, secret: true},
+                {name: customer, label: Customer, type: link, to: Customer, description: "Only for a reviewer who proved the email (signed in): the customer linked to it"}],
+       contract: {effect: transactional_action, returns: {type: object, properties: {review: {type: string, format: uuid, x-ferrum-link: ItemReview}, status: {type: string}}},
+                  completion: "A Pending review of the item exists, committed with this receipt; it shows once a manager approves it"}}
+    - {name: stock_alert, label: Tell Me When It Is Back, permission: read, hidden: true,
+       params: [{name: email, label: Email, required: true, secret: true}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {status: {type: string}, alert: {type: [string, "null"], format: uuid, x-ferrum-link: StockAlert}}},
+                  completion: "The address waits to be told once when the item is back (or already did), committed with this receipt; the mail is sent by the store's upkeep"}}
   list: {columns: [title, item, slug, published, ranking], sort: title asc}
 
 - name: ItemReview

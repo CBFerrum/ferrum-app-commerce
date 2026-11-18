@@ -6,7 +6,6 @@ use crate::store::Store;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ferrum_app_erp::portal;
 use ferrum_app_erp::pricing::{self, Side, calculate};
 use ferrum_calc::{CalcInput, ChargeType, LineIn, Rounding, TaxIn};
 use ferrum_domain::util::{b, d, find, get, id, rows, s, set, sys};
@@ -262,6 +261,8 @@ impl DocHook for WebsiteItemHook {
     async fn action(&self, hc: &mut HookCtx<'_>, name: &str, doc: &Doc, params: &Value) -> Result<Option<Value>> {
         Ok(Some(match name {
             "generate_variants" => crate::variants::generate(hc, doc, params).await?,
+            "submit_review" => submit_review(hc, doc, params).await?,
+            "stock_alert" => stock_alert(hc, doc, params).await?,
             _ => return Ok(None),
         }))
     }
@@ -1033,29 +1034,38 @@ fn text_field(body: &Map<String, Value>, key: &str, max: usize) -> Result<Option
     }
 }
 
-/// A review from the storefront, held for moderation. Signed-in customers review as themselves.
-pub async fn submit_review(k: &Kernel, ctx: &Ctx, tx: &mut Tx, slug: &str, body: &Map<String, Value>, user: Option<&Ctx>) -> Result<Value> {
-    let wi = published_by_slug(k, ctx, tx, slug).await?;
-    let wid = id(&wi, "id").ok_or_else(|| Error::internal("website item without id"))?;
+/// Refuses an item the storefront does not show: unpublished, or its item disabled (as `published_by_slug`).
+async fn shown(hc: &mut HookCtx<'_>, wi: &Doc) -> Result<(Uuid, Uuid)> {
+    let missing = || Error::NotFound("item".into());
+    let (wid, item) = (id(wi, "id").ok_or_else(missing)?, id(wi, "item").ok_or_else(missing)?);
+    if !b(wi, "published") || b(&get(hc.kernel, &sys(hc.ctx), hc.tx, "Item", item).await?, "disabled") {
+        return Err(missing());
+    }
+    Ok((wid, item))
+}
+
+/// "Leave a Review": held for moderation. The reviewer's email and name are the caller's to give; `customer` (which
+/// can make it a verified purchase) only for a reviewer who proved the email, so the action needs `write`.
+async fn submit_review(hc: &mut HookCtx<'_>, wi: &Doc, params: &Value) -> Result<Value> {
+    let (wid, _) = shown(hc, wi).await?;
+    let empty = Map::new();
+    let body = params.as_object().unwrap_or(&empty);
     let rating = body.get("rating").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())));
     let Some(rating) = rating.filter(|r| (1..=5).contains(r)) else {
         return Err(Error::field("rating", "rate the item from 1 to 5"));
     };
     let title = text_field(body, "title", 200)?;
     let review = text_field(body, "review", 5000)?;
-    let (email, name, customer) = match user {
-        Some(u) => {
-            let customer = portal::customers_of(k, ctx, tx, &u.email).await?.into_iter().next();
-            let name = text_field(body, "name", 100)?.unwrap_or_else(|| u.full_name.clone());
-            (u.email.to_lowercase(), name, customer)
-        }
-        None => {
-            let email = text_field(body, "email", 254)?.ok_or_else(|| Error::field("email", "is required"))?.to_lowercase();
-            let name = text_field(body, "name", 100)?.ok_or_else(|| Error::field("name", "is required"))?;
-            (email, name, None)
-        }
+    let email = text_field(body, "email", 254)?.ok_or_else(|| Error::field("email", "is required"))?.to_lowercase();
+    let name = text_field(body, "name", 100)?.ok_or_else(|| Error::field("name", "is required"))?;
+    let customer = match text_field(body, "customer", 36)? {
+        Some(c) => Some(Uuid::parse_str(&c).map_err(|_| Error::field("customer", "must be a customer's id"))?),
+        None => None,
     };
-    let dup = find(k, ctx, tx, "ItemReview", vec![Filter::eq("website_item", wid.to_string()), Filter::eq("reviewer_email", email.clone())], None, 1).await?;
+    let sctx = sys(hc.ctx);
+    let dup =
+        find(hc.kernel, &sctx, hc.tx, "ItemReview", vec![Filter::eq("website_item", wid.to_string()), Filter::eq("reviewer_email", email.clone())], None, 1)
+            .await?;
     if !dup.is_empty() {
         return Err(Error::Conflict("you have already reviewed this item".into()));
     }
@@ -1068,7 +1078,7 @@ pub async fn submit_review(k: &Kernel, ctx: &Ctx, tx: &mut Tx, slug: &str, body:
     set(&mut doc, "reviewer_email", email);
     set(&mut doc, "customer", json!(customer.map(|c| c.to_string())));
     set(&mut doc, "status", "Pending");
-    k.insert_tx(&sys(ctx), tx, "ItemReview", doc).await.map_err(|e| match e {
+    let made = hc.kernel.insert_tx(&sctx, hc.tx, "ItemReview", doc).await.map_err(|e| match e {
         Error::Validation(mut fields) => {
             for f in fields.iter_mut() {
                 if f.field == "reviewer_email" {
@@ -1079,7 +1089,7 @@ pub async fn submit_review(k: &Kernel, ctx: &Ctx, tx: &mut Tx, slug: &str, body:
         }
         other => other,
     })?;
-    Ok(json!({"status": "Pending", "message": "Thank you! Your review appears once it has been approved."}))
+    Ok(json!({"review": s(&made, "id"), "status": "Pending"}))
 }
 
 /// Parses an optional non-negative decimal query parameter.
@@ -1093,38 +1103,37 @@ pub fn decimal_param(raw: Option<&str>, name: &str) -> Result<Option<Decimal>> {
     }
 }
 
-/// A shopper asks to be told when an out of stock item is back: once, by e-mail. The same address asking again
-/// for the same item changes nothing; an item that can be bought now is not asked about; ten waiting alerts an
-/// address is the most.
-pub async fn stock_alert(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: &str, email: &str) -> Result<Value> {
-    let email = email.trim().to_lowercase();
+/// "Tell Me When It Is Back": a shopper asks to be told when an out of stock item is back, once, by e-mail. The same
+/// address asking again for the same item changes nothing; an item that can be bought now is not asked about; ten
+/// waiting alerts an address is the most.
+async fn stock_alert(hc: &mut HookCtx<'_>, wi: &Doc, params: &Value) -> Result<Value> {
+    let email = crate::payment::param_text(params, "email", 1000)?.ok_or_else(|| Error::field("email", "is required"))?.to_lowercase();
     if email.len() > 254 || email.split('@').count() != 2 || email.starts_with('@') || email.ends_with('@') || email.chars().any(char::is_whitespace) {
         return Err(Error::field("email", "is not an e-mail address"));
     }
-    if ctx.schema.entity("StockAlert").is_none() {
+    if hc.ctx.schema.entity("StockAlert").is_none() {
         return Err(Error::NotFound("stock alerts".into()));
     }
-    let wi = published_by_slug(k, ctx, tx, slug).await?;
-    let (wid, item) = (id(&wi, "id").ok_or_else(|| Error::NotFound("item".into()))?, id(&wi, "item").ok_or_else(|| Error::NotFound("item".into()))?);
-    let stocked = stock_items(tx, ctx.tenant, &[item]).await?;
+    let (wid, item) = shown(hc, wi).await?;
+    let sctx = sys(hc.ctx);
+    let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
+    let stocked = stock_items(hc.tx, hc.ctx.tenant, &[item]).await?;
     if !stocked.contains(&item)
         || !store.enforce_stock
-        || available(tx, ctx.tenant, store, &[item]).await?.get(&item).copied().unwrap_or_default() > Decimal::ZERO
+        || available(hc.tx, hc.ctx.tenant, &store, &[item]).await?.get(&item).copied().unwrap_or_default() > Decimal::ZERO
     {
         return Err(Error::invalid("this item is in stock: you can order it now"));
     }
-    let sctx = ferrum_domain::util::sys(ctx);
-    let mine = find(k, &sctx, tx, "StockAlert", vec![Filter::eq("email", email.clone()), Filter::eq("status", "Waiting")], None, 20).await?;
-    if mine.iter().any(|a| id(a, "website_item") == Some(wid)) {
-        return Ok(json!({"status": "Waiting"}));
+    let mine = find(hc.kernel, &sctx, hc.tx, "StockAlert", vec![Filter::eq("email", email.clone()), Filter::eq("status", "Waiting")], None, 20).await?;
+    if let Some(waiting) = mine.iter().find(|a| id(a, "website_item") == Some(wid)) {
+        return Ok(json!({"status": "Waiting", "alert": s(waiting, "id")}));
     }
     if mine.len() >= 10 {
         return Err(Error::invalid("you are waiting for ten items already: we will write when one is back"));
     }
-    let made =
-        json!({"website_item": wid.to_string(), "item_title": s(&wi, "title").or(s(&wi, "item_name")), "item_slug": slug, "email": email, "status": "Waiting"});
-    k.insert_tx(&sctx, tx, "StockAlert", made.as_object().cloned().unwrap_or_default()).await?;
-    Ok(json!({"status": "Waiting"}))
+    let made = json!({"website_item": wid.to_string(), "item_title": s(wi, "title").or(s(wi, "item_name")), "item_slug": s(wi, "slug"), "email": email, "status": "Waiting"});
+    let made = hc.kernel.insert_tx(&sctx, hc.tx, "StockAlert", made.as_object().cloned().unwrap_or_default()).await?;
+    Ok(json!({"status": "Waiting", "alert": s(&made, "id")}))
 }
 
 #[cfg(test)]

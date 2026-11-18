@@ -125,6 +125,80 @@ impl DocHook for CartHook {
             _ => Ok(()),
         }
     }
+
+    /// What a shopper does to the cart (`packages/commerce/entities/cart.yaml`): the storefront's routes and agents
+    /// alike, as the system on the cart the kernel has locked. Answers the cart's id, status, count and total.
+    async fn action(&self, hc: &mut HookCtx<'_>, name: &str, cart: &Doc, params: &Value) -> Result<Option<Value>> {
+        if !["add_item", "set_quantity", "set_details", "apply_code", "remove_code", "set_shipping", "identify"].contains(&name) {
+            return Ok(None);
+        }
+        let sctx = ferrum_domain::util::sys(hc.ctx);
+        let (k, ctx) = (hc.kernel, &sctx);
+        let store = Store::load(k, ctx, hc.tx).await?;
+        let text = |key: &str, max: usize| crate::payment::param_text(params, key, max);
+        let required = |key: &str, max: usize| text(key, max)?.ok_or_else(|| Error::field(key, "is required"));
+        let done = match name {
+            "add_item" => add_item(k, ctx, hc.tx, &store, cart, &required("item", 200)?, qty_of(params.get("qty"), Some(Decimal::ONE))?).await?,
+            "set_quantity" => set_qty(k, ctx, hc.tx, &store, cart, &required("line", 64)?, qty_of(params.get("qty"), None)?).await?,
+            "set_details" => {
+                let details = match params.get("details") {
+                    Some(Value::Object(m)) => m.clone(),
+                    Some(Value::String(t)) => match serde_json::from_str::<Value>(t) {
+                        Ok(Value::Object(m)) => m,
+                        _ => return Err(Error::field("details", "must be a JSON object")),
+                    },
+                    _ => return Err(Error::field("details", "must be a JSON object")),
+                };
+                set_details(k, ctx, hc.tx, &store, cart, &details).await?
+            }
+            "apply_code" => apply_coupon(k, ctx, hc.tx, &store, cart, &required("code", 64)?).await?,
+            "remove_code" => remove_coupon(k, ctx, hc.tx, cart, text("code", 64)?.as_deref()).await?,
+            "set_shipping" => set_shipping(k, ctx, hc.tx, cart, &required("shipping_method", 36)?).await?,
+            _ => identify(k, ctx, hc.tx, cart, text("email", 254)?).await?,
+        };
+        Ok(Some(json!({
+            "id": s(&done, "id"),
+            "status": s(&done, "status"),
+            "item_count": d(&done, "item_count").normalize().to_string(),
+            "rounded_total": d(&done, "rounded_total").to_string(),
+            "currency": store.currency_code,
+        })))
+    }
+}
+
+/// A quantity as a request gives it: a number or its text; `default` when left out (else it is required).
+pub fn qty_of(v: Option<&Value>, default: Option<Decimal>) -> Result<Decimal> {
+    let bad = || Error::field("qty", "must be a number");
+    match v {
+        None | Some(Value::Null) => default.ok_or_else(|| Error::field("qty", "is required")),
+        Some(Value::String(v)) => v.trim().parse::<Decimal>().map_err(|_| bad()),
+        Some(Value::Number(n)) => n.to_string().parse::<Decimal>().map_err(|_| bad()),
+        Some(_) => Err(bad()),
+    }
+    .map(|q| q.normalize())
+}
+
+/// Whose cart it is: the email a shopper proved by signing in, and the customer linked to it (for their prices); none,
+/// and it is a guest's again.
+async fn identify(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, email: Option<String>) -> Result<Doc> {
+    let mut patch = Doc::new();
+    match email.map(|e| e.to_lowercase()) {
+        // A guest's again: nothing of the customer's stays, their Address included (a guest is priced for the place they give).
+        None => {
+            patch.insert("user_email".into(), Value::Null);
+            patch.insert("customer".into(), Value::Null);
+            patch.insert("ship_to".into(), Value::Null);
+        }
+        Some(email) => {
+            if id(cart, "customer").is_none()
+                && let Some(c) = portal::customers_of(k, ctx, tx, &email).await?.into_iter().next()
+            {
+                patch.insert("customer".into(), json!(c.to_string()));
+            }
+            patch.insert("user_email".into(), json!(email));
+        }
+    }
+    save(k, ctx, tx, cart, patch).await
 }
 
 fn zero_totals(doc: &mut Doc) {
@@ -279,17 +353,6 @@ pub fn list_subtotal(cart: &Doc, precision: u32) -> Decimal {
 }
 
 // ───────────────────────────── operations ─────────────────────────────
-
-/// A new empty cart and its token (shown once; only its hash is kept).
-pub async fn create(k: &Kernel, ctx: &Ctx, tx: &mut Tx, user_email: Option<&str>) -> Result<(String, Doc)> {
-    let (token, hash) = token::new_cart_token();
-    let mut doc = Doc::new();
-    set(&mut doc, "token_hash", hash);
-    set(&mut doc, "user_email", json!(user_email));
-    set(&mut doc, "items", Value::Array(vec![]));
-    let cart = k.insert_tx(ctx, tx, "ShoppingCart", doc).await?;
-    Ok((token, cart))
-}
 
 /// The cart behind a token, locked for this transaction.
 pub async fn locate(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart_token: &str) -> Result<Doc> {

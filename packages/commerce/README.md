@@ -76,6 +76,14 @@ and prices carts for the customer's account. Conventions:
   Field names are the API's (`shipping_address.city`, `qty`, `coupon_code`, …).
 * Responses carry no costs, valuations or internal ids beyond what the UI needs (cart line
   ids, shipping method ids, payment request ids), and exact stock only when the store shows it.
+* What a route changes it changes through the platform's gate, by the operations an agent or a
+  person with the right uses: `commerce.shopping_cart.create`, `.add_item`, `.set_quantity`,
+  `.set_details`, `.apply_code`, `.remove_code`, `.set_shipping` and `.identify` (a signed-in
+  shopper's cart is theirs, a signed-out request makes it a guest's again), and
+  `commerce.website_item.submit_review` and `.stock_alert`; reorder is `create` then `add_item`
+  per line. Cart, review and stock-alert routes take an **`Idempotency-Key`** header (8-200
+  visible characters): sent again with the same key, a request is done once. Without one, each
+  request is its own.
 
 ### Store and catalog
 

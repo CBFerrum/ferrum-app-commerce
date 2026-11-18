@@ -7,7 +7,6 @@
 //! customer, whose email was never verified, so whoever typed it must not inherit (or expose)
 //! those orders.
 
-use crate::cart;
 use crate::store::{Store, valid_gateway};
 use crate::{payment, token};
 use ferrum_app_erp::portal::customers_of;
@@ -341,33 +340,23 @@ pub async fn own_documents(k: &Kernel, ctx: &Ctx, user: &Ctx, entity: &str, curs
     Ok(json!({key: out, "next_cursor": page.next_cursor}))
 }
 
-/// A new cart holding an earlier order's goods at today's prices; items no longer sold are
-/// listed as skipped.
-pub async fn reorder(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, user: &Ctx, so: &Doc) -> Result<(String, Doc, Vec<String>)> {
-    let (cart_token, mut cart) = cart::create(k, ctx, tx, Some(&user.email.to_lowercase())).await?;
-    let mut skipped = Vec::new();
+/// What reordering an earlier order puts in a new cart, line by line: the website item still published (none:
+/// no longer sold), the quantity and the item's name. The shipping line is not one.
+pub async fn reorder_lines(tx: &mut Tx, tenant: Uuid, store: &Store, so: &Doc) -> Result<Vec<(Option<Uuid>, Decimal, String)>> {
+    let mut out = Vec::new();
     for l in rows(so, "items") {
         let Some(item) = id(&l, "item") else { continue };
         if store.shipping_item == Some(item) {
             continue;
         }
-        let name = s(&l, "item_name").unwrap_or("an item").to_string();
         let wid: Option<Uuid> = sqlx::query_scalar("select id from e_website_item where tenant_id = $1 and item = $2 and published")
-            .bind(ctx.tenant)
+            .bind(tenant)
             .bind(item)
             .fetch_optional(&mut **tx)
             .await?;
-        let Some(wid) = wid else {
-            skipped.push(name);
-            continue;
-        };
-        match cart::add_item(k, ctx, tx, store, &cart, &wid.to_string(), d(&l, "qty")).await {
-            Ok(c) => cart = c,
-            Err(Error::Validation(_)) => skipped.push(name),
-            Err(e) => return Err(e),
-        }
+        out.push((wid, d(&l, "qty"), s(&l, "item_name").unwrap_or("an item").to_string()));
     }
-    Ok((cart_token, cart, skipped))
+    Ok(out)
 }
 
 #[cfg(test)]

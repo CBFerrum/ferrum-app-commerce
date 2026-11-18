@@ -1,5 +1,5 @@
 package: commerce
-version: 0.6.0
+version: 0.6.1
 label: Commerce
 description: Online store on the same items, prices, stock and books - catalog with categories and reviews, carts, guest and customer checkout into sales orders, payment requests for gateway plugins, shipping rules and coupon codes.
 depends: [core, selling, inventory, accounting]
@@ -119,7 +119,7 @@ roles:
       - {entity: PricingRule, read: true, write: true, create: true}
       - {entity: Promotion, read: true, write: true, create: true}
       - {entity: PromotionCode, read: true, write: true, create: true, export: true, import: true}
-      - {entity: ShoppingCart, read: true, export: true}
+      - {entity: ShoppingCart, read: true, write: true, create: true, export: true}
       - {entity: PaymentRequest, read: true, write: true, cancel: true, export: true}
       - {entity: PaymentException, read: true, write: true, export: true}
       - {entity: OrderRefund, read: true, write: true, create: true, export: true}
