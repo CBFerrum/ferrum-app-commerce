@@ -2623,6 +2623,22 @@ async fn after_sales() {
     assert!(matches!(refused, Err(Error::Forbidden(_))), "a reader cannot cancel a web order: {refused:?}");
     assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(1), "still submitted");
     assert_eq!(t.count("OrderRefund", json!({"sales_order": a.so.to_string()})).await, 0, "nothing refunded");
+    // ───────────── a_member_cannot_cancel_as_the_shopper (sharing K0-6): the shopper's cancel is the shopper's ─────────────
+    let desk = person(&t, "desk@after-sales.example", &["Sales User"]).await;
+    let refused = t.k.run_action(&desk, "SalesOrder", a.so, "web_shopper_cancel", json!({})).await;
+    assert!(matches!(refused, Err(Error::Forbidden(_))), "the desk cancels with Cancel Web Order, not as the shopper: {refused:?}");
+    // ───────────── a_reader_cannot_cancel_edit_or_resend_a_web_order: the store's manager reads orders, writes none ─────────────
+    let manager = person(&t, "manager@after-sales.example", &["Website Manager"]).await;
+    for (action, params) in [
+        ("web_cancel", json!({})),
+        ("web_update_items", json!({"changes": r#"[{"line": 1, "qty": "1"}]"#})),
+        ("web_resend_mail", json!({"mail": "Payment Received"})),
+    ] {
+        let refused = t.k.run_action(&manager, "SalesOrder", a.so, action, params).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{action} needs write on the order: {refused:?}");
+    }
+    assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(1), "still submitted");
+    assert_eq!(t.count("OrderRefund", json!({"sales_order": a.so.to_string()})).await, 0, "nothing refunded");
     let out = use_link(&link_a, "web_shopper_cancel", json!({"reason": "bought twice"})).await.expect("cancelled").expect("an answer");
     assert_eq!(out["refunds"].as_array().unwrap().len(), 1, "{out}");
     let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await;
@@ -2726,9 +2742,14 @@ async fn after_sales() {
     let e = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "desk@example.com", "fakepay", "after-e-0001").await;
     pay(&t, &t.ctx, e.request.unwrap(), e.total, "fp_after_e").await;
     t.k.run_action(&t.ctx, "SalesOrder", e.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
-    let desk = person(&t, "desk@after-sales.example", &["Sales User"]).await;
     t.k.run_action(&desk, "SalesOrder", e.so, "web_shopper_return", json!({"reason": "phoned in"})).await.expect("the desk asks for the shopper");
     assert_eq!(t.count("ReturnRequest", json!({"sales_order": e.so.to_string()})).await, 1);
+
+    // ───────────── the_desk_still_cancels_web_orders: those who write orders keep Cancel Web Order ─────────────
+    let f = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "deskcancel@example.com", "fakepay", "after-f-0001").await;
+    let sales = person(&t, "sales@after-sales.example", &["Sales Manager"]).await;
+    t.k.run_action(&sales, "SalesOrder", f.so, "web_cancel", json!({})).await.expect("the desk cancels");
+    assert_eq!(t.get("SalesOrder", f.so).await["docstatus"], json!(2));
 }
 
 #[test]

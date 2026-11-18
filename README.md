@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.17.1-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.17.2-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.17.1 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.17.2 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -266,7 +266,7 @@ Lines and child tables (cart items, website item images, categories, related ite
 
 | Role | What it can do |
 |---|---|
-| Website Manager | Runs the store: settings, catalog, reviews, shipping, coupons, promotions, payments, refunds, returns, storefront words, ships and invoices web orders, and changes and creates carts (for a shopper, or through an agent) |
+| Website Manager | Runs the store: settings, catalog, reviews, shipping, coupons, promotions, payments, refunds, returns, storefront words, ships and invoices web orders, and changes and creates carts (for a shopper, or through an agent). Cancelling, changing or mailing an order again is for those who write orders (Sales Manager, Sales User) |
 | Sales Manager | Reads carts, payments, shipping and coupons; works refunds and returns |
 | Sales User | Reads the store's records; can raise a refund |
 | Accounts Manager | Works payment requests and refunds |
@@ -372,6 +372,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.17.2**: Cancel My Order is the shopper's alone; Cancel, Update and Send Mail Again on a web order need write on the order.
 - [x] **0.17.1**: A review form on the product page: a rating, a headline, words, a name and an email, shown once the store approves it.
 - [x] **0.17.0**: Checkout is the operation `commerce.shopping_cart.checkout`, through the gate for the storefront and an agent alike.
 - [x] **0.16.0**: A shopper's cart, review and stock alert are operations of the gate, which the storefront calls and an agent may too; a cart request sent twice with one `Idempotency-Key` is done once.
@@ -527,7 +528,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.17.1**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.17.2**.
 
 ## 🤝 Contributing
 

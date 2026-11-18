@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.2
+
+Needs the same platform and ERP as 0.17.1. No database or interface change.
+
+- **Cancel My Order is the shopper's alone.** `web_shopper_cancel` now refuses every member of the workspace, the
+  store's desk included: only the guest of the order's link (or a portal customer on their own order) presses it. The
+  desk cancels with Cancel Web Order. Return Something stays the shopper's or the desk's.
+- **Cancel, Update and Send Mail Again need write on the order.** `web_cancel`, `web_update_items` and
+  `web_resend_mail` were declared `read` behind a check of the store's roles, so a Website Manager, who reads sales
+  orders and writes none, could cancel, change or mail them. They now declare `write`: Sales Manager and Sales User
+  keep them where their rules let them write the order; Website Manager no longer has them.
+
+Tests: `after_sales_end_to_end` adds `a_member_cannot_cancel_as_the_shopper`, `a_reader_cannot_cancel_edit_or_resend_a_web_order`
+and `the_desk_still_cancels_web_orders`.
+
 ## 0.17.1
 
 Needs the same platform and ERP as 0.17.0. No database change.
