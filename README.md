@@ -39,10 +39,10 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.14.3 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.15.0 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
-| **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.31.0` (installing Commerce installs ERP) |
+| **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
 | **Works with** | ERP (items, customers, stock, orders, invoices, promotions, gift cards), Finance (subscriptions), Stock Operations (variants), Bookings (deposits), Retail (returns at a till), Campaigns and Mail (events and messages) |
 | **Languages** | Admin in English, Arabic, Hindi; storefront words English with per-language overrides |
 | **Tests** | 72 Rust tests against a real PostgreSQL, 16 interface test files, 27 gateway tests against scripted and mock providers |
@@ -370,6 +370,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.15.0**: Upkeep runs one workspace at a time, on whichever replica is free.
 - [x] **0.14.2** — A refund leaves its credit note owing nothing, as ERP 0.31.0's allocation keeps the invoice in step.
 - [x] **0.14.3** — Commerce compiles in a release build, the kind the server image is made from.
 - [x] **0.14.1** — Payments, refunds and web orders are dated on the workspace's day, not UTC's.
@@ -434,7 +435,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ## 🚀 Install
 
-Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.31.0`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.3.8, <0.4`.
+Commerce is compiled into the Ferrum server image and installed from **Apps** (`/store/`) by a workspace administrator; installing it installs ERP (`>=0.31.0`). Self-hosters who build their own image enable the `commerce` feature of the server. It needs Ferrum `>=0.4.0, <0.5`.
 
 After installing:
 

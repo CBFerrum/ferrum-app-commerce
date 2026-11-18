@@ -13,26 +13,8 @@ use uuid::Uuid;
 
 const BATCH: i64 = 200;
 
-pub async fn run(k: &Kernel) -> Result<()> {
-    let tenants: Vec<Uuid> = {
-        let mut tx = k.db.system_tx().await?;
-        let t = sqlx::query_scalar("select tenant_id from installed_package where name = 'commerce'").fetch_all(&mut *tx).await?;
-        tx.commit().await?;
-        t
-    };
-    for tenant in tenants {
-        if let Err(e) = for_tenant(k, tenant).await {
-            tracing::warn!(%tenant, "commerce upkeep failed: {e}");
-        }
-    }
-    Ok(())
-}
-
-async fn for_tenant(k: &Kernel, tenant: Uuid) -> Result<()> {
+pub async fn run(k: &Kernel, tenant: Uuid) -> Result<()> {
     let schema = k.registry.schema(tenant).await?;
-    if !schema.packages.iter().any(|p| p == "commerce") {
-        return Ok(());
-    }
     let mut ctx = Ctx::system(tenant, schema);
     ctx.request_id = format!("commerce-upkeep-{}", Uuid::now_v7());
     let store = {
