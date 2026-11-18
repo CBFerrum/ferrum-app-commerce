@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.3
+
+Needs the same platform and ERP as 0.14.2. No database or interface change.
+
+- **Commerce compiles in a release build.** The optimised build, which is what the server image is made from, stopped
+  on the refund hooks with "queries overflow the depth limit": the compiler works out the layout of their nested
+  futures deeper than its default of 128 steps. Debug builds, the only kind the suites make, never showed it. The
+  crate now sets `recursion_limit = "256"`.
+
 ## 0.14.2
 
 Needs ERP 0.31.0 (`requires: {erp: ">=0.31.0"}`), whose `ledger::allocate` takes the kernel first and keeps an
