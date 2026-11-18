@@ -932,7 +932,12 @@ async fn scenario() {
     let r1 = t.find_one("ItemReview", json!({"reviewer_email": GUEST})).await;
     assert_eq!(r1["verified_purchase"], json!(true), "Asha bought a mug");
     assert_eq!(t.find_one("ItemReview", json!({"reviewer_email": "troll@example.com"})).await["verified_purchase"], json!(false));
+    // a_product_page_has_a_place_for_a_review: with no review yet, and with one approved.
+    let (_, _, none_yet) = page_in(&t, "/p/logo-tee", &[], None).await;
+    assert!(none_yet.contains(r#"<section class="reviews" data-review="logo-tee"><h2>Reviews</h2></section>"#), "{none_yet}");
     t.k.update(&t.ctx, "ItemReview", uid(&r1), obj(json!({"status": "Approved"})), None).await.unwrap();
+    let (_, _, reviewed) = page_in(&t, "/p/blue-mug", &[], None).await;
+    assert!(reviewed.contains(r#"<section class="reviews" data-review="blue-mug"><h2>Reviews</h2>"#) && reviewed.contains("Verified purchase"), "{reviewed}");
     let page = t.get_pub("/items/blue-mug").await;
     assert_eq!(page["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(page["reviews"][0]["verified_purchase"], json!(true));

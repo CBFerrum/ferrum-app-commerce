@@ -393,6 +393,65 @@ describe("the product page", () => {
     await open("/p/mug", `<article class="product"><div class="buy"><p class="in">In stock</p><form class="add" data-item="mug"></form></div></article>`);
     expect(document.querySelector("form.alert-box")).toBeNull();
   });
+
+  const reviewed = `<article class="product"><div class="buy"><p class="in">In stock</p></div></article><section class="reviews" data-review="tee"><h2>Reviews</h2></section>`;
+  const reviewForm = () => document.querySelector("form.review-box") as HTMLFormElement;
+  const fill = (rating: string | null, name: string, email: string) => {
+    const form = reviewForm();
+    if (rating) (form.querySelector(`input[name="rating"][value="${rating}"]`) as HTMLInputElement).checked = true;
+    (form.elements.namedItem("name") as HTMLInputElement).value = name;
+    (form.elements.namedItem("email") as HTMLInputElement).value = email;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+  };
+
+  it("offers a review form and sends it once", async () => {
+    serve({ "POST /items/tee/reviews": () => ({ status: "Pending", message: "Thank you!" }) });
+    await open("/p/tee", reviewed);
+    expect(text()).toContain("No reviews yet.");
+    expect(text()).toContain("Write a review");
+    fill(null, "", "");
+    await tick();
+    expect(text()).toContain("Choose a rating");
+    expect(calls.filter((c) => c.path === "/items/tee/reviews")).toHaveLength(0);
+    fill("4", "Asha", "nope");
+    await tick();
+    expect(text()).toContain("Enter an email address");
+    expect(calls.filter((c) => c.path === "/items/tee/reviews")).toHaveLength(0);
+    fill("4", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    const sent = calls.filter((c) => c.path === "/items/tee/reviews");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].method).toBe("POST");
+    expect(sent[0].body).toEqual({ rating: 4, title: "", review: "", name: "Asha", email: "asha@example.com" });
+    expect(sent[0].headers["idempotency-key"]).toBeTruthy();
+    expect(text()).toContain("Thank you. Your review shows once the store has approved it.");
+    expect(reviewForm()).toBeNull();
+  });
+
+  it("shows the store's refusal and keeps what was typed", async () => {
+    let answer: unknown = { refuse: 409, body: { message: "you have already reviewed this item" } };
+    serve({ "POST /items/tee/reviews": () => answer });
+    await open("/p/tee", reviewed);
+    fill("5", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    expect(text()).toContain("you have already reviewed this item");
+    const form = reviewForm();
+    expect((form.elements.namedItem("name") as HTMLInputElement).value).toBe("Asha");
+    expect((form.elements.namedItem("email") as HTMLInputElement).value).toBe("asha@example.com");
+    answer = { refuse: 422, body: { fields: [{ field: "email", message: "is required" }] } };
+    fill("5", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    const email = form.elements.namedItem("email") as HTMLInputElement;
+    expect(email.getAttribute("aria-invalid")).toBe("true");
+    expect(email.closest("label")?.textContent).toContain("is required");
+    // Both tries were one review's: the same key.
+    const keys = calls.filter((c) => c.path === "/items/tee/reviews").map((c) => c.headers["idempotency-key"]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+  });
 });
 
 describe("the storefront's words", () => {

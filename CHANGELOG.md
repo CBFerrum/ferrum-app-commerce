@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.1
+
+Needs the same platform and ERP as 0.17.0. No database change.
+
+- **A review form on the product page.** Every product page has its reviews section, with or without reviews yet;
+  the storefront's script puts a form in it (a rating of 1 to 5, an optional headline and review, a name and an
+  email, which is never shown). It posts to `POST /items/{slug}/reviews` with one `Idempotency-Key` per form, says
+  what the store refuses next to the field or under the form, keeps what was typed, and thanks the shopper once
+  sent: the review shows when the store approves it. Every word is a storefront word (`review.*`).
+
+Tests: `storefront_end_to_end` (a product page has a place for a review), `ui/src/storefront.test.ts` (the form).
+
 ## 0.17.0
 
 Needs the same platform and ERP as 0.16.0. Package `commerce` stays 0.6.1. No database change.

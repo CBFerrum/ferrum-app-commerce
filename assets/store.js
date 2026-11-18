@@ -445,12 +445,18 @@ function controlFor(form, apiField) {
 function fieldError(form, e) {
   form.querySelectorAll(".field-error").forEach((n) => n.remove());
   form.querySelectorAll("[aria-invalid]").forEach((n) => n.removeAttribute("aria-invalid"));
-  const input = controlFor(form, e.field);
+  const found = controlFor(form, e.field);
+  // A choice of radios is one control: the error goes after its legend and each radio is described by it.
+  const radios = found instanceof RadioNodeList ? [...found] : null;
+  const input = radios ? radios[0] : found;
   if (!input || !e.detail) return false;
   const note = h("span", { class: "field-error", id: `err-${input.name.replace(/\W/g, "-")}`, text: e.detail });
-  input.setAttribute("aria-invalid", "true");
-  input.setAttribute("aria-describedby", note.id);
-  input.closest("label")?.append(note);
+  for (const c of radios ?? [input]) {
+    c.setAttribute("aria-invalid", "true");
+    c.setAttribute("aria-describedby", note.id);
+  }
+  if (radios) input.closest("fieldset")?.querySelector("legend")?.after(note);
+  else input.closest("label")?.append(note);
   input.focus();
   input.scrollIntoView({ block: "center" });
   return true;
@@ -1118,6 +1124,62 @@ function stockAlert(buy, slug, variant) {
   });
   buy.append(form);
 }
+
+/** A review of the item: a rating, a headline and words if they like, a name and an email (never shown). The store
+ * shows it once approved. One key per form, so a second press of the button is the same review. */
+function reviewForm(section) {
+  const slug = section.dataset.review;
+  if (!section.querySelector("li")) section.append(h("p", { class: "muted", text: t("review.none") }));
+  const key = crypto.randomUUID();
+  const out = h("p", { class: "added", role: "status" });
+  const button = h("button", { class: "button", type: "submit", text: t("review.button") });
+  const stars = [5, 4, 3, 2, 1].map((n) => h("label", { class: "star-pick" }, h("input", { type: "radio", name: "rating", value: n }), tn("review.stars", n)));
+  const field = (label, control) => h("label", {}, label, control);
+  const form = h(
+    "form",
+    { class: "review-box", novalidate: true, "aria-labelledby": "review-title" },
+    h("h2", { id: "review-title", text: t("review.title") }),
+    h("fieldset", {}, h("legend", { text: t("review.rating") }), stars),
+    field(t("review.headline"), h("input", { type: "text", name: "title", maxlength: 200 })),
+    field(t("review.text"), h("textarea", { name: "review", maxlength: 5000, rows: 4 })),
+    field(t("label.name"), h("input", { type: "text", name: "name", required: true, maxlength: 100, autocomplete: "name" })),
+    field(t("label.email"), h("input", { type: "email", name: "email", required: true, autocomplete: "email", inputmode: "email", "aria-describedby": "review-hint" })),
+    h("p", { class: "muted", id: "review-hint", text: t("review.hint") }),
+    button,
+    out,
+  );
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    out.classList.remove("error");
+    out.textContent = "";
+    clear(form);
+    const value = (name) => form.elements[name].value.trim();
+    const rating = form.querySelector('input[name="rating"]:checked')?.value;
+    if (!rating) return void fieldError(form, { field: "rating", detail: t("review.error.rating") });
+    if (!value("name")) return void fieldError(form, { field: "name", detail: t("review.error.name") });
+    if (!/^\S+@\S+\.\S+$/.test(value("email"))) return void fieldError(form, { field: "email", detail: t("error.email") });
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      const body = { rating: Number(rating), title: value("title"), review: value("review"), name: value("name"), email: value("email") };
+      await call("POST", `/items/${encodeURIComponent(slug)}/reviews`, body, { "idempotency-key": key });
+      form.replaceWith(h("p", { class: "added", role: "status", text: t("review.thanks") }));
+      announce(t("review.thanks"));
+    } catch (e) {
+      if (!fieldError(form, e)) {
+        out.classList.add("error");
+        out.textContent = e.message;
+      }
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  });
+  section.append(form);
+}
+
+const reviews = document.querySelector("section.reviews[data-review]");
+if (reviews) reviewForm(reviews);
 
 let productReady;
 const buyBox = document.querySelector(".product .buy");

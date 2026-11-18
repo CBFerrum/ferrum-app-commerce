@@ -450,6 +450,42 @@ button[aria-busy="true"]::before {
   margin: 12px 0;
   font-size: 0.92rem;
 }
+.review-box {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.review-box h2 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+.review-box label {
+  display: grid;
+  gap: 4px;
+  max-width: 32rem;
+  margin: 12px 0;
+  font-size: 0.92rem;
+}
+.review-box fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+}
+.review-box legend {
+  width: 100%;
+  margin-bottom: 4px;
+  font-size: 0.92rem;
+}
+.review-box .star-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
 .add {
   display: flex;
   flex-wrap: wrap;

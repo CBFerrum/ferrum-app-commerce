@@ -487,15 +487,17 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
             )
         })
         .collect();
-    let reviews = if count > 0 {
+    // Always there, with or without reviews: the script puts the form to write one in it (`data-review` names the item).
+    let summary = if count > 0 {
         format!(
-            r#"<section class="reviews"><h2>Reviews</h2><p>{} out of 5 from {count} {}</p><ul>{reviews}</ul></section>"#,
+            r#"<p>{} out of 5 from {count} {}</p><ul>{reviews}</ul>"#,
             esc(rating["average"].as_str().unwrap_or("0")),
             if count == 1 { "review" } else { "reviews" }
         )
     } else {
         String::new()
     };
+    let reviews = format!(r#"<section class="reviews" data-review="{}"><h2>Reviews</h2>{summary}</section>"#, esc(slug));
     let related = p["related"]
         .as_array()
         .filter(|r| !r.is_empty())
