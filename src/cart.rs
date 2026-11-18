@@ -129,6 +129,9 @@ impl DocHook for CartHook {
     /// What a shopper does to the cart (`packages/commerce/entities/cart.yaml`): the storefront's routes and agents
     /// alike, as the system on the cart the kernel has locked. Answers the cart's id, status, count and total.
     async fn action(&self, hc: &mut HookCtx<'_>, name: &str, cart: &Doc, params: &Value) -> Result<Option<Value>> {
+        if name == "checkout" {
+            return crate::checkout::place(hc, cart, params).await.map(Some);
+        }
         if !["add_item", "set_quantity", "set_details", "apply_code", "remove_code", "set_shipping", "identify"].contains(&name) {
             return Ok(None);
         }

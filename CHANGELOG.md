@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.0
+
+Needs the same platform and ERP as 0.16.0. Package `commerce` stays 0.6.1. No database change.
+
+- **Checkout is an operation.** `commerce.shopping_cart.checkout`, a hidden action of `ShoppingCart` with a contract
+  (effect `external_effect`, `unknown_outcome: manual`), turns a cart into a submitted web order, its customer and
+  its payment request, once per key and once per cart. `POST /checkout` calls it through the gate and writes nothing
+  else; an agent holding `ShoppingCart: write` (Website Manager) places a web order the same way. The caller's
+  `Idempotency-Key` is the parameter `client_key`, kept on the cart; the gift card's code and PIN and the details
+  are secret parameters. Who the shopper is comes from the cart (`identify`), not from the request.
+- **One difference:** the same `Idempotency-Key` sent again after a successful checkout with a **different** body is
+  now refused with `409` (`input_changed`) instead of answered with the first order. The same key and body still
+  answer the order made; another key on an ordered cart is still `409`.
+
+Tests: `checkout_operation_end_to_end`.
+
 ## 0.16.0
 
 Needs the same platform and ERP as 0.15.1. Package `commerce` 0.6.1. No database change.

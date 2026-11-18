@@ -182,8 +182,11 @@ in stock — under per-item locks, so two checkouts cannot both take the last un
 coupon, then creates a **submitted sales order** priced exactly like the cart and a
 **payment request**. The customer: a signed-in user's linked customer (or a new one with their
 email); a **guest always gets a new guest customer**, even when a customer with that email
-exists — a guest never attaches to (or sees) another customer's account. The same key returns
-the same result again; another key on an ordered cart is `409`. Errors: `422` (missing
+exists — a guest never attaches to (or sees) another customer's account. The route runs the
+operation `commerce.shopping_cart.checkout` through the gate (the same an agent with
+`ShoppingCart: write` uses, `client_key` being the key), under the effect key
+`{cart}:{Idempotency-Key}`. The same key and body return the same result again; the same key
+with another body is `409` (`input_changed`); another key on an ordered cart is `409`. Errors: `422` (missing
 details, `payment_method`, `accept_terms`, `return_url`, `shipping_address.country`, `items`
 rows no longer available / out of stock, `coupon_code`), `409` (`expected_total` differs —
 the message has the new total —, cart already ordered or expired), `403` guest checkout

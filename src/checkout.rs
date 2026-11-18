@@ -1,7 +1,7 @@
-//! Checkout: one transaction turns a cart into a customer, a submitted sales order and a
-//! payment request. It is idempotent per cart and client key: a repeat with the same key
-//! returns the same order, another key gets a conflict. Prices, totals, the customer and every
-//! status come from the server; the client only chooses (payment method, details).
+//! Checkout: the cart's action `checkout` (`commerce.shopping_cart.checkout`), in its caller's transaction, turns a
+//! cart into a customer, a submitted sales order and a payment request. It is done once per cart and client key: a
+//! repeat with the same key answers the same order, another key gets a conflict. Prices, totals, the customer and
+//! every status come from the server; the caller only chooses (payment method, details).
 
 use crate::cart::{self, address_text, goods};
 use crate::catalog::{allocate, available, available_by_warehouse, stock_items};
@@ -10,7 +10,7 @@ use crate::{coupon, gift_card, orders, payment, token};
 use ferrum_app_erp::portal;
 use ferrum_domain::util::{b, d, get, id, money, rows, s, set, sys};
 use ferrum_kernel::vault::Derived;
-use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, Kernel, Result, Tx, outbox, with_retry};
+use ferrum_kernel::{Ctx, Doc, Error, FieldError, Filter, HookCtx, Kernel, Result, Tx, outbox};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -51,17 +51,18 @@ fn from_cart(store: &Store, cart: &Doc) -> Doc {
     c
 }
 
-/// The customer an order belongs to, and whether it was made now. A signed-in user proved their email: a customer it
+/// The customer an order belongs to, and whether it was made now. A signed-in shopper proved their email (`proven`, the
+/// cart's `user_email`, which only `identify` sets): a customer it
 /// is linked to, else theirs, found or made by ERP under a lock on the address held to the end of this transaction, so
 /// two first orders at once make one customer; only the one made now takes the cart's addresses and the store's group.
 /// A guest never attaches to an existing customer (that would hand them its history and addresses), so every guest
 /// checkout makes a new guest customer.
-async fn resolve_customer(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, user: Option<&Ctx>) -> Result<(Uuid, bool)> {
-    if let Some(u) = user {
-        if let Some(c) = portal::customers_of(k, ctx, tx, &u.email).await?.first() {
+async fn resolve_customer(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc, proven: Option<&str>) -> Result<(Uuid, bool)> {
+    if let Some(email) = proven {
+        if let Some(c) = portal::customers_of(k, ctx, tx, email).await?.first() {
             return Ok((*c, false));
         }
-        let (c, made) = portal::customer_for(k, ctx, tx, s(cart, "contact_name").unwrap_or(&u.email), Some(&u.email), s(cart, "phone")).await?;
+        let (c, made) = portal::customer_for(k, ctx, tx, s(cart, "contact_name").unwrap_or(email), Some(email), s(cart, "phone")).await?;
         if made {
             k.set_values_tx(ctx, tx, "Customer", c, from_cart(store, cart)).await?;
         }
@@ -299,19 +300,15 @@ async fn create_order(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
     k.submit_tx(ctx, tx, "SalesOrder", so_id, None).await
 }
 
-pub struct Checkout<'a> {
-    pub tenant: Uuid,
-    pub user: Option<&'a Ctx>,
-    pub cart_token: &'a str,
-    pub key: &'a str,
-    pub body: &'a Map<String, Value>,
-}
-
-pub async fn checkout(k: &Kernel, c: Checkout<'_>) -> Result<Value> {
-    if !valid_key(c.key) {
-        return Err(Error::field("idempotency_key", "send an Idempotency-Key of 8-200 characters"));
-    }
-    let expected = match c.body.get("expected_total") {
+/// "Check Out" (`commerce.shopping_cart.checkout`): the cart, locked by the kernel, becomes a submitted web order.
+/// `client_key` is kept on the cart: checking it out again with the same key answers the order made, with another is
+/// refused. Any refusal after a write returns the error, and the caller's transaction takes it all back.
+pub async fn place(hc: &mut HookCtx<'_>, cart: &Doc, params: &Value) -> Result<Value> {
+    let client_key = match params.get("client_key").and_then(Value::as_str) {
+        Some(key) if valid_key(key) => key.to_string(),
+        _ => return Err(Error::field("idempotency_key", "send an Idempotency-Key of 8-200 characters")),
+    };
+    let expected = match params.get("expected_total") {
         None | Some(Value::Null) => None,
         Some(v) => Some(
             v.as_str()
@@ -321,50 +318,55 @@ pub async fn checkout(k: &Kernel, c: Checkout<'_>) -> Result<Value> {
                 .ok_or_else(|| Error::field("expected_total", "must be a decimal string"))?,
         ),
     };
-    let schema = k.registry.schema(c.tenant).await?;
-    // The key an order's token is signed with, taken before the transaction: the vault answers on a connection of its own.
-    let key = crate::keys::current(k, c.tenant, crate::keys::ORDERS).await?;
-    with_retry(|| async {
-        let ctx = Ctx::system(c.tenant, schema.clone());
-        let mut tx = k.db.tenant_tx(c.tenant).await?;
-        let out = run(k, &ctx, &mut tx, &c, expected, &key).await?;
-        tx.commit().await?;
-        Ok(out)
-    })
-    .await
-}
-
-async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Option<Decimal>, key: &Derived) -> Result<Value> {
-    let mut cart = cart::locate(k, ctx, tx, c.cart_token).await?;
+    let sctx = sys(hc.ctx);
+    let (k, ctx) = (hc.kernel, &sctx);
+    let tx = &mut *hc.tx;
     let store = Store::load(k, ctx, tx).await?;
+    let mut cart = cart.clone();
+    let cart_id = id(&cart, "id").ok_or_else(|| Error::internal("cart without id"))?;
     match s(&cart, "status") {
-        Some("Ordered") if s(&cart, "checkout_key") == Some(c.key) => {
+        Some("Ordered") if s(&cart, "checkout_key") == Some(client_key.as_str()) => {
             let so = id(&cart, "sales_order").ok_or_else(|| Error::internal("ordered cart without order"))?;
-            return response(k, ctx, tx, &store, so, key).await;
+            let so = get(k, ctx, tx, "SalesOrder", so).await?;
+            return Ok(placed(cart_id, &so, s(&cart, "payment_request"), &store));
         }
         Some("Ordered") => return Err(Error::Conflict("this cart has already been checked out".into())),
         Some("Expired") => return Err(Error::Conflict("this cart has expired; start a new cart".into())),
         _ => {}
     }
-    if c.user.is_none() && !store.allow_guest_checkout {
+    let proven = s(&cart, "user_email").map(str::to_string);
+    if proven.is_none() && !store.allow_guest_checkout {
         return Err(Error::Forbidden("sign in to check out".into()));
     }
-    if let Some(details) = c.body.get("details") {
-        let details = details.as_object().ok_or_else(|| Error::field("details", "must be an object"))?;
-        cart = cart::set_details(k, ctx, tx, &store, &cart, details).await?;
+    match params.get("details") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(details)) => cart = cart::set_details(k, ctx, tx, &store, &cart, details).await?,
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(details)) => cart = cart::set_details(k, ctx, tx, &store, &cart, &details).await?,
+            _ => return Err(Error::field("details", "must be an object")),
+        },
+        Some(_) => return Err(Error::field("details", "must be an object")),
     }
-    if store.terms_url.is_some() && c.body.get("accept_terms").and_then(Value::as_bool) != Some(true) {
+    if store.terms_url.is_some() && params.get("accept_terms").and_then(Value::as_bool) != Some(true) {
         return Err(Error::field("accept_terms", "accept the terms to place the order"));
     }
-    let card = gift_card::parse(c.body)?;
-    let gateway = c.body.get("payment_method").and_then(Value::as_str).unwrap_or_default();
+    // A card given is the code (and PIN) as the shopper typed them; an empty code is refused as a missing one.
+    let card = match params.get("gift_card_code").filter(|v| !v.is_null()) {
+        Some(code) => {
+            let mut given = Map::new();
+            given.insert("gift_card".into(), json!({"code": code, "pin": params.get("gift_card_pin")}));
+            gift_card::parse(&given)?
+        }
+        None => None,
+    };
+    let gateway = params.get("payment_method").and_then(Value::as_str).unwrap_or_default();
     // A gift card may pay all of it, with no other method.
     let method = match store.method(gateway) {
         Some(m) => Some(m.clone()),
         None if card.is_some() && gateway.is_empty() => None,
         None => return Err(Error::field("payment_method", "choose one of the store's payment methods")),
     };
-    let return_url = return_url(&store, c.body.get("return_url"))?;
+    let return_url = return_url(&store, params.get("return_url"))?;
     let rules_exist = cart::shipping_rules_exist(tx, ctx.tenant).await?;
     let missing = cart::missing(&cart, rules_exist);
     if !missing.is_empty() {
@@ -375,7 +377,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     }
 
     // The customer, then a final pricing pass for them (their pricing rules, today's prices).
-    let (customer, new_customer) = resolve_customer(k, ctx, tx, &store, &cart, c.user).await?;
+    let (customer, new_customer) = resolve_customer(k, ctx, tx, &store, &cart, proven.as_deref()).await?;
     let mut patch = Doc::new();
     set(&mut patch, "customer", customer.to_string());
     // Before the cart's final pricing, so the cart and its order are taxed for the same place.
@@ -383,10 +385,6 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     if let Some(a) = ship_to {
         set(&mut patch, "ship_to", a.to_string());
     }
-    if let Some(u) = c.user {
-        set(&mut patch, "user_email", u.email.to_lowercase());
-    }
-    let cart_id = id(&cart, "id").ok_or_else(|| Error::internal("cart without id"))?;
     let cart = k.update_tx(ctx, tx, "ShoppingCart", cart_id, patch, None).await.map_err(cart::public_errors)?;
     let missing = cart::missing(&cart, rules_exist);
     if !missing.is_empty() {
@@ -419,7 +417,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         )));
     }
     let by_card = match &card {
-        Some(card) => gift_card::pay(k, ctx, tx, &store, &so, card, c.key).await?,
+        Some(card) => gift_card::pay(k, ctx, tx, &store, &so, card, &client_key).await?,
         None => Decimal::ZERO,
     };
     let request = match &method {
@@ -443,7 +441,7 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     set(&mut done, "status", "Ordered");
     set(&mut done, "sales_order", so_id.to_string());
     set(&mut done, "payment_request", json!(request.as_ref().and_then(|r| s(r, "id"))));
-    set(&mut done, "checkout_key", c.key);
+    set(&mut done, "checkout_key", client_key.as_str());
     set(&mut done, "ordered_at", crate::now_str());
     k.set_values_tx(ctx, tx, "ShoppingCart", cart_id, done).await?;
     if let Some(cid) = id(&cart, "coupon") {
@@ -464,7 +462,9 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
         so_id,
     )
     .await?;
-    let order_token = token::order_token(key, so_id);
+    // The key an order's token is signed with: the vault answers on a connection of its own.
+    let key = crate::keys::current(k, ctx.tenant, crate::keys::ORDERS).await?;
+    let order_token = token::order_token(&key, so_id);
     let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &order_token));
     let event = json!({
         "sales_order": so_id, "number": number, "customer": customer, "email": s(&cart, "email"), "name": s(&cart, "contact_name"),
@@ -485,11 +485,24 @@ async fn run(k: &Kernel, ctx: &Ctx, tx: &mut Tx, c: &Checkout<'_>, expected: Opt
     values.insert("manage_token".into(), json!(manage.as_ref().map(|m| m.1.clone())));
     let secret = if manage.is_some() { vec!["manage_token".to_string()] } else { vec![] };
     crate::tell::message(k, tx, ctx, "commerce.order_placed", so_id, s(&cart, "email"), values, secret).await?;
-    response(k, ctx, tx, &store, so_id, key).await
+    Ok(placed(cart_id, &so, request.as_ref().and_then(|r| s(r, "id")), &store))
 }
 
-/// The checkout result (also what a replay with the same key returns).
-async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid, key: &Derived) -> Result<Value> {
+/// What checking out answers: the cart, its order and what is left to pay, as the contract declares.
+fn placed(cart: Uuid, so: &Doc, payment_request: Option<&str>, store: &Store) -> Value {
+    json!({
+        "id": cart,
+        "sales_order": s(so, "id"),
+        "number": s(so, "number"),
+        "payment_request": payment_request,
+        "rounded_total": d(so, "rounded_total").to_string(),
+        "currency": store.currency_code,
+    })
+}
+
+/// What the storefront answers a checkout (also a repeat with the same key): the order as the shopper sees it, its
+/// token and link, and the payment request still to pay.
+pub async fn response(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so_id: Uuid, key: &Derived) -> Result<Value> {
     let so = get(k, ctx, tx, "SalesOrder", so_id).await?;
     let view = orders::order_view(k, &sys(ctx), tx, store, &so).await?;
     // The one still to pay (beside a gift card's, already paid), else the latest.

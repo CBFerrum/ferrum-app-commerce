@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.16.0-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.17.0-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.16.0 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.17.0 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -127,7 +127,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 - **Cart.** Quantities, removing, steppers, and a placeholder while it loads. The cart asks where it is going (country, region, postal code), lists the delivery methods for the place and shows the total for it, so the total shown is the total charged. A cart's token is shown once and only its hash is stored.
 - **Agents fill carts as shoppers do.** Every cart change, review and stock alert is an operation of the platform's gate (`commerce.shopping_cart.add_item`, `.set_details`, `commerce.website_item.submit_review` and the rest), which the storefront's routes call too: an agent with the right fills a cart exactly as the page does, and a request sent again with the same `Idempotency-Key` is done once.
 - **Priced on every change.** Price list, promotions, tax and rounding come from the selling engine; clients choose items and quantities, never prices or totals.
-- **Checkout in one transaction.** Customer, contact and addresses, final pricing, a stock re-check, a submitted ERP sales order and a payment request, idempotent per cart and client key. Two named steps, a folded summary, each refused field marked beside it.
+- **Checkout in one transaction.** Customer, contact and addresses, final pricing, a stock re-check, a submitted ERP sales order and a payment request, idempotent per cart and client key. It is the operation `commerce.shopping_cart.checkout`, which the storefront calls through the gate and an agent may too. Two named steps, a folded summary, each refused field marked beside it.
 - **Guest and signed-in checkout.** A guest gives an email; a signed-in portal customer gets their own prices and orders.
 - **Tax follows the delivery address.** Checkout records the shipping address as a structured Address (country, region, postcode), which ERP's country rules read; the store's tax template is the fallback.
 - **On a phone.** Empty categories, no results and nothing in stock each say what to do next, and every view has a failure with a way on.
@@ -372,6 +372,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.17.0**: Checkout is the operation `commerce.shopping_cart.checkout`, through the gate for the storefront and an agent alike.
 - [x] **0.16.0**: A shopper's cart, review and stock alert are operations of the gate, which the storefront calls and an agent may too; a cart request sent twice with one `Idempotency-Key` is done once.
 - [x] **0.15.1**: Someone who can only read sales orders can no longer cancel a web order or open a return on it; the shopper's link and the store's desk still can.
 - [x] **0.15.0**: Upkeep runs one workspace at a time, on whichever replica is free.
@@ -526,7 +527,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.16.0**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.17.0**.
 
 ## 🤝 Contributing
 

@@ -4167,3 +4167,165 @@ async fn cart_operations() {
     assert_eq!((after["customer"].clone(), after["user_email"].clone()), (Value::Null, Value::Null));
     let _ = cid;
 }
+
+#[test]
+fn checkout_operation_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(checkout_operation()).await.unwrap() });
+}
+
+/// Checkout is an operation: an agent places a web order as the storefront does, once per key and once per cart.
+async fn checkout_operation() {
+    use ferrum_kernel::capability::Invocation;
+    const CHECKOUT: &str = "commerce.shopping_cart.checkout";
+    let Shop { t, tenant, cid, products, nos, selling, .. } = small_shop("checkoutop").await;
+    let web = person(&t, "web@checkoutop.test", &["Website Manager"]).await;
+    let clerk = person(&t, "clerk@checkoutop.test", &["Sales User"]).await;
+    let op = |name: &str| format!("commerce.shopping_cart.{name}");
+    let agent_cart = |email: &'static str, key: &'static str| {
+        let (k, web) = (t.k.clone(), web.clone());
+        async move {
+            let made = k.invoke(&web, Invocation::new("commerce.shopping_cart.create", json!({"values": {}})).key(format!("{key}:cart"))).await.unwrap();
+            let id = made.result["id"].as_str().unwrap().to_string();
+            let on = |params: Value| json!({"id": id, "params": params});
+            k.invoke(&web, Invocation::new(op("add_item"), on(json!({"item": "blue-mug", "qty": "1"}))).key(format!("{key}:add"))).await.unwrap();
+            let shopper = details(email, "Asha Rao", "IN").to_string();
+            k.invoke(&web, Invocation::new(op("set_details"), on(json!({"details": shopper}))).key(format!("{key}:details"))).await.unwrap();
+            id
+        }
+    };
+    let ask = |cart: &str, method: &str, client: &str| json!({"id": cart, "params": {"payment_method": method, "accept_terms": true, "client_key": client}});
+
+    // ───────────── checkout_is_in_the_catalog_with_its_contract ─────────────
+    let catalog = t.k.catalog(&web);
+    let c = catalog.iter().find(|c| c.id == CHECKOUT).expect("checkout is in the catalog");
+    assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("external_effect"));
+    assert_eq!(c.permissions, vec!["ShoppingCart:write".to_string()]);
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["client_key"]));
+    assert_eq!(returns(&c.output), ["currency", "id", "number", "payment_request", "rounded_total", "sales_order"]);
+
+    // ───────────── an_agent_places_a_web_order ─────────────
+    let cart = agent_cart(GUEST, "agent-a").await;
+    let first = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout")).await.expect("ordered");
+    let so = t.get("SalesOrder", first.result["sales_order"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((so["docstatus"].clone(), so["commerce_web_order"].clone()), (json!(1), json!(true)));
+    assert_eq!((dec(&first.result["rounded_total"]), first.result["number"].clone()), (dec(&so["rounded_total"]), so["number"].clone()));
+    assert_eq!(first.result["currency"], json!("INR"));
+    let number = so["number"].as_str().unwrap().to_string();
+    let request = t.find_one("PaymentRequest", json!({"order_number": number})).await;
+    assert_eq!((request["status"].clone(), first.result["payment_request"].clone()), (json!("Initiated"), request["id"].clone()));
+    let held = t.get("ShoppingCart", cart.parse().unwrap()).await;
+    assert_eq!((held["status"].clone(), dec(&held["rounded_total"])), (json!("Ordered"), dec(&so["rounded_total"])));
+    assert!(events(&t, "commerce.order_placed").await.iter().any(|e| e["number"] == json!(number)), "the order's event is queued");
+
+    // ───────────── a_repeat_places_one_order ─────────────
+    let again =
+        t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout")).await.expect("repeated");
+    assert!(again.repeated);
+    assert_eq!(t.count("SalesOrder", json!({"number": number})).await, 1);
+    assert_eq!(t.count("PaymentRequest", json!({"order_number": number})).await, 1, "one payment request");
+    let changed = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "fakepay", "agent-order-0001")).key("agent-a:checkout")).await;
+    assert_eq!(changed.as_ref().map_err(Error::code).unwrap_err(), "input_changed", "{changed:?}");
+    let same_client =
+        t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout:2")).await.expect("answered");
+    assert_eq!(same_client.result["sales_order"], first.result["sales_order"], "the cart's own key answers the order it made");
+    let other = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0002")).key("agent-a:checkout:3")).await;
+    assert!(matches!(other, Err(Error::Conflict(_))), "{other:?}");
+    let orders = t.count("SalesOrder", json!({})).await;
+
+    // ───────────── a_person_without_the_right_cannot_check_out ─────────────
+    let cart_b = agent_cart("bina@example.com", "agent-b").await;
+    let refused = t.k.invoke(&clerk, Invocation::new(CHECKOUT, ask(&cart_b, "Cash on Delivery", "clerk-order-0001")).key("clerk:checkout")).await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    assert_eq!(t.count("SalesOrder", json!({})).await, orders, "nothing made");
+    assert_eq!(t.get("ShoppingCart", cart_b.parse().unwrap()).await["status"], json!("Open"));
+
+    // ───────────── the_public_checkout_goes_through_the_gate ─────────────
+    let before = receipts(&t, CHECKOUT).await;
+    place(&t, json!([{"item": "blue-mug", "qty": 1}]), "gate@example.com", "fakepay", "gate-order-0001").await;
+    assert_eq!(receipts(&t, CHECKOUT).await, before + 1, "the route's checkout has its receipt");
+
+    // ───────────── a_card_and_details_never_reach_the_audit_trail ─────────────
+    let c = cid.to_string();
+    let current = t.find_one("Account", json!({"account_name": "Current Liabilities", "company": c})).await;
+    let liability = t.insert("Account", json!({"account_name": "Gift Cards", "company": c, "parent_account": current["id"], "root_type": "Liability"})).await;
+    let goodwill = t.find_one("Account", json!({"account_name": "Administrative Expenses", "company": c})).await;
+    let kind = t
+        .insert("StoredValueKind", json!({"kind_name": "Gift Card", "company": c, "liability_account": liability["id"], "adjustment_account": goodwill["id"]}))
+        .await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"gift_card_kind": sid(&kind)})), None).await.unwrap();
+    let card_item = t
+        .insert(
+            "Item",
+            json!({"item_code": "GIFT500", "item_name": "Gift Card 500", "item_group": products["id"], "stock_uom": nos["id"], "is_stock_item": false,
+                   "stored_value_kind": sid(&kind)}),
+        )
+        .await;
+    t.insert("ItemPrice", json!({"item": sid(&card_item), "price_list": selling["id"], "rate": "500"})).await;
+    t.insert("WebsiteItem", json!({"item": sid(&card_item), "published": true})).await;
+    let bought = place(&t, json!([{"item": "gift-card-500", "qty": 1}]), "giver@example.com", "fakepay", "gift-buy-0001").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    pay(&t, &fakepay, bought.request.unwrap(), bought.total, "fp_gift_1").await;
+    let sent = opened_mails(&t, "giver@example.com").await.into_iter().find(|(s, _)| s.contains("gift card")).expect("the code was sent");
+    let code = sent.1.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
+    let (token, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    let body = json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": code.to_lowercase()}, "details": details("card@example.com", "Ravi Rao", "IN")});
+    t.checkout(None, &token, "gift-use-0001", body).await.expect("ordered with the card");
+    let used = t.find_one("ShoppingCart", json!({"email": "card@example.com"})).await;
+    let trail = t.k.audit_trail(&t.ctx, "ShoppingCart", uid(&used)).await.unwrap();
+    let pressed: Vec<String> = trail["events"].as_array().unwrap().iter().filter(|e| e["action"] == json!("action:checkout")).map(|e| e.to_string()).collect();
+    assert_eq!(pressed.len(), 1, "{trail}");
+    for secret in [code.as_str(), &code.to_lowercase(), "card@example.com", "MG Road"] {
+        assert!(!pressed[0].contains(secret), "{secret} in {}", pressed[0]);
+    }
+
+    // ───────────── two_checkouts_of_one_cart_make_one_order ─────────────
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details("twice@example.com", "Two Tries", "IN"))).await;
+    let go = |key: &'static str| {
+        let (k, site, token) = (t.k.clone(), t.site.clone(), token.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: None,
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", token.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await.map(|r| r.status)
+        })
+    };
+    let (a, b) = (go("race-order-0001"), go("race-order-0002"));
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let won = [&a, &b].iter().filter(|r| r.is_ok()).count();
+    let lost = [&a, &b].iter().filter(|r| matches!(r, Err(Error::Conflict(_)))).count();
+    assert_eq!((won, lost), (1, 1), "{a:?} {b:?}");
+    let raced = t.find_one("ShoppingCart", json!({"email": "twice@example.com"})).await;
+    assert_eq!(t.count("SalesOrder", json!({"id": raced["sales_order"]})).await, 1);
+    assert_eq!(t.count("SalesOrder", json!({"commerce_contact_email": "twice@example.com"})).await, 1, "one order for the cart");
+
+    // ───────────── a_signed_in_shopper_orders_as_their_customer_a_guest_never_does ─────────────
+    let meera = t.insert("Customer", json!({"customer_name": "Meera Iyer", "email": "meera@example.com"})).await;
+    let signed = {
+        let u = t.k.create_user(&t.ctx, "meera@example.com", "Meera Iyer", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "portal".into()).await.unwrap()
+    };
+    let (token, _) = t.new_cart(Some(&signed), json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.ok(Some(&signed), "PUT", "/cart/details", &[("x-cart-token", token.as_str())], Some(details("meera@example.com", "Meera Iyer", "IN"))).await;
+    let mine =
+        t.checkout(Some(&signed), &token, "meera-order-0001", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("ordered");
+    let so = t.find_one("SalesOrder", json!({"number": mine["order"]["number"]})).await;
+    assert_eq!(so["customer"], meera["id"], "her own customer");
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details("meera@example.com", "Not Meera", "IN"))).await;
+    let typed = t.checkout(None, &token, "fake-meera-0001", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("ordered");
+    let so = t.find_one("SalesOrder", json!({"number": typed["order"]["number"]})).await;
+    assert_ne!(so["customer"], meera["id"], "a guest typing her email is not her");
+    let guest = t.get("Customer", so["customer"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(guest["commerce_guest"], json!(true));
+}

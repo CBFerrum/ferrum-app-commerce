@@ -8,7 +8,7 @@
 //! the `X-Cart-Token` header, guest orders by number + email + the `X-Order-Token` from checkout.
 
 use crate::catalog::{self, Listing, Sort, decimal_param};
-use crate::checkout::{self, Checkout};
+use crate::checkout;
 use crate::store::Store;
 use crate::{cart, edit, orders, refund, subscriptions, token};
 use async_trait::async_trait;
@@ -228,6 +228,44 @@ async fn reorder(k: &Kernel, r: &Req<'_>, user: &Ctx, number: &str) -> Result<Va
     .await
 }
 
+/// Checks the cart out through the gate (`commerce.shopping_cart.checkout`) under the request's `Idempotency-Key`,
+/// which the cart keeps; answers the order as the shopper sees it, with its token. A repeat is answered from the cart.
+async fn checkout(k: &Kernel, r: &Req<'_>, body: &Map<String, Value>) -> Result<Value> {
+    let key = r.header("idempotency-key").or_else(|| body.get("idempotency_key").and_then(Value::as_str)).unwrap_or_default().to_string();
+    if !checkout::valid_key(&key) {
+        return Err(Error::field("idempotency_key", "send an Idempotency-Key of 8-200 characters"));
+    }
+    let token = r.cart_token()?;
+    let card = match body.get("gift_card") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(card)) => Some(card),
+        Some(_) => return Err(Error::field("gift_card", "must be an object with the card's code")),
+    };
+    let given = |f: &str| body.get(f).cloned().unwrap_or(Value::Null);
+    let params = json!({
+        "payment_method": given("payment_method"), "accept_terms": given("accept_terms"), "expected_total": given("expected_total"),
+        "return_url": given("return_url"), "details": given("details"),
+        // A card given without a code is refused for its code, as a missing one.
+        "gift_card_code": card.map(|c| c.get("code").cloned().unwrap_or(json!(""))), "gift_card_pin": card.and_then(|c| c.get("pin").cloned()),
+        "client_key": key,
+    });
+    // The key an order's token is signed with, taken before the transaction: the vault answers on a connection of its own.
+    let signing = crate::keys::current(k, r.ctx.tenant, crate::keys::ORDERS).await?;
+    with_retry(|| async {
+        let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+        let store = Store::load(k, &r.ctx, &mut tx).await?;
+        let cid = cart_id(&mut tx, r.ctx.tenant, token).await?;
+        identify(k, r, &mut tx, cid, &key).await?;
+        invoke(k, r, &mut tx, &format!("{CART}.checkout"), json!({"id": cid, "params": params}), format!("{cid}:{key}")).await?;
+        let cart = k.get_tx(&r.ctx, &mut tx, "ShoppingCart", cid, false).await?;
+        let so = id(&cart, "sales_order").ok_or_else(|| Error::internal("a cart checked out without an order"))?;
+        let out = checkout::response(k, &r.ctx, &mut tx, &store, so, &signing).await?;
+        tx.commit().await?;
+        Ok(out)
+    })
+    .await
+}
+
 /// A review or a stock alert of a published item, through the gate.
 async fn item_act(k: &Kernel, r: &Req<'_>, slug: &str, action: &str, params: Value) -> Result<()> {
     let key = request_key(r)?;
@@ -339,9 +377,7 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         }
         ("POST", ["checkout"]) => {
             let body = r.body()?;
-            let key = r.header("idempotency-key").or_else(|| body.get("idempotency_key").and_then(Value::as_str)).unwrap_or_default().to_string();
-            let c = Checkout { tenant: r.ctx.tenant, user: r.user, cart_token: r.cart_token()?, key: &key, body: &body };
-            ok(checkout::checkout(k, c).await?)
+            ok(checkout(k, r, &body).await?)
         }
         ("POST", ["orders", "pay"]) => {
             let body = r.body()?;
