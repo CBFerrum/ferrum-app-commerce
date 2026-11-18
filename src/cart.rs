@@ -183,9 +183,11 @@ pub fn qty_of(v: Option<&Value>, default: Option<Decimal>) -> Result<Decimal> {
 async fn identify(k: &Kernel, ctx: &Ctx, tx: &mut Tx, cart: &Doc, email: Option<String>) -> Result<Doc> {
     let mut patch = Doc::new();
     match email.map(|e| e.to_lowercase()) {
+        // A guest's again: nothing of the customer's stays, their Address included (a guest is priced for the place they give).
         None => {
             patch.insert("user_email".into(), Value::Null);
             patch.insert("customer".into(), Value::Null);
+            patch.insert("ship_to".into(), Value::Null);
         }
         Some(email) => {
             if id(cart, "customer").is_none()

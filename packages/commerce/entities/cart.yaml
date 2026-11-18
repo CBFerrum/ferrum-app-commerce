@@ -98,7 +98,9 @@
        contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
                   completion: "The line has the quantity (or is gone), the cart priced again, committed with this receipt"}}
     - {name: set_details, label: Set Contact and Addresses, permission: write, hidden: true,
-       params: [{name: details, label: Details, type: text, required: true, secret: true,
+       # Not secret: a store takes a shopper's details with the vault closed (a secret parameter's receipt needs it), and
+       # the cart's own history holds what it changed to anyway.
+       params: [{name: details, label: Details, type: text, required: true,
                  description: "A JSON object: email, phone, name, notes, reminder_consent, billing_same_as_shipping, shipping_address and billing_address ({line1, line2, city, state, postal_code, country}). Keys left out stay as they are"}],
        contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
                   completion: "The cart carries the details and is priced for where it goes, committed with this receipt"}}

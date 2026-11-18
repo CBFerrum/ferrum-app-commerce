@@ -8,13 +8,16 @@ Needs the same platform and ERP as 0.15.1. Package `commerce` 0.6.1. No database
   `.set_quantity`, `.set_details`, `.apply_code`, `.remove_code`, `.set_shipping`, `.identify`, beside the record
   operation `.create`) and two of `WebsiteItem` (`commerce.website_item.submit_review`, `.stock_alert`), hidden on
   the form, each with a contract. The storefront's cart, review, stock-alert and reorder routes call them through
-  the gate and write nothing else, so an agent fills a cart exactly as the page does. Contact details, addresses
-  and a reviewer's name and email are secret parameters: kept out of the audit entry and the receipt.
+  the gate and write nothing else, so an agent fills a cart exactly as the page does. A reviewer's name and
+  email, a stock alert's email and a signed-in shopper's email are secret parameters: kept out of the audit entry
+  and the receipt. A cart's contact details and addresses are not: a store takes them with the vault closed (a
+  secret parameter's receipt needs the vault), and the cart's own history holds them anyway.
 - **A request sent twice is done once.** Cart, review and stock-alert routes take an `Idempotency-Key` header;
   the same key again repeats nothing. Without one each request is its own.
 - **Website Manager may now change and create carts** (for a shopper, or through an agent they own).
 - **One difference:** a cart a signed-in shopper filled becomes a guest's at the first change made signed out
-  (before, it kept the customer's prices until checkout). Reading a cart still changes nothing.
+  (before, it kept the customer's prices until checkout), and drops the customer's Address with them: it is priced
+  for the place given. Reading a cart still changes nothing.
 
 Tests: `cart_operations_end_to_end`.
 
