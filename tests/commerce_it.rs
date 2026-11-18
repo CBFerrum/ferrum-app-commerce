@@ -2610,6 +2610,14 @@ async fn after_sales() {
         ends > chrono::Utc::now() + chrono::Duration::days(40) && ends < chrono::Utc::now() + chrono::Duration::days(46),
         "the longest window: a return 14 days after a delivery that may be a month off: {ends}"
     );
+    // ───────────── a_reader_cannot_cancel_or_return_a_web_order: reading orders is not running them ─────────────
+    let p = PermissionDef { entity: "SalesOrder".into(), read: true, ..Default::default() };
+    t.k.set_role_permission(&t.ctx, "Order Reader", &p).await.unwrap();
+    let reader = person(&t, "reader@after-sales.example", &["Order Reader"]).await;
+    let refused = t.k.run_action(&reader, "SalesOrder", a.so, "web_shopper_cancel", json!({})).await;
+    assert!(matches!(refused, Err(Error::Forbidden(_))), "a reader cannot cancel a web order: {refused:?}");
+    assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(1), "still submitted");
+    assert_eq!(t.count("OrderRefund", json!({"sales_order": a.so.to_string()})).await, 0, "nothing refunded");
     let out = use_link(&link_a, "web_shopper_cancel", json!({"reason": "bought twice"})).await.expect("cancelled").expect("an answer");
     assert_eq!(out["refunds"].as_array().unwrap().len(), 1, "{out}");
     let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await;
@@ -2636,6 +2644,10 @@ async fn after_sales() {
     let early = use_link(&link_b, "web_shopper_return", json!({})).await.unwrap_err().to_string();
     assert!(early.contains("delivered"), "nothing to send back before it is delivered: {early}");
     t.k.run_action(&t.ctx, "SalesOrder", b.so, "web_ship", json!({"notify": "No"})).await.expect("shipped and invoiced");
+    let refused = t.k.run_action(&reader, "SalesOrder", b.so, "web_shopper_return", json!({})).await;
+    assert!(matches!(refused, Err(Error::Forbidden(_))), "a reader cannot open a return on a web order: {refused:?}");
+    assert_eq!(t.get("SalesOrder", b.so).await["docstatus"], json!(1), "still submitted");
+    assert_eq!(t.count("ReturnRequest", json!({"sales_order": b.so.to_string()})).await, 0, "no return asked for");
     let too_many = use_link(&link_b, "web_shopper_return", json!({"lines": "1x5"})).await.unwrap_err().to_string();
     assert!(too_many.contains("at most 2"), "{too_many}");
     let made = use_link(&link_b, "web_shopper_return", json!({"lines": "1x1", "reason": "wrong item sent", "note": "the handle is chipped"}))
@@ -2704,6 +2716,14 @@ async fn after_sales() {
     t.sql(&format!("update e_delivery_note set created_at = now() - interval '20 days' where id in (select parent_id from e_delivery_note__items where sales_order = '{}')", d.so)).await;
     let gone = use_link(&link_d, "web_shopper_return", json!({})).await.unwrap_err().to_string();
     assert!(gone.contains("14 days") && gone.contains("passed") || gone.contains("sent back"), "{gone}");
+
+    // ───────────── the_desk_may_do_it_for_the_shopper: sales staff open a return on a delivered order ─────────────
+    let e = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "desk@example.com", "fakepay", "after-e-0001").await;
+    pay(&t, &t.ctx, e.request.unwrap(), e.total, "fp_after_e").await;
+    t.k.run_action(&t.ctx, "SalesOrder", e.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
+    let desk = person(&t, "desk@after-sales.example", &["Sales User"]).await;
+    t.k.run_action(&desk, "SalesOrder", e.so, "web_shopper_return", json!({"reason": "phoned in"})).await.expect("the desk asks for the shopper");
+    assert_eq!(t.count("ReturnRequest", json!({"sales_order": e.so.to_string()})).await, 1);
 }
 
 #[test]

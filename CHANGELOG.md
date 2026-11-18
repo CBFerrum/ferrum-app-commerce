@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.1
+
+Needs the same platform and ERP as 0.15.0. No database or interface change.
+
+- **A shopper's cancel and return are the shopper's or the desk's.** `web_shopper_cancel` and `web_shopper_return`
+  are declared with `read` on the order because a link's guest holds no role, and their handlers never asked who
+  called, so any member who could read sales orders could cancel a web order or open a return on it. Both now
+  refuse anyone who is neither outside (the link's guest, a portal customer on their own order) nor running the
+  store's orders (Website Manager, Sales Manager, Sales User, administrators), before anything is read or written.
+
+Tests: `after_sales_end_to_end` adds `a_reader_cannot_cancel_or_return_a_web_order` and
+`the_desk_may_do_it_for_the_shopper`.
+
 ## 0.15.0
 
 Needs Ferrum 0.4.0 (apps' upkeep runs one workspace at a time, on whichever replica is free).

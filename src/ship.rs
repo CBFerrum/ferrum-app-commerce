@@ -20,7 +20,7 @@ use uuid::Uuid;
 const ROLES: [&str; 3] = ["Website Manager", "Sales Manager", "Sales User"];
 
 /// Whether the caller runs the store's orders (administrators do).
-fn may_run_orders(ctx: &Ctx) -> bool {
+pub(crate) fn may_run_orders(ctx: &Ctx) -> bool {
     ctx.is_system || ROLES.iter().any(|r| ctx.has_role(r))
 }
 
