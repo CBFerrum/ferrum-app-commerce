@@ -96,7 +96,6 @@ async fn fresh_kernel() -> Arc<Kernel> {
     SENT.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let k = kernel(db).await;
     ferrum_domain::maintenance(&k).await.expect("maintenance");
-    ferrum_app_erp::maintenance(&k).await.expect("maintenance");
     k
 }
 
@@ -859,7 +858,7 @@ async fn scenario() {
     t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{pr_e}'")).await;
     let late = t.k.run_action(&fakepay, "PaymentRequest", pr_e, "mark_paid", json!({"amount": placed_e["payment_request"]["amount"], "currency": "INR"})).await;
     assert!(matches!(late, Err(Error::Invalid(ref m)) if m.contains("expired")), "{late:?}");
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     assert_eq!(t.get("PaymentRequest", pr_e).await["status"], json!("Expired"));
     let so_e = t.find_one("SalesOrder", json!({"number": placed_e["order"]["number"]})).await;
     assert_eq!(so_e["docstatus"], json!(2), "the unpaid order is cancelled");
@@ -951,7 +950,7 @@ async fn scenario() {
     };
     t.sql(&format!("update e_shopping_cart set last_activity = now() - interval '2 days' where token_hash = '{}'", hash(&g))).await;
     t.sql(&format!("update e_shopping_cart set last_activity = now() - interval '40 days' where token_hash = '{}'", hash(&h))).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     let idle = t.find_one("ShoppingCart", json!({"email": "idle@example.com"})).await;
     assert_eq!(idle["status"], json!("Abandoned"));
     let events: i64 = {
@@ -1499,7 +1498,7 @@ async fn gift_cards() {
     let (late, request) = with_card("logo-tee", "late@example.com", "gift-late-0001", Some("fakepay")).await;
     assert_eq!((dec(&card().await["held"]), dec(&card().await["balance"])), (n("472"), n("472")));
     t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{}'", request.unwrap())).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     assert_eq!(t.get("PaymentRequest", request.unwrap()).await["status"], json!("Expired"));
     assert_eq!(t.get("SalesOrder", late).await["docstatus"], json!(2), "cancelled by the upkeep: nothing was invoiced, so nothing stops it");
     assert_eq!((dec(&card().await["held"]), dec(&card().await["balance"])), (n("0"), n("472")), "the card's value is free again");
@@ -2823,7 +2822,7 @@ async fn shopper_mails() {
         let (t, id) = (&t, uid(&shipment));
         async move {
             t.sql(&format!("update e_carrier_shipment set status = '{status}', tracking_status = '{said}', last_tracked_at = now(), delivery_note = '{dn}' where id = '{id}'")).await;
-            ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+            ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
         }
     };
     carrier_says("In Transit", "somewhere").await;
@@ -2845,12 +2844,12 @@ async fn shopper_mails() {
     t.ok(None, "POST", "/items/blue-mug/stock-alert", &[], Some(json!({"email": "Wait@Example.com"}))).await;
     t.ok(None, "POST", "/items/blue-mug/stock-alert", &[], Some(json!({"email": "wait@example.com"}))).await;
     assert_eq!(t.count("StockAlert", json!({"email": "wait@example.com"})).await, 1, "asking twice is one alert");
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     assert!(subjects("wait@example.com").await.is_empty(), "still out of stock");
     let back = t.k.insert(&t.ctx, "StockEntry", obj(json!({"company": cid.to_string(), "purpose": "Material Receipt", "items": [{"item": mug.to_string(), "qty": "5", "basic_rate": "90", "target_warehouse": stores["id"]}]}))).await.unwrap();
     t.submit("StockEntry", uid(&back)).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     let told = opened_mails(&t, "wait@example.com").await;
     assert_eq!(told.len(), 1, "told once: {told:?}");
     assert!(told[0].0.contains("Blue Mug") && told[0].1.contains("&#x2f;p&#x2f;blue-mug"), "{told:?}");
@@ -2868,7 +2867,7 @@ async fn shopper_mails() {
     remind("may@example.com", true).await;
     remind("mayhem@example.com", false).await;
     t.sql("update e_shopping_cart set last_activity = now() - interval '3 days' where status = 'Open'").await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     let seen = events(&t, "commerce.cart_abandoned").await;
     let consent_of = |email: &str| seen.iter().find(|e| e["email"] == json!(email)).map(|e| e["consent"].clone());
     assert_eq!((consent_of("may@example.com"), consent_of("mayhem@example.com")), (Some(json!(true)), Some(json!(false))));
@@ -2994,7 +2993,7 @@ async fn old_workspace() {
         .expect("edited without the seeded reason");
     assert_eq!(t.count("OrderRefund", json!({"sales_order": c.so.to_string(), "kind": "Adjustment"})).await, 1);
     t.sql("update e_shopping_cart set last_activity = now() - interval '3 days' where status = 'Open'").await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
 
     // The pages are English with no setting for languages, the shopper's link shows the order without terms to say, and
     // the desk's mail again falls back to three a day.
@@ -3135,7 +3134,7 @@ async fn the_rest_after_a_card() {
     let rest = again(&lost, "lost@example.com", "fakepay").await.expect("asked for the rest");
     let rest_request: Uuid = rest["payment_request"]["id"].as_str().unwrap().parse().unwrap();
     t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{rest_request}'")).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     assert_eq!(t.get("PaymentRequest", rest_request).await["status"], json!("Expired"));
     let so = t.get("SalesOrder", lost.so).await;
     assert_eq!((so["docstatus"].clone(), so["commerce_payment_status"].clone()), (json!(2), json!("Refunded")), "cancelled by the upkeep");
@@ -3190,7 +3189,7 @@ async fn the_rest_after_a_card() {
         .expect("checkout");
     let request: Uuid = done["payment_request"]["id"].as_str().unwrap().parse().unwrap();
     t.sql(&format!("update e_payment_request set expires_at = now() - interval '1 minute' where id = '{request}'")).await;
-    ferrum_app_commerce::maintenance(&t.k).await.expect("upkeep");
+    ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     assert_eq!(dec(&card(account).await["held"]), n("0"), "let go");
     let body = json!({"number": done["order"]["number"], "email": "kept@example.com", "token": done["order_token"], "payment_method": "fakepay"});
     let retry = t.ok(None, "POST", "/orders/pay", &[], Some(body)).await;

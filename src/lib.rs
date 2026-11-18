@@ -94,8 +94,8 @@ pub fn reports() -> Vec<Arc<dyn ReportSource>> {
 /// Periodic upkeep: every minute, on one replica at a time (advisory lock); must be idempotent and cheap.
 /// Expires unpaid payment requests (cancelling their orders to release stock when the store says
 /// so), marks idle carts abandoned and old ones expired.
-pub async fn maintenance(k: &Kernel) -> Result<()> {
-    upkeep::run(k).await
+pub async fn maintenance(k: &Kernel, tenant: uuid::Uuid) -> Result<()> {
+    upkeep::run(k, tenant).await
 }
 
 /// Whether the tenant behind `ctx` installed this package (hooks on shared entities check it).

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0
+
+Needs Ferrum 0.4.0 (apps' upkeep runs one workspace at a time, on whichever replica is free).
+
+- **Upkeep is one workspace's.** `maintenance(k, tenant)` does the store's upkeep (expiring unpaid payment requests, abandoning idle carts, shopper news) for the workspace the platform hands it; the list of workspaces and the installation check are the platform's. A failing step now returns its error, which the platform keeps on the workspace's row.
+
+No database or interface change.
+
 ## 0.14.3
 
 Needs the same platform and ERP as 0.14.2. No database or interface change.
