@@ -1,7 +1,10 @@
 //! The storefront API: `/api/site/{tenant}/commerce/...` for the public and
 //! `/api/app/commerce/...` for signed-in customers (same routes, plus their orders and invoices).
 //! Every request acts with the system context after validating its input: callers choose items,
-//! quantities and details — never prices, totals, customers or statuses. Carts are addressed by
+//! quantities and details — never prices, totals, customers or statuses. What a shopper changes (a cart, a review,
+//! a stock alert) is done through the gate, by the same operations an agent uses (`commerce.shopping_cart.*`,
+//! `commerce.website_item.submit_review` and `.stock_alert`), each under a key: the request's `Idempotency-Key`, or
+//! one made for it, so a request sent again is done once. Carts are addressed by
 //! the `X-Cart-Token` header, guest orders by number + email + the `X-Order-Token` from checkout.
 
 use crate::catalog::{self, Listing, Sort, decimal_param};
@@ -11,10 +14,10 @@ use crate::{cart, edit, orders, refund, subscriptions, token};
 use async_trait::async_trait;
 use ferrum_app_erp::portal::customers_of;
 use ferrum_domain::util::{id, s};
-use ferrum_kernel::{Ctx, Doc, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
+use ferrum_kernel::capability::{Invocation, Receipt};
+use ferrum_kernel::{Ctx, Error, Kernel, Result, Site, SiteRequest, SiteResponse, Tx, with_retry};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
-use std::str::FromStr;
 use uuid::Uuid;
 
 const MAX_BODY: usize = 64 * 1024;
@@ -70,17 +73,6 @@ fn text<'a>(body: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     body.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| Error::field(key, "is required"))
 }
 
-fn qty(body: &Map<String, Value>, default: Option<Decimal>) -> Result<Decimal> {
-    let bad = || Error::field("qty", "must be a number");
-    match body.get("qty") {
-        None | Some(Value::Null) => default.ok_or_else(|| Error::field("qty", "is required")),
-        Some(Value::String(v)) => Decimal::from_str(v.trim()).map_err(|_| bad()),
-        Some(Value::Number(n)) => Decimal::from_str(&n.to_string()).map_err(|_| bad()),
-        Some(_) => Err(bad()),
-    }
-    .map(|q| q.normalize())
-}
-
 /// The signed-in caller's customer (for their prices), if any.
 async fn customer_of(k: &Kernel, r: &Req<'_>, tx: &mut Tx) -> Result<Option<Uuid>> {
     match r.user {
@@ -89,33 +81,68 @@ async fn customer_of(k: &Kernel, r: &Req<'_>, tx: &mut Tx) -> Result<Option<Uuid
     }
 }
 
-enum CartOp {
-    View,
-    Add(String, Decimal),
-    SetQty(String, Decimal),
-    Details(Map<String, Value>),
-    Coupon(String),
-    NoCoupon(Option<String>),
-    Shipping(String),
+/// A cart's operations, as their capability ids name them.
+const CART: &str = "commerce.shopping_cart";
+
+/// The key a shopper's change is done once under: the request's `Idempotency-Key`, or one made for it. Taken before
+/// any retry, so a retried transaction is the same effect.
+fn request_key(r: &Req<'_>) -> Result<String> {
+    match r.header("idempotency-key") {
+        Some(key) if checkout::valid_key(key) => Ok(key.to_string()),
+        Some(_) => Err(Error::field("idempotency_key", "send an Idempotency-Key of 8-200 characters")),
+        None => Ok(Uuid::now_v7().to_string()),
+    }
 }
 
-async fn cart_op(k: &Kernel, r: &Req<'_>, op: CartOp) -> Result<Value> {
+/// Runs a capability through the gate, as the storefront (the system), in the request's transaction.
+async fn invoke(k: &Kernel, r: &Req<'_>, tx: &mut Tx, capability: &str, input: Value, key: String) -> Result<Receipt> {
+    k.invoke_tx(&r.ctx, tx, &Invocation::new(capability, input).key(key)).await
+}
+
+/// The cart behind a token: a read, by id (the operation that changes it locks it).
+async fn cart_id(tx: &mut Tx, tenant: Uuid, cart_token: &str) -> Result<Uuid> {
+    if !token::well_formed(cart_token) {
+        return Err(Error::NotFound("cart".into()));
+    }
+    let found: Option<Uuid> = sqlx::query_scalar("select id from e_shopping_cart where tenant_id = $1 and token_hash = $2")
+        .bind(tenant)
+        .bind(token::hash(cart_token))
+        .fetch_optional(&mut **tx)
+        .await?;
+    found.ok_or_else(|| Error::NotFound("cart".into()))
+}
+
+/// A cart is the signed-in shopper's (their customer, for their prices) or, signed out, a guest's: said through the
+/// gate when the cart says otherwise.
+async fn identify(k: &Kernel, r: &Req<'_>, tx: &mut Tx, cart: Uuid, key: &str) -> Result<()> {
+    let doc = k.get_tx(&r.ctx, tx, "ShoppingCart", cart, false).await?;
+    let want = r.user.map(|u| u.email.to_lowercase());
+    let needed = match &want {
+        _ if s(&doc, "user_email") != want.as_deref() => true,
+        Some(email) => id(&doc, "customer").is_none() && !customers_of(k, &r.ctx, tx, email).await?.is_empty(),
+        None => false,
+    };
+    if needed {
+        invoke(k, r, tx, &format!("{CART}.identify"), json!({"id": cart, "params": {"email": want}}), format!("{cart}:{key}:identify")).await?;
+    }
+    Ok(())
+}
+
+/// The cart a token names, as the shopper sees it, after `act` (an operation of the cart and its params) if any.
+async fn cart_op(k: &Kernel, r: &Req<'_>, act: Option<(&str, Value)>) -> Result<Value> {
     let token = r.cart_token()?;
+    let key = if act.is_some() { request_key(r)? } else { String::new() };
     with_retry(|| async {
         let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
         let store = Store::load(k, &r.ctx, &mut tx).await?;
-        let mut cart = cart::locate(k, &r.ctx, &mut tx, token).await?;
-        if !matches!(op, CartOp::View) {
-            cart = attach_user(k, r, &mut tx, cart).await?;
-        }
-        let cart = match &op {
-            CartOp::View => cart,
-            CartOp::Add(item, q) => cart::add_item(k, &r.ctx, &mut tx, &store, &cart, item, *q).await?,
-            CartOp::SetQty(line, q) => cart::set_qty(k, &r.ctx, &mut tx, &store, &cart, line, *q).await?,
-            CartOp::Details(body) => cart::set_details(k, &r.ctx, &mut tx, &store, &cart, body).await?,
-            CartOp::Coupon(code) => cart::apply_coupon(k, &r.ctx, &mut tx, &store, &cart, code).await?,
-            CartOp::NoCoupon(code) => cart::remove_coupon(k, &r.ctx, &mut tx, &cart, code.as_deref()).await?,
-            CartOp::Shipping(rule) => cart::set_shipping(k, &r.ctx, &mut tx, &cart, rule).await?,
+        let cart = match &act {
+            None => cart::locate(k, &r.ctx, &mut tx, token).await?,
+            Some((name, params)) => {
+                let cid = cart_id(&mut tx, r.ctx.tenant, token).await?;
+                identify(k, r, &mut tx, cid, &key).await?;
+                invoke(k, r, &mut tx, &format!("{CART}.{name}"), json!({"id": cid, "params": params}), format!("{cid}:{key}")).await?;
+                k.get_tx(&r.ctx, &mut tx, "ShoppingCart", cid, false).await?
+            }
         };
         let view = cart::view(k, &r.ctx, &mut tx, &store, &cart).await?;
         tx.commit().await?;
@@ -124,21 +151,14 @@ async fn cart_op(k: &Kernel, r: &Req<'_>, op: CartOp) -> Result<Value> {
     .await
 }
 
-/// A signed-in customer's cart carries their customer, so it shows their prices.
-async fn attach_user(k: &Kernel, r: &Req<'_>, tx: &mut Tx, cart: Doc) -> Result<Doc> {
-    let Some(u) = r.user else { return Ok(cart) };
-    let email = u.email.to_lowercase();
-    let customer = if id(&cart, "customer").is_none() { customers_of(k, &r.ctx, tx, &email).await?.into_iter().next() } else { None };
-    if customer.is_none() && s(&cart, "user_email") == Some(email.as_str()) {
-        return Ok(cart);
-    }
-    let mut patch = Doc::new();
-    patch.insert("user_email".into(), json!(email));
-    if let Some(c) = customer {
-        patch.insert("customer".into(), json!(c.to_string()));
-    }
-    let cid = id(&cart, "id").ok_or_else(|| Error::internal("cart without id"))?;
-    k.update_tx(&r.ctx, tx, "ShoppingCart", cid, patch, None).await
+/// A new cart through the gate (its token's hash as a value; the token itself never enters an operation), the
+/// shopper's when signed in. Answers its id and the token, shown this once.
+async fn new_cart(k: &Kernel, r: &Req<'_>, tx: &mut Tx, key: &str) -> Result<(Uuid, String)> {
+    let (cart_token, hash) = token::new_cart_token();
+    let made = invoke(k, r, tx, &format!("{CART}.create"), json!({"values": {"token_hash": hash, "items": []}}), format!("cart:{key}")).await?;
+    let cid = made.result.get("id").and_then(Value::as_str).and_then(|v| v.parse().ok()).ok_or_else(|| Error::internal("a cart made without an id"))?;
+    identify(k, r, tx, cid, key).await?;
+    Ok((cid, cart_token))
 }
 
 async fn create_cart(k: &Kernel, r: &Req<'_>) -> Result<Value> {
@@ -149,22 +169,95 @@ async fn create_cart(k: &Kernel, r: &Req<'_>) -> Result<Value> {
             .iter()
             .map(|l| {
                 let m = l.as_object().ok_or_else(|| Error::field("items", "each item is an object"))?;
-                Ok((text(m, "item")?.to_string(), qty(m, Some(Decimal::ONE))?))
+                Ok((text(m, "item")?.to_string(), cart::qty_of(m.get("qty"), Some(Decimal::ONE))?))
             })
             .collect::<Result<_>>()?,
         Some(_) => return Err(Error::field("items", "must be a list of at most 100 items")),
     };
+    let key = Uuid::now_v7().to_string();
     with_retry(|| async {
         let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
         let store = Store::load(k, &r.ctx, &mut tx).await?;
-        let (token, mut cart) = cart::create(k, &r.ctx, &mut tx, r.user.map(|u| u.email.to_lowercase()).as_deref()).await?;
-        cart = attach_user(k, r, &mut tx, cart).await?;
-        for (item, q) in &lines {
-            cart = cart::add_item(k, &r.ctx, &mut tx, &store, &cart, item, *q).await?;
+        let (cid, cart_token) = new_cart(k, r, &mut tx, &key).await?;
+        for (n, (item, q)) in lines.iter().enumerate() {
+            invoke(k, r, &mut tx, &format!("{CART}.add_item"), json!({"id": cid, "params": {"item": item, "qty": q.to_string()}}), format!("{cid}:{key}:{n}"))
+                .await?;
         }
+        let cart = k.get_tx(&r.ctx, &mut tx, "ShoppingCart", cid, false).await?;
         let view = cart::view(k, &r.ctx, &mut tx, &store, &cart).await?;
         tx.commit().await?;
-        Ok(json!({"token": token, "cart": view}))
+        Ok(json!({"token": cart_token, "cart": view}))
+    })
+    .await
+}
+
+/// A new cart holding an earlier order's goods at today's prices, each line added through the gate on its own
+/// savepoint: one no longer sold, or refused (out of stock, over a limit), is listed as skipped.
+async fn reorder(k: &Kernel, r: &Req<'_>, user: &Ctx, number: &str) -> Result<Value> {
+    let key = Uuid::now_v7().to_string();
+    with_retry(|| async {
+        let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+        let store = Store::load(k, &r.ctx, &mut tx).await?;
+        let so = orders::own_order(k, &r.ctx, &mut tx, user, number).await?;
+        let lines = orders::reorder_lines(&mut tx, r.ctx.tenant, &store, &so).await?;
+        let (cid, cart_token) = new_cart(k, r, &mut tx, &key).await?;
+        let mut skipped = Vec::new();
+        for (n, (wid, qty, name)) in lines.into_iter().enumerate() {
+            let Some(wid) = wid else {
+                skipped.push(name);
+                continue;
+            };
+            sqlx::query("savepoint reorder_line").execute(&mut *tx).await?;
+            let input = json!({"id": cid, "params": {"item": wid.to_string(), "qty": qty.normalize().to_string()}});
+            match invoke(k, r, &mut tx, &format!("{CART}.add_item"), input, format!("{cid}:{key}:{n}")).await {
+                Ok(_) => {
+                    sqlx::query("release savepoint reorder_line").execute(&mut *tx).await?;
+                }
+                Err(Error::Validation(_)) => {
+                    sqlx::raw_sql("rollback to savepoint reorder_line; release savepoint reorder_line").execute(&mut *tx).await?;
+                    skipped.push(name);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let cart = k.get_tx(&r.ctx, &mut tx, "ShoppingCart", cid, false).await?;
+        let view = cart::view(k, &r.ctx, &mut tx, &store, &cart).await?;
+        tx.commit().await?;
+        Ok(json!({"token": cart_token, "cart": view, "skipped": skipped}))
+    })
+    .await
+}
+
+/// A review or a stock alert of a published item, through the gate.
+async fn item_act(k: &Kernel, r: &Req<'_>, slug: &str, action: &str, params: Value) -> Result<()> {
+    let key = request_key(r)?;
+    with_retry(|| async {
+        let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
+        let wi = catalog::published_by_slug(k, &r.ctx, &mut tx, slug).await?;
+        let wid = id(&wi, "id").ok_or_else(|| Error::NotFound("item".into()))?;
+        let params = match (action, r.user) {
+            // A signed-in shopper reviews as themselves: their email, their name unless they give one, their customer.
+            ("submit_review", Some(u)) => {
+                let email = u.email.to_lowercase();
+                let customer = customers_of(k, &r.ctx, &mut tx, &email).await?.into_iter().next();
+                let mut p = params.clone();
+                let blank = match p.get("name") {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(v)) => v.trim().is_empty(),
+                    Some(_) => false,
+                };
+                if blank {
+                    p["name"] = json!(u.full_name);
+                }
+                p["email"] = json!(email);
+                p["customer"] = json!(customer.map(|c| c.to_string()));
+                p
+            }
+            _ => params.clone(),
+        };
+        invoke(k, r, &mut tx, &format!("commerce.website_item.{action}"), json!({"id": wid, "params": params}), format!("{wid}:{key}")).await?;
+        tx.commit().await?;
+        Ok(())
     })
     .await
 }
@@ -209,42 +302,41 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         ("GET", ["catalog"]) => ok(catalog(k, r).await?),
         ("POST", ["items", slug, "reviews"]) => {
             let body = r.body()?;
-            let out = with_retry(|| async {
-                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
-                let out = catalog::submit_review(k, &r.ctx, &mut tx, slug, &body, r.user).await?;
-                tx.commit().await?;
-                Ok(out)
-            })
-            .await?;
-            Ok((201, out))
+            let given = |f: &str| body.get(f).cloned().unwrap_or(Value::Null);
+            let params = json!({"rating": given("rating"), "title": given("title"), "review": given("review"), "name": given("name"), "email": given("email")});
+            item_act(k, r, slug, "submit_review", params).await?;
+            Ok((201, json!({"status": "Pending", "message": "Thank you! Your review appears once it has been approved."})))
         }
         ("POST", ["items", slug, "stock-alert"]) => {
             let body = r.body()?;
             let email = text(&body, "email")?.to_string();
-            let out = with_retry(|| async {
-                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
-                let store = Store::load(k, &r.ctx, &mut tx).await?;
-                let out = catalog::stock_alert(k, &r.ctx, &mut tx, &store, slug, &email).await?;
-                tx.commit().await?;
-                Ok(out)
-            })
-            .await?;
-            Ok((201, out))
+            item_act(k, r, slug, "stock_alert", json!({"email": email})).await?;
+            Ok((201, json!({"status": "Waiting"})))
         }
         ("POST", ["cart"]) => Ok((201, create_cart(k, r).await?)),
-        ("GET", ["cart"]) => ok(cart_op(k, r, CartOp::View).await?),
+        ("GET", ["cart"]) => ok(cart_op(k, r, None).await?),
         ("POST", ["cart", "items"]) => {
             let body = r.body()?;
-            ok(cart_op(k, r, CartOp::Add(text(&body, "item")?.to_string(), qty(&body, Some(Decimal::ONE))?)).await?)
+            let params = json!({"item": text(&body, "item")?, "qty": body.get("qty")});
+            ok(cart_op(k, r, Some(("add_item", params))).await?)
         }
-        ("PUT" | "PATCH", ["cart", "items", line]) => ok(cart_op(k, r, CartOp::SetQty(line.to_string(), qty(&r.body()?, None)?)).await?),
-        ("DELETE", ["cart", "items", line]) => ok(cart_op(k, r, CartOp::SetQty(line.to_string(), Decimal::ZERO)).await?),
-        ("PUT" | "PATCH", ["cart", "details"]) => ok(cart_op(k, r, CartOp::Details(r.body()?)).await?),
-        ("PUT", ["cart", "coupon"]) => ok(cart_op(k, r, CartOp::Coupon(text(&r.body()?, "code")?.to_string())).await?),
-        ("DELETE", ["cart", "coupon"]) => ok(cart_op(k, r, CartOp::NoCoupon(None)).await?),
-        ("DELETE", ["cart", "codes", code]) => ok(cart_op(k, r, CartOp::NoCoupon(Some(code.to_string()))).await?),
+        ("PUT" | "PATCH", ["cart", "items", line]) => {
+            let qty = cart::qty_of(r.body()?.get("qty"), None)?;
+            ok(cart_op(k, r, Some(("set_quantity", json!({"line": line, "qty": qty.to_string()})))).await?)
+        }
+        ("DELETE", ["cart", "items", line]) => ok(cart_op(k, r, Some(("set_quantity", json!({"line": line, "qty": "0"})))).await?),
+        ("PUT" | "PATCH", ["cart", "details"]) => {
+            let details = Value::Object(r.body()?).to_string();
+            ok(cart_op(k, r, Some(("set_details", json!({"details": details})))).await?)
+        }
+        ("PUT", ["cart", "coupon"]) => ok(cart_op(k, r, Some(("apply_code", json!({"code": text(&r.body()?, "code")?})))).await?),
+        ("DELETE", ["cart", "coupon"]) => ok(cart_op(k, r, Some(("remove_code", json!({})))).await?),
+        ("DELETE", ["cart", "codes", code]) => ok(cart_op(k, r, Some(("remove_code", json!({"code": code})))).await?),
         ("GET", ["cart", "shipping-options"]) => ok(shipping_options(k, r).await?),
-        ("PUT", ["cart", "shipping"]) => ok(cart_op(k, r, CartOp::Shipping(text(&r.body()?, "shipping_method")?.to_string())).await?),
+        ("PUT", ["cart", "shipping"]) => {
+            let rule = text(&r.body()?, "shipping_method")?.to_string();
+            ok(cart_op(k, r, Some(("set_shipping", json!({"shipping_method": rule})))).await?)
+        }
         ("POST", ["checkout"]) => {
             let body = r.body()?;
             let key = r.header("idempotency-key").or_else(|| body.get("idempotency_key").and_then(Value::as_str)).unwrap_or_default().to_string();
@@ -316,18 +408,7 @@ async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
         }
         ("POST", ["orders", number, "reorder"]) => {
             let user = r.signed_in()?;
-            let out = with_retry(|| async {
-                let mut tx = k.db.tenant_tx(r.ctx.tenant).await?;
-                let store = Store::load(k, &r.ctx, &mut tx).await?;
-                let so = orders::own_order(k, &r.ctx, &mut tx, user, number).await?;
-                let (token, cart, skipped) = orders::reorder(k, &r.ctx, &mut tx, &store, user, &so).await?;
-                let cart = attach_user(k, r, &mut tx, cart).await?;
-                let view = cart::view(k, &r.ctx, &mut tx, &store, &cart).await?;
-                tx.commit().await?;
-                Ok(json!({"token": token, "cart": view, "skipped": skipped}))
-            })
-            .await?;
-            Ok((201, out))
+            Ok((201, reorder(k, r, user, number).await?))
         }
         _ => ok(read_route(k, r, &segs).await?),
     }

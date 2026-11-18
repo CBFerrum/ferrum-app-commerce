@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.16.0
+
+Needs the same platform and ERP as 0.15.1. Package `commerce` 0.6.1. No database change.
+
+- **What a shopper changes is an operation.** Eight actions of `ShoppingCart` (`commerce.shopping_cart.add_item`,
+  `.set_quantity`, `.set_details`, `.apply_code`, `.remove_code`, `.set_shipping`, `.identify`, beside the record
+  operation `.create`) and two of `WebsiteItem` (`commerce.website_item.submit_review`, `.stock_alert`), hidden on
+  the form, each with a contract. The storefront's cart, review, stock-alert and reorder routes call them through
+  the gate and write nothing else, so an agent fills a cart exactly as the page does. Contact details, addresses
+  and a reviewer's name and email are secret parameters: kept out of the audit entry and the receipt.
+- **A request sent twice is done once.** Cart, review and stock-alert routes take an `Idempotency-Key` header;
+  the same key again repeats nothing. Without one each request is its own.
+- **Website Manager may now change and create carts** (for a shopper, or through an agent they own).
+- **One difference:** a cart a signed-in shopper filled becomes a guest's at the first change made signed out
+  (before, it kept the customer's prices until checkout). Reading a cart still changes nothing.
+
+Tests: `cart_operations_end_to_end`.
+
 ## 0.15.1
 
 Needs the same platform and ERP as 0.15.0. No database or interface change.

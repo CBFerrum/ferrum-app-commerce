@@ -85,6 +85,39 @@
     - {name: token_hash, type: data, read_only: true, hidden: true, unique: true, max_length: 64}
     - {name: checkout_key, type: data, read_only: true, hidden: true, max_length: 200}
   indexes: [[status, last_activity]]
+  actions:
+    # What a shopper does to a cart, as the storefront's routes do it and as an agent may (hidden: no button on the form).
+    - {name: add_item, label: Add an Item, permission: write, hidden: true,
+       params: [{name: item, label: Item, required: true, description: "A store item, by its slug or the WebsiteItem's id"},
+                {name: qty, label: Quantity, description: "A decimal as text; 1 when empty. Added to what the cart holds of the item"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The cart holds the item, priced again, committed with this receipt"}}
+    - {name: set_quantity, label: Set a Line's Quantity, permission: write, hidden: true,
+       params: [{name: line, label: Line, required: true, description: "The cart line's id"},
+                {name: qty, label: Quantity, required: true, description: "A decimal as text; 0 takes the line off"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The line has the quantity (or is gone), the cart priced again, committed with this receipt"}}
+    - {name: set_details, label: Set Contact and Addresses, permission: write, hidden: true,
+       params: [{name: details, label: Details, type: text, required: true, secret: true,
+                 description: "A JSON object: email, phone, name, notes, reminder_consent, billing_same_as_shipping, shipping_address and billing_address ({line1, line2, city, state, postal_code, country}). Keys left out stay as they are"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The cart carries the details and is priced for where it goes, committed with this receipt"}}
+    - {name: apply_code, label: Apply a Code, permission: write, hidden: true,
+       params: [{name: code, label: Code, required: true, description: "The store's coupon or a promotion code"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The code is on the cart and took something off, committed with this receipt"}}
+    - {name: remove_code, label: Remove a Code, permission: write, hidden: true,
+       params: [{name: code, label: Code, description: "The code to take off; empty: the store's coupon"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The code is off the cart, priced again, committed with this receipt"}}
+    - {name: set_shipping, label: Choose Delivery, permission: write, hidden: true,
+       params: [{name: shipping_method, label: Delivery Method, type: link, to: ShippingRule, required: true}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The cart is delivered by the method, priced again, committed with this receipt"}}
+    - {name: identify, label: Say Whose Cart It Is, permission: write, hidden: true,
+       params: [{name: email, label: Shopper's Email, secret: true, description: "The email the shopper proved by signing in; empty: the cart is a guest's again"}],
+       contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "The cart names the shopper and the customer linked to that email, and is priced for them, committed with this receipt"}}
   form:
     - {label: Cart, fields: [status, company, customer, user_email, email, phone, contact_name, last_activity]}
     - {label: Items, fields: [items]}

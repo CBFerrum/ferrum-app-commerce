@@ -3986,3 +3986,189 @@ async fn refunded_credit_note() {
         "the credit note's outstanding amount, and its open item's"
     );
 }
+
+#[test]
+fn cart_operations_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(cart_operations()).await.unwrap() });
+}
+
+/// How many receipts a capability has.
+async fn receipts(t: &T, capability: &str) -> i64 {
+    let mut tx = t.k.db.tenant_tx(t.ctx.tenant).await.unwrap();
+    let n: i64 = sqlx::query_scalar("select count(*) from logic_effect where tenant_id = $1 and capability = $2")
+        .bind(t.ctx.tenant)
+        .bind(capability)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    n
+}
+
+/// What a shopper does on the storefront is the store's operations: an agent fills a cart, leaves a review or asks
+/// to be told when an item is back through the gate, and the public routes go through the same gate.
+async fn cart_operations() {
+    use ferrum_kernel::capability::Invocation;
+    let Shop { t, tenant, cid, products, nos, selling, mug, .. } = small_shop("cartops").await;
+    let web = person(&t, "web@cartops.test", &["Website Manager"]).await;
+    let clerk = person(&t, "clerk@cartops.test", &["Sales User"]).await;
+    let cart_ops = ["add_item", "set_quantity", "set_details", "apply_code", "remove_code", "set_shipping", "identify"];
+    let op = |name: &str| format!("commerce.shopping_cart.{name}");
+    let on = |cart: &Value, params: Value| json!({"id": cart["id"], "params": params});
+
+    // ───────────── the_cart_operations_are_in_the_catalog ─────────────
+    let catalog = t.k.catalog(&web);
+    assert!(catalog.iter().any(|c| c.id == "commerce.shopping_cart.create"), "a cart is made by the record operation");
+    for name in cart_ops {
+        let c = catalog.iter().find(|c| c.id == op(name)).unwrap_or_else(|| panic!("{name} is in the catalog"));
+        assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("transactional_action"), "{name}");
+        assert_eq!(c.permissions, vec!["ShoppingCart:write".to_string()], "{name}");
+        assert!(!c.completion.ends_with("is done, committed with this receipt"), "{name}: {}", c.completion);
+        assert_eq!(returns(&c.output), ["currency", "id", "item_count", "rounded_total", "status"], "{name}");
+    }
+    for (name, right) in [("submit_review", "WebsiteItem:write"), ("stock_alert", "WebsiteItem:read")] {
+        let c = catalog.iter().find(|c| c.id == format!("commerce.website_item.{name}")).unwrap_or_else(|| panic!("{name} is in the catalog"));
+        assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("transactional_action"), "{name}");
+        assert_eq!(c.permissions, vec![right.to_string()], "{name}");
+        assert!(!c.completion.ends_with("is done, committed with this receipt"), "{name}: {}", c.completion);
+    }
+
+    // ───────────── an_agent_fills_a_cart_as_the_storefront_does ─────────────
+    let mug_rule = t.insert("PricingRule", json!({"title": "10% off mugs", "apply_on": "Item", "item": mug.to_string(), "discount_percent": "10"})).await;
+    t.insert("CouponCode", json!({"code": "MUG10", "pricing_rule": sid(&mug_rule)})).await;
+    let standard = sid(&t.find_one("ShippingRule", json!({"label": "Standard"})).await);
+    let made = t.k.invoke(&web, Invocation::new("commerce.shopping_cart.create", json!({"values": {}})).key("agent:cart")).await.expect("a cart");
+    let cart = made.result.clone();
+    let added = t.k.invoke(&web, Invocation::new(op("add_item"), on(&cart, json!({"item": "blue-mug", "qty": "2"}))).key("agent:1")).await.expect("added");
+    assert_eq!((added.result["id"].clone(), dec(&added.result["item_count"])), (cart["id"].clone(), n("2")), "{}", added.result);
+    let shopper = details(GUEST, "Asha Rao", "IN").to_string();
+    let placed = t.k.invoke(&web, Invocation::new(op("set_details"), on(&cart, json!({"details": shopper}))).key("agent:2")).await.expect("details");
+    let coupon = t.k.invoke(&web, Invocation::new(op("apply_code"), on(&cart, json!({"code": "mug10"}))).key("agent:3")).await.expect("coupon");
+    assert!(dec(&coupon.result["rounded_total"]) < dec(&placed.result["rounded_total"]), "the code took something off: {}", coupon.result);
+    t.k.invoke(&web, Invocation::new(op("remove_code"), on(&cart, json!({}))).key("agent:4")).await.expect("coupon off");
+    t.k.invoke(&web, Invocation::new(op("set_shipping"), on(&cart, json!({"shipping_method": standard}))).key("agent:5")).await.expect("delivery");
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 2}])).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details("ravi@example.com", "Ravi", "IN"))).await;
+    t.cart_ok(&token, "PUT", "/cart/shipping", Some(json!({"shipping_method": standard}))).await;
+    let agents = t.get("ShoppingCart", cart["id"].as_str().unwrap().parse().unwrap()).await;
+    let shops = t.find_one("ShoppingCart", json!({"email": "ravi@example.com"})).await;
+    for f in ["grand_total", "total_taxes", "shipping_amount"] {
+        assert_eq!(dec(&agents[f]), dec(&shops[f]), "{f}");
+    }
+    assert!(dec(&agents["shipping_amount"]) > Decimal::ZERO);
+
+    // ───────────── a_person_without_the_right_is_refused ─────────────
+    let refused = t.k.invoke(&clerk, Invocation::new(op("add_item"), on(&cart, json!({"item": "blue-mug"}))).key("clerk:1")).await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    let cap = uid(&t.insert("Item", json!({"item_code": "CAP", "item_name": "Cap", "item_group": products["id"], "stock_uom": nos["id"]})).await);
+    t.insert("ItemPrice", json!({"item": cap.to_string(), "price_list": selling["id"], "rate": "150"})).await;
+    let cap_wi = t.insert("WebsiteItem", json!({"item": cap.to_string(), "published": true})).await;
+    let alert =
+        t.k.invoke(
+            &clerk,
+            Invocation::new("commerce.website_item.stock_alert", json!({"id": sid(&cap_wi), "params": {"email": "told@example.com"}})).key("clerk:2"),
+        )
+        .await
+        .expect("a reader may ask to be told");
+    assert_eq!(alert.result["status"], json!("Waiting"));
+    assert_eq!(t.count("StockAlert", json!({"email": "told@example.com"})).await, 1);
+    let review = |who: &Ctx, key: &str| {
+        let (k, who, key, wi) = (t.k.clone(), who.clone(), key.to_string(), sid(&cap_wi));
+        async move {
+            k.invoke(
+                &who,
+                Invocation::new("commerce.website_item.submit_review", json!({"id": wi, "params": {"rating": 5, "name": "Asha", "email": GUEST}})).key(key),
+            )
+            .await
+        }
+    };
+    let refused = review(&clerk, "clerk:3").await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    let left = review(&web, "web:review").await.expect("a manager may");
+    assert_eq!(left.result["status"], json!("Pending"));
+
+    // ───────────── a_cart_act_is_done_once_per_key ─────────────
+    let tee = t.k.invoke(&web, Invocation::new(op("add_item"), on(&cart, json!({"item": "logo-tee", "qty": "1"}))).key("agent:tee")).await.expect("added");
+    let again = t.k.invoke(&web, Invocation::new(op("add_item"), on(&cart, json!({"item": "logo-tee", "qty": "1"}))).key("agent:tee")).await.expect("repeated");
+    assert!(!tee.repeated && again.repeated);
+    let lines = t.get("ShoppingCart", cart["id"].as_str().unwrap().parse().unwrap()).await;
+    let tees: Vec<Decimal> = lines["items"].as_array().unwrap().iter().filter(|l| l["item_name"] == json!("Logo Tee")).map(|l| dec(&l["qty"])).collect();
+    assert_eq!(tees, vec![n("1")], "done once");
+    let other = t.k.invoke(&web, Invocation::new(op("add_item"), on(&cart, json!({"item": "logo-tee", "qty": "2"}))).key("agent:tee")).await;
+    assert_eq!(other.as_ref().map_err(Error::code).unwrap_err(), "input_changed", "{other:?}");
+
+    // ───────────── the_public_routes_go_through_the_gate ─────────────
+    let before: Vec<i64> = {
+        let mut v = vec![];
+        for c in
+            ["commerce.shopping_cart.create", &op("add_item"), &op("set_details"), "commerce.website_item.submit_review", "commerce.website_item.stock_alert"]
+        {
+            v.push(receipts(&t, c).await);
+        }
+        v
+    };
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.cart_ok(&token, "POST", "/cart/items", Some(json!({"item": "logo-tee"}))).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details(GUEST, "Asha Rao", "IN"))).await;
+    let said = t
+        .call(None, "POST", "/items/blue-mug/reviews", &[], Some(json!({"rating": 4, "name": "Asha", "email": "asha.r@example.com"})))
+        .await
+        .expect("reviewed");
+    assert_eq!(said["status"], json!("Pending"));
+    t.ok(None, "POST", "/items/cap/stock-alert", &[], Some(json!({"email": "later@example.com"}))).await;
+    let mut i = 0;
+    for c in ["commerce.shopping_cart.create", &op("add_item"), &op("set_details"), "commerce.website_item.submit_review", "commerce.website_item.stock_alert"]
+    {
+        assert!(receipts(&t, c).await > before[i], "{c} has a receipt from the route");
+        i += 1;
+    }
+
+    // ───────────── a_storefront_request_sent_twice_is_done_once ─────────────
+    let (token, _) = t.new_cart(None, json!([])).await;
+    let twice = [("x-cart-token", token.as_str()), ("idempotency-key", "add-a-mug-0001")];
+    let send = || t.call(None, "POST", "/cart/items", &twice, Some(json!({"item": "blue-mug"})));
+    let first = send().await.expect("added");
+    let second = send().await.expect("answered");
+    assert_eq!(first, second);
+    assert_eq!(dec(&first["items"][0]["qty"]), n("1"), "done once: {first}");
+
+    // ───────────── no_contact_detail_is_kept_outside_the_cart ─────────────
+    {
+        let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
+        let kept: i64 = sqlx::query_scalar(
+            "select count(*) from logic_effect where tenant_id = $1 and (result::text like '%asha@example.com%' or result::text like '%MG Road%')",
+        )
+        .bind(tenant)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(kept, 0, "no receipt holds a contact detail");
+    }
+    let trail = t.k.audit_trail(&t.ctx, "ShoppingCart", cart["id"].as_str().unwrap().parse().unwrap()).await.unwrap();
+    let pressed: Vec<&Value> = trail["events"].as_array().unwrap().iter().filter(|e| e["action"] == json!("action:set_details")).collect();
+    assert_eq!(pressed.len(), 1, "{trail}");
+    assert!(!pressed[0].to_string().contains("MG Road") && !pressed[0].to_string().contains(GUEST), "{}", pressed[0]);
+
+    // ───────────── a_signed_in_cart_is_the_customers_and_a_guests_again ─────────────
+    let inr = t.find_one("Currency", json!({"code": "INR"})).await;
+    let wholesale = t.insert("PriceList", json!({"price_list_name": "Wholesale", "currency": inr["id"], "selling": true})).await;
+    t.insert("ItemPrice", json!({"item": mug.to_string(), "price_list": wholesale["id"], "rate": "200"})).await;
+    let trader = t.insert("Customer", json!({"customer_name": "Trade Buyer", "email": "trade@example.com", "default_price_list": wholesale["id"]})).await;
+    let trade = {
+        let u = t.k.create_user(&t.ctx, "trade@example.com", "Trade Buyer", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "portal".into()).await.unwrap()
+    };
+    let (token, _) = t.new_cart(Some(&trade), json!([])).await;
+    let theirs = t.call(Some(&trade), "POST", "/cart/items", &[("x-cart-token", token.as_str())], Some(json!({"item": "blue-mug"}))).await.expect("added");
+    assert_eq!(dec(&theirs["totals"]["subtotal"]), n("200"), "their own price: {theirs}");
+    let held = t.find_one("ShoppingCart", json!({"user_email": "trade@example.com"})).await;
+    assert_eq!(held["customer"], trader["id"]);
+    let guests = t.cart_ok(&token, "POST", "/cart/items", Some(json!({"item": "logo-tee"}))).await;
+    assert_eq!(dec(&guests["totals"]["subtotal"]), n("650"), "the store's prices once nobody is signed in: {guests}");
+    let after = t.get("ShoppingCart", uid(&held)).await;
+    assert_eq!((after["customer"].clone(), after["user_email"].clone()), (Value::Null, Value::Null));
+    let _ = cid;
+}
