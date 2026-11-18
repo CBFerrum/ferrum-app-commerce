@@ -11,6 +11,10 @@
 //! * The storefront is a `Site`: the public at `/api/site/{tenant}/commerce/...`, signed-in
 //!   customers at `/api/app/commerce/...` — see `packages/commerce/README.md`.
 
+// A release build works out the layout of the refund hooks' nested futures past the default depth of 128
+// ("queries overflow the depth limit"); a debug build does not, so only the image showed it.
+#![recursion_limit = "256"]
+
 mod cart;
 mod catalog;
 mod checkout;

@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.14.2 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.14.3 (packages: `commerce` 0.6.0, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.3.8, <0.4`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -371,6 +371,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 ### ✅ Recently shipped
 
 - [x] **0.14.2** — A refund leaves its credit note owing nothing, as ERP 0.31.0's allocation keeps the invoice in step.
+- [x] **0.14.3** — Commerce compiles in a release build, the kind the server image is made from.
 - [x] **0.14.1** — Payments, refunds and web orders are dated on the workspace's day, not UTC's.
 - [x] **0.14.0** — Other apps reach payments only through the operations: the two Rust functions they called are gone.
 - [x] **0.13.2** — `request_payment` is listed as Commerce's own operation, `commerce.sales_invoice.request_payment`, as the platform now names an added action.
