@@ -96,6 +96,15 @@ describe("the cart", () => {
     expect(text()).toContain("Tax and delivery for Karnataka, India");
   });
 
+  it("a cart line on back-order says when it ships", async () => {
+    localStorage.setItem("ferrum.cart:/api/site/t/commerce", JSON.stringify("tok"));
+    const later = { ...line, id: "l2", item: "hat", title: "Hat", backorder: true, ships_from: "2026-12-24" };
+    serve({ "GET /cart": () => cart({ items: [line, later] }), "GET /store": store, "GET /cart/shipping-options": () => ({ options: [], selected: null }) });
+    await open("/cart", "", "cart");
+    expect(text()).toContain("Ships when it is back in stock · Ships from 2026-12-24");
+    expect(document.querySelectorAll(".line .error")).toHaveLength(0);
+  });
+
   it("says plainly when nothing delivers to the place, and keeps the refusal of an unknown country", async () => {
     localStorage.setItem("ferrum.cart:/api/site/t/commerce", JSON.stringify("tok"));
     serve({
@@ -386,6 +395,14 @@ describe("the product page", () => {
     await tick();
     await tick();
     expect(text()).toContain("this item is in stock: you can order it now");
+  });
+
+  it("a variant on back-order is not shown as sold out", async () => {
+    const onBack = { ...item, variants: [v("tee-m-red", "M", "Red", { in_stock: true, backorder: true, available_qty: "0" }), ...item.variants.slice(1)] };
+    serve({ "GET /items/tee": onBack });
+    await open("/p/tee?v=tee-m-red", product);
+    expect(text()).toContain("M / Red: INR 400.00 · Ships when it is back");
+    expect(text()).not.toContain("M / Red: INR 400.00 · Sold out");
   });
 
   it("has no back-in-stock box where the item can be bought", async () => {

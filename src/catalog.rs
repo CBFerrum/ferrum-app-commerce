@@ -491,13 +491,63 @@ pub fn allocate(store: &Store, left: &mut HashMap<(Uuid, Uuid), Decimal>, item: 
     chosen
 }
 
-/// `in_stock` (and the quantity when the store shows it) for one item.
-pub fn stock_view(store: &Store, is_stock: bool, available: Decimal) -> (bool, Option<String>) {
+/// A store item's back-order terms, and the day it ships from while that is still to come.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Later {
+    pub backorder: bool,
+    pub limit: Option<Decimal>,
+    pub ships_from: Option<chrono::NaiveDate>,
+}
+
+/// The back-order terms and ships-from dates of the store items of `items` that have either (a date already past is
+/// dropped). Empty for a workspace whose WebsiteItem has no `backorder` field yet.
+pub async fn later(tx: &mut Tx, ctx: &Ctx, items: &[Uuid]) -> Result<HashMap<Uuid, Later>> {
+    if ctx.schema.entity("WebsiteItem").is_none_or(|e| e.field("backorder").is_none()) || items.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, bool, Option<Decimal>, Option<chrono::NaiveDate>)> = sqlx::query_as(
+        "select item, coalesce(backorder, false), nullif(backorder_limit, 0), ships_from from e_website_item \
+         where tenant_id = $1 and item = any($2) and (coalesce(backorder, false) or ships_from is not null)",
+    )
+    .bind(ctx.tenant)
+    .bind(items)
+    .fetch_all(&mut **tx)
+    .await?;
+    let today = ctx.today();
+    Ok(rows.into_iter().map(|(item, backorder, limit, ships_from)| (item, Later { backorder, limit, ships_from: ships_from.filter(|d| *d > today) })).collect())
+}
+
+/// How many of a stock item may be ordered now, `available` being what is on hand less what open orders still owe
+/// (negative once back-orders are owed): none for any quantity.
+pub fn orderable(available: Decimal, terms: Option<&Later>) -> Option<Decimal> {
+    match terms {
+        Some(t) if t.backorder => t.limit.map(|limit| (available + limit).max(Decimal::ZERO)),
+        _ => Some(available.max(Decimal::ZERO)),
+    }
+}
+
+/// What the storefront says of one item's stock.
+pub struct Stock {
+    /// It can be ordered now: a non-stock item, one in stock, or one on back-order with room left.
+    pub in_stock: bool,
+    /// What is on hand, when the store shows quantities.
+    pub qty: Option<String>,
+    /// Out of stock and still ordered, to ship when it is back.
+    pub backorder: bool,
+    /// The day it ships from, while that is to come.
+    pub ships_from: Option<String>,
+}
+
+/// [`Stock`] for one item, from its sellable quantity and its terms.
+pub fn stock_view(store: &Store, is_stock: bool, available: Decimal, terms: Option<&Later>) -> Stock {
+    let ships_from = terms.and_then(|t| t.ships_from).map(|d| d.to_string());
     if !is_stock {
-        return (true, None);
+        return Stock { in_stock: true, qty: None, backorder: false, ships_from };
     }
     let qty = available.max(Decimal::ZERO);
-    (qty > Decimal::ZERO, store.show_stock_quantity.then(|| qty.normalize().to_string()))
+    let have = qty > Decimal::ZERO;
+    let backorder = !have && terms.is_some_and(|t| t.backorder) && orderable(available, terms).is_none_or(|m| m > Decimal::ZERO);
+    Stock { in_stock: have || backorder, qty: store.show_stock_quantity.then(|| qty.normalize().to_string()), backorder, ships_from }
 }
 
 // ───────────────────────────── listing ─────────────────────────────
@@ -575,6 +625,8 @@ struct CardRow {
     in_stock: bool,
     /// Published variants the item has (it is then sold through them).
     variants: i64,
+    /// A stock item out of stock, sold on back-order.
+    backorder: bool,
     sort_key: Option<String>,
 }
 
@@ -633,6 +685,9 @@ pub async fn cards(
     // Every published, enabled store item with its own price and stock...
     qb.push(") group by si.item), member as (select w.id, w.variant_of, w.item, coalesce(i.is_stock_item, false) as is_stock, ");
     qb.push("coalesce(o.qty, 0) - coalesce(r.qty, 0) as available, ");
+    // A workspace not yet updated has no back-order field: nothing is on back-order there.
+    qb.push(if ctx.schema.entity("WebsiteItem").is_some_and(|e| e.field("backorder").is_some()) { "coalesce(w.backorder, false)" } else { "false" });
+    qb.push(" as backorder, ");
     qb.push("exists (select 1 from e_website_item v where v.tenant_id = w.tenant_id and v.variant_of = w.id and v.published) as has_variants, ");
     qb.push("coalesce((select p.rate from e_item_price p where p.tenant_id = w.tenant_id and p.item = w.item and p.price_list = ").push_bind(store.price_list);
     qb.push(" and p.valid_from <= ").push_bind(today).push(" and (p.valid_upto is null or p.valid_upto >= ").push_bind(today);
@@ -643,11 +698,12 @@ pub async fn cards(
     // its variants' (an item with variants is sold through them, so its own price does not count).
     qb.push("grp as (select coalesce(m.variant_of, m.id) as gid, min(m.price) filter (where m.price > 0 and not m.has_variants) as price, ");
     qb.push("(array_agg(m.item order by m.price asc) filter (where m.price > 0 and not m.has_variants))[1] as price_item, ");
-    qb.push("coalesce(bool_or(not m.is_stock or m.available > 0) filter (where not m.has_variants), false) as in_stock, ");
+    // A limit used up is not seen here (the product page and the cart say it): the listing reads no limits.
+    qb.push("coalesce(bool_or(not m.is_stock or m.available > 0 or m.backorder) filter (where not m.has_variants), false) as in_stock, ");
     qb.push("count(*) filter (where m.variant_of is not null) as variants from member m group by 1), ");
     qb.push("base as (select w.id, w.slug, w.title, w.short_description, coalesce(w.ranking, 0) as ranking, w.created_at, ");
     qb.push("lower(coalesce(w.title, '')) as ltitle, coalesce(w.rating_average, 0) as rating, coalesce(w.review_count, 0) as reviews, w.item, ");
-    qb.push("m.is_stock, m.available, g.price, coalesce(g.price_item, w.item) as price_item, g.in_stock, g.variants from e_website_item w ");
+    qb.push("m.is_stock, m.available, (m.backorder and m.is_stock and m.available <= 0) as backorder, g.price, coalesce(g.price_item, w.item) as price_item, g.in_stock, g.variants from e_website_item w ");
     qb.push("join member m on m.id = w.id join grp g on g.gid = w.id join e_item i on i.tenant_id = w.tenant_id and i.id = w.item ");
     qb.push("where w.tenant_id = ").push_bind(tenant).push(" and w.variant_of is null");
     if let Some(ids) = &f.ids {
@@ -670,7 +726,7 @@ pub async fn cards(
             .push("))))");
     }
     qb.push(format!(
-        ") select id, slug, title, short_description, is_stock, available, rating, reviews, price_item, in_stock, variants, ({key})::text as sort_key from base where price > 0"
+        ") select id, slug, title, short_description, is_stock, available, rating, reviews, price_item, in_stock, variants, backorder, ({key})::text as sort_key from base where price > 0"
     ));
     if let Some(min) = f.min_price {
         qb.push(" and price >= ").push_bind(min * rate);
@@ -719,7 +775,12 @@ async fn render(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, found: &[Card
         .iter()
         .map(|r| {
             // An item with variants is in stock when one of them is; it shows no quantity of its own.
-            let (in_stock, qty) = if r.variants > 0 { (r.in_stock, None) } else { stock_view(store, r.is_stock, r.available) };
+            let (in_stock, qty) = if r.variants > 0 {
+                (r.in_stock, None)
+            } else {
+                let s = stock_view(store, r.is_stock, r.available, None);
+                (s.in_stock || r.backorder, s.qty)
+            };
             json!({
                 "slug": r.slug,
                 "title": r.title,
@@ -728,6 +789,7 @@ async fn render(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, found: &[Card
                 "price": prices.get(&r.price_item).map(|p| p.view(&store.currency_code)),
                 "from": r.variants > 0,
                 "in_stock": in_stock,
+                "backorder": r.backorder && r.variants == 0,
                 "available_qty": qty,
                 "rating": {"average": r.rating.normalize().to_string(), "count": r.reviews},
             })
@@ -930,20 +992,23 @@ pub async fn variants_of(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, pare
     let prices = price_items(k, ctx, tx, store, &items, customer).await?;
     let stocked = stock_items(tx, ctx.tenant, &items).await?;
     let avail = available(tx, ctx.tenant, store, &items).await?;
+    let terms = later(tx, ctx, &items).await?;
     let images = first_images(tx, ctx.tenant, &ids).await?;
     Ok(found
         .into_iter()
         .map(|(id, slug, title, item)| {
             let price = prices.get(&item).filter(|p| p.list > Decimal::ZERO);
-            let (in_stock, qty) = stock_view(store, stocked.contains(&item), avail.get(&item).copied().unwrap_or_default());
+            let stock = stock_view(store, stocked.contains(&item), avail.get(&item).copied().unwrap_or_default(), terms.get(&item));
             json!({
                 "slug": slug,
                 "title": title,
                 "options": opts.iter().filter(|(p, _, _)| *p == id).map(|(_, o, v)| json!({"option": o, "value": v})).collect::<Vec<_>>(),
                 "price": price.map(|p| p.view(&store.currency_code)),
                 "purchasable": price.is_some(),
-                "in_stock": in_stock,
-                "available_qty": qty,
+                "in_stock": stock.in_stock,
+                "backorder": stock.backorder,
+                "ships_from": stock.ships_from,
+                "available_qty": stock.qty,
                 "image": images.get(&id),
             })
         })
@@ -960,7 +1025,8 @@ pub async fn item_page(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: 
     let price = prices.get(&item_id).filter(|p| p.list > Decimal::ZERO);
     let is_stock = b(&item, "is_stock_item");
     let avail = available(tx, ctx.tenant, store, &[item_id]).await?.get(&item_id).copied().unwrap_or_default();
-    let (in_stock, qty) = stock_view(store, is_stock, avail);
+    let terms = later(tx, ctx, &[item_id]).await?;
+    let stock = stock_view(store, is_stock, avail, terms.get(&item_id));
     let uom = match id(&item, "stock_uom") {
         Some(u) => {
             let u = get(k, ctx, tx, "Uom", u).await?;
@@ -1008,8 +1074,10 @@ pub async fn item_page(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, slug: 
         "variant_of": group,
         "options": options,
         "variants": variants,
-        "in_stock": in_stock,
-        "available_qty": qty,
+        "in_stock": stock.in_stock,
+        "backorder": stock.backorder,
+        "ships_from": stock.ships_from,
+        "available_qty": stock.qty,
         "unit": uom,
         "max_qty": max_qty.normalize().to_string(),
         "seo": {"title": s(&wi, "seo_title").or(s(&wi, "title")), "description": s(&wi, "seo_description").or(s(&wi, "short_description"))},
@@ -1118,10 +1186,10 @@ async fn stock_alert(hc: &mut HookCtx<'_>, wi: &Doc, params: &Value) -> Result<V
     let sctx = sys(hc.ctx);
     let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
     let stocked = stock_items(hc.tx, hc.ctx.tenant, &[item]).await?;
-    if !stocked.contains(&item)
-        || !store.enforce_stock
-        || available(hc.tx, hc.ctx.tenant, &store, &[item]).await?.get(&item).copied().unwrap_or_default() > Decimal::ZERO
-    {
+    let have = available(hc.tx, hc.ctx.tenant, &store, &[item]).await?.get(&item).copied().unwrap_or_default();
+    let terms = later(hc.tx, hc.ctx, &[item]).await?;
+    // One that can be ordered now, on back-order too, is not asked about.
+    if !stocked.contains(&item) || !store.enforce_stock || orderable(have, terms.get(&item)).is_none_or(|m| m > Decimal::ZERO) {
         return Err(Error::invalid("this item is in stock: you can order it now"));
     }
     let mine = find(hc.kernel, &sctx, hc.tx, "StockAlert", vec![Filter::eq("email", email.clone()), Filter::eq("status", "Waiting")], None, 20).await?;
@@ -1139,6 +1207,21 @@ async fn stock_alert(hc: &mut HookCtx<'_>, wi: &Doc, params: &Value) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orderable_counts_what_is_already_owed() {
+        let n = |v: &str| v.parse::<Decimal>().unwrap();
+        let back = |limit: Option<&str>| Later { backorder: true, limit: limit.map(n), ships_from: None };
+        // No back-order: what is there, never below nothing.
+        assert_eq!(orderable(n("3"), None), Some(n("3")));
+        assert_eq!(orderable(n("-2"), Some(&Later::default())), Some(Decimal::ZERO));
+        // Back-order without a limit: any quantity.
+        assert_eq!(orderable(n("-40"), Some(&back(None))), None);
+        // With a limit: what is there and the limit, less what earlier back-orders already owe.
+        assert_eq!(orderable(n("1"), Some(&back(Some("2")))), Some(n("3")));
+        assert_eq!(orderable(n("-1"), Some(&back(Some("2")))), Some(n("1")));
+        assert_eq!(orderable(n("-5"), Some(&back(Some("2")))), Some(Decimal::ZERO));
+    }
 
     #[test]
     fn slugs() {

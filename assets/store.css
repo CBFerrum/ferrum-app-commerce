@@ -277,6 +277,10 @@ h2 {
   color: var(--danger);
   font-size: 0.9rem;
 }
+.later {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
 .in {
   color: var(--ok);
   font-size: 0.9rem;

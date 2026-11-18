@@ -376,11 +376,13 @@ async function cartView(root) {
     };
     const lines = cart.items.map((l) => {
       const warn = !l.available ? t("line.gone") : !l.in_stock ? t("line.short") : null;
+      // Taken beyond what is there, or not shipped before a day to come: said beside the line.
+      const later = [l.backorder ? t("line.backorder") : null, l.ships_from ? t("line.ships_from", { date: l.ships_from }) : null].filter(Boolean).join(" · ");
       return h(
         "li",
         { class: "line" },
         picture(l.image, 64),
-        h("div", { class: "info" }, l.item ? h("a", { href: `/p/${encodeURIComponent(l.item)}`, text: l.title ?? l.item }) : h("span", { text: l.title ?? "" }), h("span", { class: "muted", text: money(l.price, cart.currency) }), l.added_by_promotion ? h("span", { class: "muted", text: t("line.promoted") }) : null, warn && h("span", { class: "error", text: warn })),
+        h("div", { class: "info" }, l.item ? h("a", { href: `/p/${encodeURIComponent(l.item)}`, text: l.title ?? l.item }) : h("span", { text: l.title ?? "" }), h("span", { class: "muted", text: money(l.price, cart.currency) }), l.added_by_promotion ? h("span", { class: "muted", text: t("line.promoted") }) : null, warn && h("span", { class: "error", text: warn }), later && h("span", { class: "later", text: later })),
         h("strong", { class: "amount", text: money(l.amount, cart.currency) }),
         h(
           "div",
@@ -924,7 +926,7 @@ async function orderView(root) {
     const due = (order.payments ?? []).find((p) => p.status === "Initiated" && p.gateway !== "Gift Card");
     const more = difference(order);
     const where = order.shipping_address ? t("order.delivering_to", { place: order.shipping_address.replaceAll("\n", ", ") }) : order.ship_to ? t("order.delivering_to", { place: order.ship_to }) : null;
-    const lines = (order.items ?? []).map((l) => h("li", { class: "line" }, h("span", { class: "img none", "aria-hidden": "true" }), h("div", { class: "info" }, l.item ? h("a", { href: `/p/${encodeURIComponent(l.item)}`, text: l.title ?? l.item }) : h("span", { text: l.title ?? "" }), h("span", { class: "muted", text: t("line.times", { qty: l.qty, price: money(l.price, order.currency) }) })), h("strong", { class: "amount", text: money(l.amount, order.currency) })));
+    const lines = (order.items ?? []).map((l) => h("li", { class: "line" }, h("span", { class: "img none", "aria-hidden": "true" }), h("div", { class: "info" }, l.item ? h("a", { href: `/p/${encodeURIComponent(l.item)}`, text: l.title ?? l.item }) : h("span", { text: l.title ?? "" }), h("span", { class: "muted", text: t("line.times", { qty: l.qty, price: money(l.price, order.currency) }) }), l.ships_from ? h("span", { class: "later", text: t("line.ships_from", { date: l.ships_from }) }) : null), h("strong", { class: "amount", text: money(l.amount, order.currency) })));
     const share = h(
       "div",
       { class: "share" },
@@ -1046,7 +1048,7 @@ export function describe(variants, current, name, value, showStock) {
   }
   if (v.purchasable === false) return { state: "unavailable", words: t("variant.not_for_sale"), variant: v };
   if (!v.in_stock) return { state: "soldout", words: t("variant.sold_out"), price: priceOf(v), variant: v };
-  const words = showStock && v.available_qty != null ? t("variant.qty_in_stock", { qty: v.available_qty }) : t("variant.in_stock");
+  const words = v.backorder ? t("variant.backorder") : showStock && v.available_qty != null ? t("variant.qty_in_stock", { qty: v.available_qty }) : t("variant.in_stock");
   return { state: "available", words, price: priceOf(v), variant: v };
 }
 
@@ -1080,7 +1082,7 @@ async function enhancePicker(buy, slug) {
   // The combination in front of the shopper: its price and its stock, in words under the picker.
   const now = variants.find((v) => has(v, current));
   if (now) {
-    const stock = !now.purchasable ? t("variant.not_for_sale") : now.in_stock ? (showStock && now.available_qty != null ? t("variant.qty_in_stock", { qty: now.available_qty }) : t("variant.in_stock")) : t("variant.sold_out");
+    const stock = !now.purchasable ? t("variant.not_for_sale") : now.backorder ? t("variant.backorder") : now.in_stock ? (showStock && now.available_qty != null ? t("variant.qty_in_stock", { qty: now.available_qty }) : t("variant.in_stock")) : t("variant.sold_out");
     buy.querySelector(".picks")?.closest("fieldset")?.after(h("p", { class: "combo muted", role: "status", text: `${Object.values(current).join(" / ")}: ${[priceOf(now), stock].filter(Boolean).join(" · ")}` }));
   }
   return now?.slug ?? null;

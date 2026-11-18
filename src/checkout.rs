@@ -229,9 +229,11 @@ async fn verify_lines(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
         }
         let ids: Vec<Uuid> = stocked.iter().copied().collect();
         let avail = available(tx, ctx.tenant, store, &ids).await?;
+        // The terms are read under the locks: a back-order switched off meanwhile counts for this checkout.
+        let terms = crate::catalog::later(tx, ctx, &ids).await?;
         for (i, l) in lines.iter().enumerate() {
             let Some(item) = id(l, "item").filter(|it| stocked.contains(it)) else { continue };
-            let have = avail.get(&item).copied().unwrap_or_default().max(Decimal::ZERO);
+            let Some(have) = crate::catalog::orderable(avail.get(&item).copied().unwrap_or_default(), terms.get(&item)) else { continue };
             if wanted.get(&item).copied().unwrap_or_default() > have {
                 let name = s(l, "item_name").unwrap_or("an item");
                 let msg = if have.is_zero() {
@@ -483,6 +485,17 @@ pub async fn place(hc: &mut HookCtx<'_>, cart: &Doc, params: &Value) -> Result<V
     values.insert("link".into(), json!(order_link));
     values.insert("manage_start".into(), json!(manage.as_ref().map(|m| m.0.clone())));
     values.insert("manage_token".into(), json!(manage.as_ref().map(|m| m.1.clone())));
+    // What ships later: each line whose item has a ships-from date still to come.
+    let items: Vec<Uuid> = goods(&cart).iter().filter_map(|l| id(l, "item")).collect();
+    let terms = crate::catalog::later(tx, ctx, &items).await?;
+    let later: Vec<String> = goods(&cart)
+        .iter()
+        .filter_map(|l| {
+            let date = terms.get(&id(l, "item")?)?.ships_from?;
+            Some(format!("{}: {date}", s(l, "item_name").unwrap_or("an item")))
+        })
+        .collect();
+    values.insert("later".into(), json!((!later.is_empty()).then_some(later)));
     let secret = if manage.is_some() { vec!["manage_token".to_string()] } else { vec![] };
     crate::tell::message(k, tx, ctx, "commerce.order_placed", so_id, s(&cart, "email"), values, secret).await?;
     Ok(placed(cart_id, &so, request.as_ref().and_then(|r| s(r, "id")), &store))

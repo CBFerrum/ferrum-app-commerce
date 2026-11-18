@@ -222,23 +222,24 @@ mod tests {
 
     #[test]
     fn every_word_of_the_english_is_used_by_the_script_and_every_use_has_a_word() {
-        // The code, not what its comments say about it.
-        let script: String = include_str!("../assets/store.js")
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("/**"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // The code, not what its comments say about it: the script's, and the pages' the server writes (`w("key"`).
+        let code = |src: &str| src.lines().filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("/**")).collect::<Vec<_>>().join("\n");
+        let script = code(include_str!("../assets/store.js"));
+        let pages = code(include_str!("pages.rs"));
         let plural = ["zero", "one", "two", "few", "many", "other"];
         let known = |key: &str| english().contains_key(key) || plural.iter().any(|p| english().contains_key(&format!("{key}.{p}")));
-        // Every word the script asks for by name is in the English file.
-        for call in ["t(\"", "tn(\""] {
-            for (at, _) in script.match_indices(call).filter(|(at, _)| !script[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_')) {
-                let key: String = script[at + call.len()..].chars().take_while(|c| *c != '"').collect();
-                assert!(known(&key), "the script asks for {key}, which the English file lacks");
+        // Every word the script or a page asks for by name is in the English file.
+        let mut asked = BTreeSet::new();
+        for (text, call) in [(&script, "t(\""), (&script, "tn(\""), (&pages, "w(\"")] {
+            for (at, _) in text.match_indices(call).filter(|(at, _)| !text[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_')) {
+                let key: String = text[at + call.len()..].chars().take_while(|c| *c != '"').collect();
+                assert!(known(&key), "the code asks for {key}, which the English file lacks");
+                asked.insert(key);
             }
         }
         // Every word of the English file is asked for somewhere (a key named in a choice, or the label of a field a code names).
-        let literals: BTreeSet<&str> = script.split('"').skip(1).step_by(2).collect();
+        let mut literals: BTreeSet<&str> = script.split('"').skip(1).step_by(2).collect();
+        literals.extend(asked.iter().map(String::as_str));
         for key in english().keys() {
             let base = plural.iter().find_map(|p| key.strip_suffix(&format!(".{p}"))).unwrap_or(key);
             let by_field = key.starts_with("label.") && script.contains("t(`label.${");

@@ -90,6 +90,13 @@ struct Shop<'a> {
 }
 
 impl Shop<'_> {
+    /// The page's word `key` in its language (the key itself when there is none), each `{name}` filled: escaped by the
+    /// caller, as anything put in a page is.
+    fn w(&self, key: &str, vars: &[(&str, &str)]) -> String {
+        let word = self.words.get(key).and_then(Value::as_str).unwrap_or(key);
+        vars.iter().fold(word.to_string(), |w, (name, value)| w.replace(&format!("{{{name}}}"), value))
+    }
+
     /// The page around `main`: the store's name, search, cart, its top categories.
     fn page(&self, status: u16, title: &str, meta: Option<&Meta>, noindex: bool, main: &str) -> SiteResponse {
         let store = esc(&self.store.name);
@@ -190,7 +197,13 @@ impl Shop<'_> {
             .filter_map(|c| {
                 let slug = c["slug"].as_str()?;
                 let img = image(&c["image"], 400);
-                let stock = if c["in_stock"].as_bool() == Some(false) { r#"<span class="out">Out of stock</span>"# } else { "" };
+                let stock = if c["backorder"].as_bool() == Some(true) {
+                    format!(r#"<span class="later">{}</span>"#, esc(&self.w("stock.backorder_short", &[])))
+                } else if c["in_stock"].as_bool() == Some(false) {
+                    r#"<span class="out">Out of stock</span>"#.to_string()
+                } else {
+                    String::new()
+                };
                 let price = c.get("price").filter(|p| !p.is_null()).map(|p| self.price(p)).unwrap_or_default();
                 let price = if c["from"].as_bool() == Some(true) && !price.is_empty() { format!(r#"<span class="from">From</span> {price}"#) } else { price };
                 Some(format!(
@@ -406,11 +419,21 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
         .unwrap_or_default();
     let price = shown.get("price").filter(|v| !v.is_null()).map(|v| site.price(v)).unwrap_or_default();
     let in_stock = shown["in_stock"].as_bool().unwrap_or(true);
-    let stock = match (in_stock, shown["available_qty"].as_str().or(shown["available_qty"].as_i64().map(|_| "")).filter(|q| !q.is_empty())) {
+    let backorder = shown["backorder"].as_bool() == Some(true);
+    let ships_from = shown["ships_from"].as_str();
+    let mut stock = match (in_stock, shown["available_qty"].as_str().or(shown["available_qty"].as_i64().map(|_| "")).filter(|q| !q.is_empty())) {
+        // Out of stock and still taken: a pre-order when it says when, a back-order when not.
+        _ if backorder => match ships_from {
+            Some(date) => format!(r#"<p class="later">{}</p>"#, esc(&site.w("stock.preorder", &[("date", date)]))),
+            None => format!(r#"<p class="later">{}</p>"#, esc(&site.w("stock.backorder", &[]))),
+        },
         (false, _) => r#"<p class="out">Out of stock</p>"#.to_string(),
         (true, Some(q)) if site.store.show_stock_quantity => format!(r#"<p class="in">{} in stock</p>"#, esc(q)),
         (true, _) => r#"<p class="in">In stock</p>"#.to_string(),
     };
+    if let Some(date) = ships_from.filter(|_| in_stock && !backorder) {
+        stock.push_str(&format!(r#"<p class="muted">{}</p>"#, esc(&site.w("stock.ships_from", &[("date", date)]))));
+    }
     // What sets the shown variant apart, and the choices that lead to the others (plain links: they work without scripts).
     let picks: String = match selected.and_then(|s| s["slug"].as_str()) {
         Some(on) => option_groups(&variants, on)
@@ -514,8 +537,17 @@ async fn product(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, slug: &str
         "image": first_image.as_deref().map(|i| absolute(site.origin, i)),
     });
     if let Some(price) = offered {
+        let availability = match (backorder, ships_from) {
+            (true, Some(_)) => "https://schema.org/PreOrder",
+            (true, None) => "https://schema.org/BackOrder",
+            _ if in_stock => "https://schema.org/InStock",
+            _ => "https://schema.org/OutOfStock",
+        };
         data["offers"] = json!({"@type": "Offer", "price": price, "priceCurrency": site.store.currency_code,
-            "availability": if in_stock { "https://schema.org/InStock" } else { "https://schema.org/OutOfStock" }, "url": format!("{}/p/{slug}", site.origin)});
+            "availability": availability, "url": format!("{}/p/{slug}", site.origin)});
+        if let Some(date) = ships_from.filter(|_| backorder) {
+            data["offers"]["availabilityStarts"] = json!(date);
+        }
     }
     if count > 0 {
         data["aggregateRating"] = json!({"@type": "AggregateRating", "ratingValue": rating["average"], "reviewCount": count});

@@ -266,12 +266,12 @@ messages:
   - key: commerce.order_placed
     label: A web order was placed
     entity: SalesOrder
-    values: [store, total, method, instructions, link, manage_start, manage_token]
+    values: [store, total, method, instructions, link, manage_start, manage_token, later]
     languages:
       en:
         email:
           subject: "Your order {{ doc.number }} at {{ values.store }}"
-          body: "<p>Thank you for your order {{ doc.number }} at {{ values.store }}: {{ values.total }}, paid by {{ values.method }}.</p>{% if values.instructions %}<p>{{ values.instructions }}</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}{% if values.manage_token %}<p><a href=\"{{ values.manage_start }}{{ values.manage_token }}\">Cancel the order or send something back</a></p>{% endif %}"
+          body: "<p>Thank you for your order {{ doc.number }} at {{ values.store }}: {{ values.total }}, paid by {{ values.method }}.</p>{% if values.instructions %}<p>{{ values.instructions }}</p>{% endif %}{% if values.later %}<p>These ship later: {% for l in values.later %}{{ l }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}{% if values.link %}<p><a href=\"{{ values.link }}\">Follow your order</a></p>{% endif %}{% if values.manage_token %}<p><a href=\"{{ values.manage_start }}{{ values.manage_token }}\">Cancel the order or send something back</a></p>{% endif %}"
   - key: commerce.order_refunded
     label: Money was sent back for a web order
     entity: SalesOrder

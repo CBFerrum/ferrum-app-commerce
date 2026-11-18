@@ -3006,6 +3006,8 @@ async fn old_workspace() {
     let slug = "old-workspace";
     let Shop { t, .. } = small_shop(slug).await;
     t.sql("delete from e_return_reason").await;
+    // an_old_workspace_without_the_fields_sells_as_before: no back-order terms and no dates kept.
+    t.sql("update e_website_item set backorder = false, backorder_limit = null, ships_from = null").await;
     t.sql("update e_store_settings set cancel_window_hours = null, cancel_refund = null, return_window_days = null, return_shipping_paid_by = null, restocking_fee_percent = null, refund_destination = null, store_credit_kind = null, out_for_delivery_words = null, after_sales_text = null, store_languages = null, resend_per_day = null").await;
     let fakepay = gateway(&t, "fakepay").await;
 
@@ -4354,4 +4356,128 @@ async fn checkout_operation() {
     assert_ne!(so["customer"], meera["id"], "a guest typing her email is not her");
     let guest = t.get("Customer", so["customer"].as_str().unwrap().parse().unwrap()).await;
     assert_eq!(guest["commerce_guest"], json!(true));
+}
+
+#[test]
+fn backorders_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(backorders()).await.unwrap() });
+}
+
+/// Per store item: keep selling when out of stock (a back-order), up to a limit owed at once, and a day it ships from
+/// (with a back-order, a pre-order). The store enforces stock and shows quantities; mugs: 10 in stock.
+async fn backorders() {
+    let Shop { t, tenant, products, nos, selling, .. } = small_shop("backorder").await;
+    let item_of = |slug: &'static str| {
+        let t = &t;
+        async move { uid(&t.find_one("WebsiteItem", json!({"slug": slug})).await) }
+    };
+    let terms = |wi: Uuid, v: Value| {
+        let t = &t;
+        async move { t.k.update(&t.ctx, "WebsiteItem", wi, obj(v), None).await.expect("terms set") }
+    };
+    let buy = |token: String, email: &'static str, key: &'static str| {
+        let t = &t;
+        async move {
+            t.cart_ok(&token, "PUT", "/cart/details", Some(details(email, "Asha Rao", "IN"))).await;
+            t.checkout(None, &token, key, json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await
+        }
+    };
+    let mug = item_of("blue-mug").await;
+
+    // ───────────── an_item_without_backorder_sells_only_what_is_there ─────────────
+    let (cart, _) = t.new_cart(None, json!([])).await;
+    let over = t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 11}))).await;
+    assert_eq!(field_error(&over, "qty"), "only 10 available");
+
+    // ───────────── a_backorder_item_sells_past_stock_up_to_its_limit ─────────────
+    terms(mug, json!({"backorder": true, "backorder_limit": "2"})).await;
+    let over = t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 13}))).await;
+    assert_eq!(field_error(&over, "qty"), "only 12 available", "ten there and two owed at most");
+    let taken = t.cart_ok(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 12}))).await;
+    assert_eq!((taken["items"][0]["backorder"].clone(), taken["items"][0]["in_stock"].clone()), (json!(true), json!(true)), "{taken}");
+    buy(cart, "early@example.com", "backorder-0001").await.expect("ordered past stock");
+    let (more, _) = t.new_cart(None, json!([])).await;
+    let used_up = t.cart(&more, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 1}))).await;
+    assert_eq!(field_error(&used_up, "qty"), "this item is out of stock", "two already owed: the limit is used up");
+    let page = t.get_pub("/items/blue-mug").await;
+    assert_eq!((page["in_stock"].clone(), page["backorder"].clone()), (json!(false), json!(false)), "no room left");
+
+    // ───────────── no_limit_means_any_quantity ─────────────
+    terms(mug, json!({"backorder_limit": null})).await;
+    let any = t.cart_ok(&more, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 40}))).await;
+    assert_eq!(any["items"][0]["backorder"], json!(true), "{any}");
+    let page = t.get_pub("/items/blue-mug").await;
+    assert_eq!((page["in_stock"].clone(), page["backorder"].clone()), (json!(true), json!(true)));
+    let card = t.get_pub("/catalog").await["items"].as_array().unwrap().iter().find(|c| c["slug"] == json!("blue-mug")).cloned().unwrap();
+    assert_eq!((card["in_stock"].clone(), card["backorder"].clone()), (json!(true), json!(true)), "{card}");
+
+    // ───────────── two_checkouts_cannot_owe_more_than_the_limit ─────────────
+    let new_item = |code: &'static str, name: &'static str| {
+        let t = &t;
+        let (products, nos, selling) = (products.clone(), nos.clone(), selling.clone());
+        async move {
+            let item = t.insert("Item", json!({"item_code": code, "item_name": name, "item_group": products["id"], "stock_uom": nos["id"]})).await;
+            t.insert("ItemPrice", json!({"item": sid(&item), "price_list": selling["id"], "rate": "150"})).await;
+            uid(&t.insert("WebsiteItem", json!({"item": sid(&item), "published": true})).await)
+        }
+    };
+    let cap = new_item("CAP", "Cap").await;
+    terms(cap, json!({"backorder": true, "backorder_limit": "3"})).await;
+    let (first, _) = t.new_cart(None, json!([{"item": "cap", "qty": 2}])).await;
+    let (second, _) = t.new_cart(None, json!([{"item": "cap", "qty": 2}])).await;
+    for (token, email) in [(&first, "one@example.com"), (&second, "two@example.com")] {
+        t.cart_ok(token, "PUT", "/cart/details", Some(details(email, "Asha Rao", "IN"))).await;
+    }
+    let go = |token: String, key: &'static str| {
+        let (k, site) = (t.k.clone(), t.site.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: None,
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", token.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await.map(|r| r.status)
+        })
+    };
+    let (a, b) = (go(first, "cap-order-0001"), go(second, "cap-order-0002"));
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let refused: Vec<&ferrum_kernel::Result<u16>> = [&a, &b].into_iter().filter(|r| r.is_err()).collect();
+    assert_eq!(refused.len(), 1, "one of two: {a:?} {b:?}");
+    assert!(matches!(refused[0], Err(Error::Validation(f)) if f.iter().any(|x| x.field == "items")), "{refused:?}");
+
+    // ───────────── a_preorder_says_when_it_ships ─────────────
+    let hat = new_item("HAT", "Hat").await;
+    let soon = (chrono::Utc::now().date_naive() + chrono::Duration::days(30)).to_string();
+    terms(hat, json!({"backorder": true, "ships_from": soon})).await;
+    let page = t.get_pub("/items/hat").await;
+    assert_eq!((page["backorder"].clone(), page["ships_from"].clone()), (json!(true), json!(soon)), "{page}");
+    let (_, _, html) = page_in(&t, "/p/hat", &[], None).await;
+    assert!(html.contains(&format!("Pre-order: ships from {soon}")) && html.contains(r#"class="add""#) && html.contains("schema.org/PreOrder"), "{html}");
+    let placed = place(&t, json!([{"item": "hat", "qty": 1}]), "hat@example.com", "Cash on Delivery", "hat-order-0001").await;
+    let seen = t.ok(None, "POST", "/orders/lookup", &[], Some(json!({"number": placed.number, "email": "hat@example.com", "token": placed.token}))).await;
+    assert_eq!(seen["order"]["items"][0]["ships_from"], json!(soon), "{seen}");
+    let told = opened_mails(&t, "hat@example.com").await.into_iter().find(|m| m.0.starts_with("Your order")).expect("a confirmation").1;
+    assert!(told.contains("These ship later") && told.contains("Hat"), "{told}");
+    // ───────────── a_stock_alert_is_not_taken_for_an_item_on_backorder ─────────────
+    let alert = t.call(None, "POST", "/items/hat/stock-alert", &[], Some(json!({"email": "wait@example.com"}))).await;
+    assert!(matches!(alert, Err(Error::Invalid(_))), "it can be ordered now: {alert:?}");
+    // A day already past is told nowhere.
+    let past = (chrono::Utc::now().date_naive() - chrono::Duration::days(1)).to_string();
+    terms(hat, json!({"ships_from": past})).await;
+    assert_eq!(t.get_pub("/items/hat").await["ships_from"], Value::Null);
+    let (_, _, html) = page_in(&t, "/p/hat", &[], None).await;
+    assert!(
+        !html.contains(r#"<p class="later">Pre-order"#)
+            && !html.contains(r#"<p class="muted">Ships from"#)
+            && html.contains(r#"<p class="later">Out of stock: order now"#),
+        "a back-order with no day: {html}"
+    );
+    assert!(html.contains("schema.org/BackOrder"));
 }

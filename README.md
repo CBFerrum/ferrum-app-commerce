@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.17.2-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.18.0-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.17.2 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.18.0 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -116,6 +116,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 - **Website items.** The published face of an ERP item: slug, title, short and long description, images with alt text, categories, hand-picked related items, weight, a per-item order limit, SEO title and description, ranking, and rating average and count.
 - **Variants.** A size or a colour is an item of its own with its own price, stock, code and picture. **Generate Variants** takes option sets such as `{"Size": ["S","M"], "Colour": ["Red"]}`, makes the attributes and combinations in ERP's Stock Operations, and gives each a website item. The parent is listed once, "From" its cheapest variant; its page tells which combinations are sold out or not offered together.
 - **Reviews.** A shopper's review, written in the form on the product page or sent by the API (1 to 5 stars, title, text, name, email), is held as Pending until a manager approves it; verified purchase is set when that email bought the item; one review per email per item; reviewer emails are never shown.
+- **Back-orders and pre-orders.** Per website item: Keep Selling When Out of Stock, up to a Most Owed at Once limit over all open orders, and a Ships From date. The product page says "order now, we ship when it is back" or "Pre-order: ships from …", the cart line, the order page and the confirmation say when it ships, and two checkouts at once never owe more than the limit.
 - **Back-in-stock alerts.** A shopper leaves an email on an out-of-stock item and is told once, when it is back.
 - **Import and export.** Website items, categories and coupons import and export as CSV.
 - **Server-rendered pages without scripts.** Product pages work without scripts; the cart needs them. Names, descriptions and reviews are escaped, and images are the workspace's public files or HTTPS addresses.
@@ -302,7 +303,7 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 | Product attributes, filters and facets on listings | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Bundles and kits | 🟡 [1] | ✅ | 🟡 | 🟡 | ✅ | ✅ |
 | Digital goods and downloads | ❌ | 🟡 | ✅ | ✅ | ✅ | 🟡 |
-| Pre-orders and back-orders | 🟡 [9] | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| Pre-orders and back-orders | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ |
 | Guest and signed-in checkout | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Customer account pages on the storefront | 🟡 [2] | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Promotions: percent, amount, buy and get, free shipping, stacking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -347,7 +348,6 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 6. Words are translatable per language and right-to-left is handled; English is the only language that ships, product text is not translated, and the header, listing and product page words the server writes are still English.
 7. A Finance plan can be sold as an item with renewals paid online; no saved cards for automatic renewal and no plan change from the portal.
 8. Documented REST, public and signed-in; no GraphQL and no API keys for the storefront routes.
-9. With *Refuse quantities beyond the available stock* off in Store Settings the store sells past what it holds, for every item; there is no setting per item, no limit and no ships-from date yet.
 
 ### 🏆 Where Ferrum Commerce stands out
 
@@ -360,7 +360,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 ### 🚧 Where the leaders are still ahead
 
 - **The storefront's look and reach:** themes, a page builder, content pages, menus, customer account pages, express wallets, saved cards, several languages and currencies, and several storefronts.
-- **Catalog depth:** attributes and facets, bundles, digital goods, pre-orders, product feeds, and a media pipeline.
+- **Catalog depth:** attributes and facets, bundles, digital goods, product feeds, and a media pipeline.
 - **Logistics:** live carrier rates, labels, tracking sync and customs documents.
 - **Payments breadth:** many more providers, authorise-then-capture, chargebacks, fraud scoring and gateway-fee booking.
 - **Selling channels:** marketplaces, social shops, loyalty and B2B features.
@@ -372,6 +372,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.18.0**: Back-orders and pre-orders per item: keep selling when out of stock, up to a limit, and a ships-from date told everywhere the shopper looks.
 - [x] **0.17.2**: Cancel My Order is the shopper's alone; Cancel, Update and Send Mail Again on a web order need write on the order.
 - [x] **0.17.1**: A review form on the product page: a rating, a headline, words, a name and an email, shown once the store approves it.
 - [x] **0.17.0**: Checkout is the operation `commerce.shopping_cart.checkout`, through the gate for the storefront and an agent alike.
@@ -424,7 +425,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 - [ ] More payment providers (Adyen, Mollie, Cashfree, PayU, Klarna and local methods).
 - [ ] Chargebacks and disputes; gateway fees and payout reconciliation booked.
 - [ ] Fraud checks and holds.
-- [ ] Bundles sold as one product; digital goods; pre-orders and back-orders.
+- [ ] Bundles sold as one product; digital goods.
 - [ ] Loyalty points and referrals; wishlists.
 - [ ] Company accounts, net terms and credit limits at checkout, quotes, quick order.
 - [ ] Several currencies shown to shoppers; several storefronts from one catalog.
@@ -528,7 +529,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.17.2**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.18.0**.
 
 ## 🤝 Contributing
 

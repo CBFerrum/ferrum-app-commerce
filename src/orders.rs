@@ -42,23 +42,33 @@ pub async fn order_view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, so: &
     let lines = rows(so, "items");
     let is_shipping = |l: &Doc| store.shipping_item.is_some() && id(l, "item") == store.shipping_item;
     let items: Vec<Uuid> = lines.iter().filter_map(|l| id(l, "item")).collect();
-    let pages: HashMap<Uuid, (Option<String>, Option<String>)> =
-        sqlx::query_as::<_, (Uuid, Option<String>, Option<String>)>("select item, slug, title from e_website_item where tenant_id = $1 and item = any($2)")
+    // A workspace not yet updated has no ships-from date to read.
+    let dated = ctx.schema.entity("WebsiteItem").is_some_and(|e| e.field("ships_from").is_some());
+    let sql = if dated {
+        "select item, slug, title, ships_from from e_website_item where tenant_id = $1 and item = any($2)"
+    } else {
+        "select item, slug, title, null::date from e_website_item where tenant_id = $1 and item = any($2)"
+    };
+    let today = ctx.today();
+    let pages: HashMap<Uuid, (Option<String>, Option<String>, Option<chrono::NaiveDate>)> =
+        sqlx::query_as::<_, (Uuid, Option<String>, Option<String>, Option<chrono::NaiveDate>)>(sql)
             .bind(ctx.tenant)
             .bind(&items)
             .fetch_all(&mut **tx)
             .await?
             .into_iter()
-            .map(|(i, slug, title)| (i, (slug, title)))
+            .map(|(i, slug, title, ships)| (i, (slug, title, ships.filter(|d| *d > today))))
             .collect();
     let m = |v: Decimal| v.normalize().to_string();
     let goods: Vec<Value> = lines
         .iter()
         .filter(|l| !is_shipping(l))
         .map(|l| {
-            let (slug, title) = id(l, "item").and_then(|i| pages.get(&i)).cloned().unwrap_or_default();
+            let (slug, title, ships) = id(l, "item").and_then(|i| pages.get(&i)).cloned().unwrap_or_default();
+            // A line still to deliver says when it ships, while that day is to come.
+            let ships_from = ships.filter(|_| d(l, "delivered_qty") < d(l, "qty")).map(|d| d.to_string());
             json!({"item": slug, "title": title.or_else(|| s(l, "item_name").map(str::to_string)), "qty": m(d(l, "qty")), "price": m(d(l, "rate")),
-                   "amount": m(d(l, "amount")), "delivered_qty": m(d(l, "delivered_qty"))})
+                   "amount": m(d(l, "amount")), "delivered_qty": m(d(l, "delivered_qty")), "ships_from": ships_from})
         })
         .collect();
     let subtotal: Decimal = lines.iter().filter(|l| !is_shipping(l)).map(|l| d(l, "amount")).sum();

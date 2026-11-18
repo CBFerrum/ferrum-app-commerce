@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.18.0
+
+Needs the same platform and ERP as 0.17.2.
+
+- **Back-orders and pre-orders per item.** Three fields on `WebsiteItem`, added by the schema sync (nothing to run,
+  nothing backfilled; empty keeps every item as it was): `backorder` (Keep Selling When Out of Stock),
+  `backorder_limit` (Most Owed at Once, over all open orders; empty or 0: no limit) and `ships_from`. They matter only
+  while Store Settings refuse quantities beyond stock. One function decides how many may be ordered
+  (`catalog::orderable`), used by the cart, by checkout under its per-item lock, and by the views.
+- **The API says it.** Items, variants, cards and cart lines carry `backorder` (out of stock and still taken) and
+  `ships_from` (a day still to come) beside `in_stock`, which keeps meaning "can be ordered now"; order lines not yet
+  delivered carry `ships_from`.
+- **The pages say it.** "Back-order" on a card; "Out of stock: order now, we ship when it is back" or "Pre-order:
+  ships from …" on the product page (schema.org `BackOrder` / `PreOrder`); the cart line, the variant picker and the
+  order page say when it ships. Seven new storefront words.
+- **The confirmation says it.** The message template `commerce.order_placed` has a new value `later` ("These ship
+  later: …").
+- **A stock alert** is not taken for an item that can be ordered on back-order.
+
+Tests: `backorders_end_to_end`, `updated_app_on_an_old_workspace_end_to_end` (no terms kept),
+`catalog::tests::orderable_counts_what_is_already_owed`, and two storefront script tests.
+
 ## 0.17.2
 
 Needs the same platform and ERP as 0.17.1. No database or interface change.
