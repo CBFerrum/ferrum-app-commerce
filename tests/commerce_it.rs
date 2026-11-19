@@ -4545,3 +4545,129 @@ async fn no_order_token_leaves_commerce() {
     t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": placed.number, "token": token}))).await;
     assert_eq!(held("select count(*) from outbox where tenant_id = $1 and payload::text like $2").await, 0, "the resent mail waits sealed too");
 }
+
+#[test]
+fn attributes_and_facets_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(attributes_and_facets()).await.unwrap() });
+}
+
+/// Store items carry attributes; a listing filters by them, and says per value how many cards a choice would show
+/// (a variant's options count for its item).
+async fn attributes_and_facets() {
+    let Shop { t, mug, tee, products, nos, selling, .. } = small_shop("facets").await;
+    let wi = |item: Uuid| {
+        let t = &t;
+        async move { uid(&t.find_one("WebsiteItem", json!({"item": item.to_string()})).await) }
+    };
+    let (mug_wi, tee_wi) = (wi(mug).await, wi(tee).await);
+    let attrs = |pairs: &[(&str, &str)]| Value::Array(pairs.iter().map(|(a, v)| json!({"attribute": a, "value": v})).collect());
+    t.k.update(&t.ctx, "WebsiteItem", mug_wi, obj(json!({"attributes": attrs(&[("Material", "Ceramic"), ("Brand", "Acme")])})), None).await.expect("mug");
+    t.k.update(&t.ctx, "WebsiteItem", tee_wi, obj(json!({"attributes": attrs(&[("Material", " Cotton "), ("Brand", "Acme")])})), None).await.expect("tee");
+    let tee_m = uid(&t.insert("Item", json!({"item_code": "TEE-M", "item_name": "Logo Tee M", "item_group": products["id"], "stock_uom": nos["id"]})).await);
+    t.insert("ItemPrice", json!({"item": tee_m.to_string(), "price_list": selling["id"], "rate": "400"})).await;
+    t.insert(
+        "WebsiteItem",
+        json!({"item": tee_m.to_string(), "published": true, "variant_of": tee_wi.to_string(), "options": [{"option": "Size", "value": "M"}]}),
+    )
+    .await;
+    let slugs = |path: &'static str| {
+        let t = &t;
+        async move {
+            let mut s: Vec<String> = t.get_pub(path).await["items"].as_array().unwrap().iter().map(|c| c["slug"].as_str().unwrap().to_string()).collect();
+            s.sort();
+            s
+        }
+    };
+    let both = vec!["blue-mug".to_string(), "logo-tee".to_string()];
+
+    // ───────────── a_listing_filters_by_attribute ─────────────
+    assert_eq!(slugs("/catalog?attr.Material=Ceramic").await, ["blue-mug"]);
+    assert_eq!(slugs("/catalog?attr.material=ceramic").await, ["blue-mug"], "without case");
+    assert_eq!(slugs("/catalog?attr.Material=Ceramic,Cotton").await, both, "values of one attribute are alternatives");
+    assert_eq!(slugs("/catalog?attr.Material=Ceramic,Cotton&attr.Brand=Acme").await, both);
+    assert!(slugs("/catalog?attr.Brand=Nobody").await.is_empty());
+    // ───────────── a_variants_option_counts_for_its_item ─────────────
+    assert_eq!(slugs("/catalog?attr.Size=M").await, ["logo-tee"]);
+
+    // ───────────── facets_count_what_a_choice_would_show ─────────────
+    let facets = |path: String| {
+        let t = &t;
+        async move { t.ok(None, "GET", &path, &[], None).await["facets"].clone() }
+    };
+    let flat = |f: &Value| -> Vec<(String, String, i64, bool)> {
+        f.as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|a| {
+                let name = a["attribute"].as_str().unwrap().to_string();
+                a["values"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |v| (name.clone(), v["value"].as_str().unwrap().to_string(), v["count"].as_i64().unwrap(), v["selected"].as_bool().unwrap()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let all = facets("/catalog".into()).await;
+    let names: Vec<&str> = all.as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Brand", "Material", "Size"], "{all}");
+    assert_eq!(
+        flat(&all),
+        [
+            ("Brand".into(), "Acme".into(), 2, false),
+            ("Material".into(), "Ceramic".into(), 1, false),
+            ("Material".into(), "Cotton".into(), 1, false),
+            ("Size".into(), "M".into(), 1, false)
+        ]
+    );
+    for (name, value, count, _) in flat(&all) {
+        let path = format!("/catalog?attr.{name}={value}");
+        assert_eq!(t.get_pub(&path).await["items"].as_array().unwrap().len() as i64, count, "{path} shows what its facet said");
+    }
+    let chose = facets("/catalog?attr.Material=Ceramic".into()).await;
+    let got = flat(&chose);
+    assert!(got.contains(&("Material".into(), "Cotton".into(), 1, false)) && got.contains(&("Material".into(), "Ceramic".into(), 1, true)), "{chose}");
+    assert!(got.contains(&("Brand".into(), "Acme".into(), 1, false)) && !got.iter().any(|f| f.0 == "Size"), "{chose}");
+    assert!(t.get_pub("/catalog?limit=1").await["facets"].is_array());
+    let next = t.get_pub("/catalog?limit=1").await["next_cursor"].as_str().unwrap().to_string();
+    assert_eq!(t.get_pub(&format!("/catalog?limit=1&cursor={next}")).await["facets"], Value::Null, "later pages answer none");
+
+    // ───────────── facets_follow_the_other_filters ─────────────
+    let kitchen = t.insert("ItemCategory", json!({"category_name": "Kitchen", "published": true})).await;
+    t.k.update(&t.ctx, "WebsiteItem", mug_wi, obj(json!({"categories": [{"category": sid(&kitchen)}]})), None).await.expect("in the kitchen");
+    let in_kitchen = flat(&facets(format!("/catalog?category={}", kitchen["slug"].as_str().unwrap())).await);
+    assert_eq!(in_kitchen, [("Brand".into(), "Acme".into(), 1, false), ("Material".into(), "Ceramic".into(), 1, false)]);
+    let in_stock = flat(&facets("/catalog?in_stock=1".into()).await);
+    assert!(
+        !in_stock.iter().any(|f| f.0 == "Size") && in_stock.contains(&("Brand".into(), "Acme".into(), 1, false)),
+        "the tee (its variant has none) is sold out: {in_stock:?}"
+    );
+
+    // ───────────── too_many_or_too_long_is_refused ─────────────
+    let nine: String = (0..9).map(|i| format!("attr.a{i}=x")).collect::<Vec<_>>().join("&");
+    assert!(matches!(t.call(None, "GET", &format!("/catalog?{nine}"), &[], None).await, Err(Error::Validation(_))));
+    let long = "x".repeat(61);
+    assert!(matches!(t.call(None, "GET", &format!("/catalog?attr.Material={long}"), &[], None).await, Err(Error::Validation(_))));
+
+    // ───────────── the_same_attribute_value_twice_is_refused ─────────────
+    let twice = t.k.update(&t.ctx, "WebsiteItem", mug_wi, obj(json!({"attributes": attrs(&[("Material", "Ceramic"), ("material", "CERAMIC")])})), None).await;
+    assert!(matches!(&twice, Err(Error::Validation(f)) if f.iter().any(|x| x.field == "attributes" && x.message.contains("twice"))), "{twice:?}");
+
+    // ───────────── the_listing_page_offers_the_facets_as_links ─────────────
+    let (_, _, home) = page_in(&t, "/", &[], None).await;
+    assert!(home.contains("attr.material=ceramic"), "a link per value: {home}");
+    let (_, _, chosen) = page_in(&t, "/", &[("attr.Material", "Ceramic")], None).await;
+    assert!(chosen.contains(r#"href="/p/blue-mug""#) && !chosen.contains(r#"href="/p/logo-tee""#), "{chosen}");
+    assert!(chosen.contains(r#"aria-current="true""#) && chosen.contains(r#"<meta name="robots" content="noindex">"#), "{chosen}");
+    assert!(chosen.contains(r#"<input type="hidden" name="attr.material" value="ceramic">"#) && chosen.contains(">Clear filters<"), "{chosen}");
+    let (_, _, none) = page_in(&t, "/", &[("attr.Brand", "Nobody")], None).await;
+    assert!(none.contains("<h2>Nothing matches these filters</h2>"), "{none}");
+
+    // ───────────── an_unpublished_items_attributes_are_not_counted ─────────────
+    t.k.update(&t.ctx, "WebsiteItem", tee_wi, obj(json!({"published": false})), None).await.expect("unpublished");
+    let left = flat(&facets("/catalog".into()).await);
+    assert!(!left.iter().any(|f| f.1 == "Cotton" || f.0 == "Size") && left.contains(&("Brand".into(), "Acme".into(), 1, false)), "{left:?}");
+}

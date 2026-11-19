@@ -50,6 +50,13 @@
     - {name: option, type: data, required: true, max_length: 60, in_list: true, description: "What varies, e.g. Size"}
     - {name: value, type: data, required: true, max_length: 60, in_list: true, description: "The value the store does not sell, e.g. XL: every combination that has it stays unpublished"}
 
+- name: WebsiteItemAttribute
+  label: Website Item Attribute
+  kind: child
+  fields:
+    - {name: attribute, type: data, required: true, max_length: 60, in_list: true, description: "What is described, e.g. Material or Brand"}
+    - {name: value, type: data, required: true, max_length: 60, in_list: true, description: "This item's value, e.g. Steel. Several rows may name the same attribute"}
+
 - name: WebsiteItem
   label: Website Item
   kind: master
@@ -71,6 +78,7 @@
     - {name: images, type: table, of: WebsiteItemImage}
     - {name: categories, type: table, of: WebsiteItemCategory}
     - {name: related_items, type: table, of: WebsiteItemRelated}
+    - {name: attributes, type: table, of: WebsiteItemAttribute, description: "What shoppers filter listings by. A variant's options (Size, Colour) count for its item without being repeated here"}
     - {name: weight_kg, type: decimal, min: "0", label: Shipping Weight per Unit (kg)}
     - {name: max_qty, type: decimal, min: "0", label: Maximum Quantity per Order, description: "0 or empty: the store limit"}
     - {name: backorder, type: check, label: Keep Selling When Out of Stock, in_filter: true, description: "Orders are taken beyond what is in stock and ship when it is back. Only matters while Store Settings refuse quantities beyond stock"}
@@ -84,6 +92,7 @@
     - {label: Item, fields: [item, item_code, title, slug, published, ranking, variant_of, options, disabled_options]}
     - {label: Content, fields: [short_description, long_description, images]}
     - {label: Placement, fields: [categories, related_items]}
+    - {label: Attributes, fields: [attributes]}
     - {label: Shipping and Limits, fields: [weight_kg, max_qty, backorder, backorder_limit, ships_from]}
     - {label: SEO, collapsible: true, fields: [seo_title, seo_description]}
     - {label: Reviews, collapsible: true, fields: [rating_average, review_count]}

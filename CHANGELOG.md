@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.19.0
+
+Needs the same platform and ERP as 0.18.1.
+
+- **Attributes on store items.** A child table `WebsiteItemAttribute` (`attribute`, `value`) on `WebsiteItem`, added by
+  the schema sync (nothing to run); at most 40 per item, the same pair twice refused. A variant's options count as
+  attributes of its item.
+- **Filter and facets.** `GET /catalog` takes `attr.<Attribute>=<Value>[,<Value>…]` (values of one attribute are
+  alternatives, attributes must all hold; at most 8 attributes of 10 values, 60 characters each) and answers
+  `facets`: each attribute with its values and how many cards each value would show added to the current choice (the
+  first page only). Listing pages show them as links, mark the chosen ones, keep the choice when sorting or paging,
+  say when nothing matches, and are not indexed while narrowed. Four storefront words (`facet.*`).
+
+Tests: `attributes_and_facets_end_to_end`, `catalog::tests::attr_filters_reads_names_values_and_limits`.
+
 ## 0.18.1
 
 Needs the same platform and ERP as 0.18.0. No database or interface change.

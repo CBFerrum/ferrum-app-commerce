@@ -321,6 +321,7 @@ async fn catalog(k: &Kernel, r: &Req<'_>) -> Result<Value> {
         max_price: decimal_param(r.query("max_price"), "max_price")?,
         in_stock: matches!(r.query("in_stock"), Some("1" | "true")),
         ids: None,
+        attrs: catalog::attr_filters(&r.raw.query)?,
     };
     let sort = Sort::parse(r.query("sort"))?;
     let limit = r.limit(24, catalog::MAX_PAGE)?;
@@ -328,8 +329,10 @@ async fn catalog(k: &Kernel, r: &Req<'_>) -> Result<Value> {
     let customer = customer_of(k, r, &mut tx).await?;
     let store = Store::load(k, &r.ctx, &mut tx).await?.for_customer(&mut tx, r.ctx.tenant, customer).await?;
     let (items, next) = catalog::cards(k, &r.ctx, &mut tx, &store, &f, sort, limit, r.query("cursor"), customer).await?;
+    // What the listing can be narrowed by, with the first page only.
+    let facets = if r.query("cursor").is_none() { Some(catalog::facets(k, &r.ctx, &mut tx, &store, &f).await?) } else { None };
     tx.commit().await?;
-    Ok(json!({"items": items, "next_cursor": next, "currency": store.currency_code}))
+    Ok(json!({"items": items, "next_cursor": next, "currency": store.currency_code, "facets": facets}))
 }
 
 async fn route(k: &Kernel, r: &Req<'_>) -> Result<(u16, Value)> {
