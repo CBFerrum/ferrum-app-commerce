@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.2
+
+Needs the same platform and ERP as 0.19.1. No database or interface change.
+
+- **Contracts on the actions a person presses.** Ship, Invoice, Cancel and Update Web Order, Cancel My Order, Return
+  Something, Send Mail Again, Tracking Link (a query) and Generate Variants declare their effect, what they return and
+  what "done" means, so an agent sees them in the catalogue as a person sees the buttons. The payment and refund
+  actions wait for the Payments app (S1).
+
 ## 0.19.1
 
 Needs the same platform and ERP as 0.19.0. No database or interface change.

@@ -100,7 +100,9 @@
     - {name: generate_variants, label: Generate Variants, permission: write, condition: "doc.variant_of == null",
        confirm: "Make the combinations as ERP's item variants (the missing ones), each with a website item and the price of this one?",
        params: [{name: options, label: Options, type: text, required: true, description: "What it comes in, as JSON: {\"Size\": [\"S\", \"M\", \"L\"], \"Colour\": [\"Red\", \"Blue\"]}"},
-                {name: disabled, label: "Values not sold", type: text, description: "Values the store does not sell, as JSON: {\"Size\": [\"L\"]}; their combinations are made unpublished"}]}
+                {name: disabled, label: "Values not sold", type: text, description: "Values the store does not sell, as JSON: {\"Size\": [\"L\"]}; their combinations are made unpublished"}],
+       contract: {effect: transactional_action, returns: {type: object, properties: {variants_made_by_erp: {description: "What ERP answered making the variants"}, website_items_made: {type: integer}, unpublished: {type: integer}}},
+                  completion: "The missing combinations made as ERP's item variants, each with its website item and this item's price, committed with this receipt"}}
     # A shopper's review and back-in-stock alert, as the storefront's routes ask for them and as an agent may.
     - {name: submit_review, label: Leave a Review, permission: write, hidden: true,
        params: [{name: rating, label: Rating, type: int, required: true, description: "1 to 5"},

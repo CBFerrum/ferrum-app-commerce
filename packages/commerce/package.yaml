@@ -37,34 +37,50 @@ overlays:
           confirm: "Ship this order, or the lines chosen? Stock leaves the warehouses.",
           params: [{name: lines, label: "Lines (empty: everything left)", type: text, description: "A JSON list of {line, qty, warehouse}: the order line's id, how many (empty: all left), and a store warehouse to ship it from (empty: the one the order reserved it in)"},
                    {name: carrier, label: Carrier, type: data}, {name: tracking_number, label: Tracking number, type: data}, {name: tracking_url, label: Tracking link, type: data},
-                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}]}}
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: invoice, label: "Invoice it when this shipment completes the order", type: select, options: ["Yes", "No"]}],
+          contract: {effect: transactional_action, returns: {type: object, properties: {delivery_note: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: DeliveryNote}, number: {type: string}}}, fulfilment: {type: string}, sales_invoice: {type: [object, "null"]}}},
+            completion: "A submitted delivery note for the lines shipped, and the invoice when this shipment completes the order and Invoice says so, committed with this receipt; the shopper's mail and the order_shipped event follow the commit"}}}
       - {op: add_action, action: {name: web_invoice, label: Invoice Web Order, docstatus: [1], permission: read, condition: "doc.commerce_web_order && doc.per_billed < 100.0 && doc.per_delivered >= 100.0 && doc.status != 'Closed'",
-          confirm: "Create the invoice for this delivered order?"}}
+          confirm: "Create the invoice for this delivered order?",
+          contract: {effect: transactional_action, returns: {type: object, properties: {sales_invoice: {type: object}}},
+            completion: "A submitted sales invoice for the delivered order, its web payment applied, committed with this receipt"}}}
       - {op: add_action, action: {name: web_cancel, label: Cancel Web Order, docstatus: [1], permission: write, condition: "doc.commerce_web_order && doc.per_delivered == 0.0 && doc.status != 'Closed'",
           confirm: "Cancel this order that has not shipped? What was paid goes back: a gift card's part onto the card, the rest through the payment it came by.",
           params: [{name: reason, label: Reason, type: link, to: ReturnReason}, {name: note, label: Note, type: text},
-                   {name: approve, label: "Send the money back now", type: select, options: ["Yes", "No"], description: "No: the refunds wait for a person to approve them"}]}}
+                   {name: approve, label: "Send the money back now", type: select, options: ["Yes", "No"], description: "No: the refunds wait for a person to approve them"}],
+          contract: {effect: transactional_action, returns: {type: object, properties: {cancelled: {type: boolean}, refunds: {type: array}}},
+            completion: "The order cancelled (or waiting for its refunds), each payment's refund made and approved or waiting for approval, committed with this receipt; gateways carry the refunds after the commit"}}}
       - {op: add_action, action: {name: web_update_items, label: Update Web Order, docstatus: [1], permission: write, condition: "doc.commerce_web_order && doc.per_delivered < 100.0 && doc.status != 'Closed'",
           confirm: "Change this order? Promotions are priced again; what the shopper now owes is asked for, or what they are owed is sent back.",
           params: [{name: changes, label: "Lines to change", type: text, description: "A JSON list: {line, qty} (the line's number on the order; qty 0 removes it) or {item, qty} to add an item"},
                    {name: address, label: "New shipping address", type: text, description: "A JSON object: {line1, line2, city, state, postal_code, country}. Tax follows where the order now goes"},
                    {name: shipping_rule, label: Delivery method, type: link, to: ShippingRule, description: "Delivery is priced again for what the order now holds and where it goes: by the method it had, or the one that now applies; name one when several do"},
                    {name: note, label: Note, type: text},
-                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: approve, label: "Send a refund of the difference now", type: select, options: ["Yes", "No"]}]}}
+                   {name: notify, label: Tell the customer, type: select, options: ["Yes", "No"]}, {name: approve, label: "Send a refund of the difference now", type: select, options: ["Yes", "No"]}],
+          contract: {effect: transactional_action, returns: {type: object, description: "What changed: the lines, the new total, and what is now asked for or sent back"},
+            completion: "The order priced again with the changes, the difference asked for or refunded, committed with this receipt; the shopper's mail follows the commit"}}}
       # What a shopper does from the signed link in their order confirmation (a link names these actions; a guest
       # holds no role): src/shopper.rs checks the order, the store's windows and says what is wrong in words.
       - {op: add_action, action: {name: web_shopper_cancel, label: Cancel My Order, docstatus: [1], permission: read,
           confirm: "Cancel this order? What you paid goes back to you.",
-          params: [{name: reason, label: Why are you cancelling?, type: text}]}}
+          params: [{name: reason, label: Why are you cancelling?, type: text}],
+          contract: {effect: transactional_action, returns: {type: object, properties: {cancelled: {type: boolean}, refunds: {type: array}}},
+            completion: "The order cancelled within the store's window and its refunds made, committed with this receipt; the shopper's mail follows the commit"}}}
       - {op: add_action, action: {name: web_shopper_return, label: Return Something, docstatus: [1], permission: read,
           params: [{name: lines, label: "What are you sending back? Leave empty for everything delivered", type: text, description: "To send back only some: write each item's name or its number in the list above, then x and how many, separated by commas. Blue Mug x2, 3 sends back two Blue Mugs and one of item 3. Without an x the whole quantity delivered goes back"},
-                   {name: reason, label: Why, type: data}, {name: note, label: Anything we should know, type: text}]}}
+                   {name: reason, label: Why, type: data}, {name: note, label: Anything we should know, type: text}],
+          contract: {effect: transactional_action, returns: {type: object, properties: {return_request: {type: string, format: uuid, x-ferrum-link: ReturnRequest}, number: {type: string}}},
+            completion: "A return request for the desk to decide, committed with this receipt; the shopper's mail follows the commit"}}}
       - {op: add_action, action: {name: web_resend_mail, label: Send Mail Again, docstatus: [1, 2], permission: write, condition: "doc.commerce_web_order",
           confirm: "Send the shopper this mail again, as the order stands now?",
           params: [{name: mail, label: Mail, type: select, required: true, options: [Shipped, Payment Received, Payment Failed, Refunded],
-                    description: "Goes to the order's own address. A mail that holds a secret value (a gift card or store credit code, the confirmation's link) cannot be sent again. The same mail goes to one order only so many times a day (Store Settings)"}]}}
+                    description: "Goes to the order's own address. A mail that holds a secret value (a gift card or store credit code, the confirmation's link) cannot be sent again. The same mail goes to one order only so many times a day (Store Settings)"}],
+          contract: {effect: transactional_action, returns: {type: object, properties: {sent: {type: boolean}, state: {type: [string, "null"]}, mail: {type: string}, resent: {type: string}, left_today: {type: integer}}},
+            completion: "The mail queued to the order's address, committed with this receipt; it goes out after the commit"}}}
       # read_only: it changes nothing, and its answer (a link holding the order's token) is kept by no receipt.
-      - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, read_only: true, condition: "doc.commerce_web_order"}}
+      - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, read_only: true, condition: "doc.commerce_web_order",
+          contract: {effect: query, returns: {type: object, properties: {link: {type: [string, "null"], description: "The shopper's tracking link: a bearer credential to the order"}}},
+            completion: "The order's tracking link, made now"}}}
   - entity: DeliveryNote
     ops:
       - {op: add_field, field: {name: commerce_tracking_number, type: data, label: Tracking Number, max_length: 120, description: "Shown to the shopper on the order page"}}
