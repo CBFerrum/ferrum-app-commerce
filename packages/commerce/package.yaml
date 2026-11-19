@@ -63,7 +63,8 @@ overlays:
           confirm: "Send the shopper this mail again, as the order stands now?",
           params: [{name: mail, label: Mail, type: select, required: true, options: [Shipped, Payment Received, Payment Failed, Refunded],
                     description: "Goes to the order's own address. A mail that holds a secret value (a gift card or store credit code, the confirmation's link) cannot be sent again. The same mail goes to one order only so many times a day (Store Settings)"}]}}
-      - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, condition: "doc.commerce_web_order"}}
+      # read_only: it changes nothing, and its answer (a link holding the order's token) is kept by no receipt.
+      - {op: add_action, action: {name: web_tracking_link, label: Tracking Link, docstatus: [1, 2], permission: read, read_only: true, condition: "doc.commerce_web_order"}}
   - entity: DeliveryNote
     ops:
       - {op: add_field, field: {name: commerce_tracking_number, type: data, label: Tracking Number, max_length: 120, description: "Shown to the shopper on the order page"}}

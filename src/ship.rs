@@ -236,18 +236,11 @@ impl DocHook for DeliveryHook {
                 continue;
             }
             let number = s(&so, "number").unwrap_or_default().to_string();
-            let link = match Store::load(hc.kernel, hc.ctx, hc.tx).await {
-                Ok(store) => match &store.store_url {
-                    Some(url) => token::for_mail(hc.kernel, hc.ctx.tenant, so_id).await?.map(|t| orders::tracking_url(url, &number, &t)),
-                    None => None,
-                },
-                Err(Error::NotFound(_)) => None,
-                Err(e) => return Err(e),
-            };
+            // No order link: it holds the order's token, and the event goes to webhooks and the event feed.
             let event = json!({
                 "sales_order": so_id, "number": number, "delivery_note": s(doc, "id"), "email": s(&so, "commerce_contact_email"),
                 "carrier": s(doc, "transporter"), "tracking_number": s(doc, "commerce_tracking_number"), "tracking_url": s(doc, "commerce_tracking_url"),
-                "notify": b(doc, "commerce_notify"), "order_link": link, "ship_to": s(&so, "commerce_shipping_address"),
+                "notify": b(doc, "commerce_notify"), "ship_to": s(&so, "commerce_shipping_address"),
             });
             outbox::enqueue(hc.tx, hc.ctx.tenant, "commerce.order_shipped", Some("SalesOrder"), Some(so_id), event).await?;
             let mut v = Doc::new();
@@ -260,6 +253,16 @@ impl DocHook for DeliveryHook {
                 for (k, v) in shipped_values(doc, so_id) {
                     values.insert(k.into(), v);
                 }
+                // The order's link holds its token: only in the mail, sealed while it waits.
+                let link = match Store::load(hc.kernel, hc.ctx, hc.tx).await {
+                    Ok(store) => match &store.store_url {
+                        Some(url) => token::for_mail(hc.kernel, hc.ctx.tenant, so_id).await?.map(|t| orders::tracking_url(url, &number, &t)),
+                        None => None,
+                    },
+                    Err(Error::NotFound(_)) => None,
+                    Err(e) => return Err(e),
+                };
+                let secret = if link.is_some() { vec!["link".to_string()] } else { vec![] };
                 values.insert("link".into(), json!(link));
                 let m = Message {
                     template: "commerce.order_shipped".into(),
@@ -267,6 +270,7 @@ impl DocHook for DeliveryHook {
                     record: Some(so_id),
                     to: vec![Recipient::address(to)],
                     values,
+                    secret,
                     ..Default::default()
                 };
                 messages::send(hc.kernel, hc.tx, hc.ctx, &m).await?;

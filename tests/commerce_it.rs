@@ -1662,7 +1662,8 @@ async fn refunds() {
 
     let b = place(&t, json!([{"item": "blue-mug", "qty": 2}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "refund-b-0001").await;
     assert_eq!(b.total, n("1121"), "950 of goods and delivery, 171 of VAT");
-    let thanked = mails(&t, GUEST).await;
+    // As the mailer sends it: the link is sealed while the mail waits.
+    let thanked = opened_mails(&t, GUEST).await;
     assert!(
         thanked.iter().any(|(subject, html)| subject.starts_with(&format!("Your order {}", b.number)) && html.contains(&format!("n={}", b.number))),
         "the shopper is told of the order, with its link: {thanked:?}"
@@ -1699,10 +1700,13 @@ async fn refunds() {
     let told = events(&t, "commerce.order_shipped").await;
     let mine = told.iter().find(|e| e["number"] == json!(b.number)).expect("the shipment is announced");
     assert_eq!((mine["tracking_number"].clone(), mine["notify"].clone()), (json!("BD123"), json!(true)));
-    assert_eq!(mine["order_link"], json!(format!("https://shop.example.com/order#n={}&t={}", b.number, b.token)), "the link a mailer sends");
-    let sent = mails(&t, GUEST).await;
+    assert!(mine.get("order_link").is_none() && !mine.to_string().contains(&b.token), "no event carries the order's token: {mine}");
+    let sent = opened_mails(&t, GUEST).await;
     let shipped_mail = sent.iter().find(|(subject, _)| *subject == format!("Your order {} has shipped", b.number)).expect("the shopper is told it has shipped");
-    assert!(shipped_mail.1.contains("BlueDart has it, parcel BD123") && shipped_mail.1.contains(&format!("t={}", b.token)), "{shipped_mail:?}");
+    assert!(
+        shipped_mail.1.contains("BlueDart has it, parcel BD123") && shipped_mail.1.contains(&format!("t={}", b.token)),
+        "the mail has the link: {shipped_mail:?}"
+    );
 
     // ───────────── a shopper follows the order from a link, with no sign-in ─────────────
     let tracked = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
@@ -4480,4 +4484,64 @@ async fn backorders() {
         "a back-order with no day: {html}"
     );
     assert!(html.contains("schema.org/BackOrder"));
+}
+
+#[test]
+fn no_order_token_leaves_commerce_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(no_order_token_leaves_commerce()).await.unwrap() });
+}
+
+/// A guest's order token is a bearer credential to the order: the shopper gets it in the checkout's answer and in the
+/// mails (sealed while they wait, opened by the mailer), and nothing else keeps or carries it: no event (what webhooks
+/// and the event feed deliver), no receipt of the gate, no audit entry.
+async fn no_order_token_leaves_commerce() {
+    use ferrum_kernel::capability::Invocation;
+    let Shop { t, tenant, .. } = small_shop("tokens").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    let placed = place(&t, json!([{"item": "blue-mug", "qty": 1}]), GUEST, "fakepay", "token-order-0001").await;
+    pay(&t, &fakepay, placed.request.unwrap(), placed.total, "fp_token_1").await;
+    t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"notify": "Yes", "carrier": "BlueDart", "tracking_number": "BD9"}))
+        .await
+        .expect("shipped");
+    let desk = person(&t, "desk@tokens.example", &["Sales Manager"]).await;
+    let copied =
+        t.k.invoke(&desk, Invocation::new("commerce.sales_order.web_tracking_link", json!({"id": placed.so.to_string(), "params": {}})).key("copy-link-1"))
+            .await
+            .expect("the desk copies the link");
+    assert!(copied.result["link"].as_str().is_some_and(|l| l.contains(&placed.token)), "the desk is shown it: {}", copied.result);
+    let held = |sql: &'static str| {
+        let (t, token) = (&t, placed.token.clone());
+        async move {
+            let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(tenant).bind(format!("%{token}%")).fetch_one(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            n
+        }
+    };
+    // The outbox: every event Commerce put there (order placed, paid, shipped) and the mails waiting.
+    assert_eq!(held("select count(*) from outbox where tenant_id = $1 and payload::text like $2").await, 0, "no event or waiting mail carries the token");
+    let placed_event = events(&t, "commerce.order_placed").await.into_iter().find(|e| e["number"] == json!(placed.number)).expect("the event");
+    assert!(placed_event.get("order_token").is_none() && placed_event.get("order_link").is_none(), "{placed_event}");
+    let shipped_event = events(&t, "commerce.order_shipped").await.into_iter().find(|e| e["number"] == json!(placed.number)).expect("the event");
+    assert!(shipped_event.get("order_link").is_none(), "{shipped_event}");
+    assert_eq!(
+        held("select count(*) from logic_effect where tenant_id = $1 and (result::text like $2 or input_digest like $2)").await,
+        0,
+        "no receipt keeps it"
+    );
+    assert_eq!(held("select count(*) from audit_event where tenant_id = $1 and diff::text like $2").await, 0, "no audit entry keeps it");
+    // The shopper still gets it, in the mail as the mailer sends it.
+    let sent = opened_mails(&t, GUEST).await;
+    assert!(sent.iter().any(|(s, h)| s.starts_with("Your order") && h.replace("&#x2f;", "/").contains(&format!("t={}", placed.token))), "{sent:?}");
+
+    // ───────────── a_resent_mail_carries_a_working_link ─────────────
+    t.k.run_action(&desk, "SalesOrder", placed.so, "web_resend_mail", json!({"mail": "Shipped"})).await.expect("sent again");
+    let again =
+        opened_mails(&t, GUEST).await.into_iter().rev().find(|(s, _)| s.contains("has shipped")).expect("the shipped mail again").1.replace("&#x2f;", "/");
+    let at = again.find("&t=").or_else(|| again.find("&amp;t=").map(|i| i + 4)).expect("a link in the mail") + 3;
+    let token: String = again[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": placed.number, "token": token}))).await;
+    assert_eq!(held("select count(*) from outbox where tenant_id = $1 and payload::text like $2").await, 0, "the resent mail waits sealed too");
 }

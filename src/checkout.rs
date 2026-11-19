@@ -466,12 +466,13 @@ pub async fn place(hc: &mut HookCtx<'_>, cart: &Doc, params: &Value) -> Result<V
     .await?;
     // The key an order's token is signed with: the vault answers on a connection of its own.
     let key = crate::keys::current(k, ctx.tenant, crate::keys::ORDERS).await?;
-    let order_token = token::order_token(&key, so_id);
-    let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &order_token));
+    // The event is the order's id and facts: it goes to webhooks and the event feed, so it carries no token and no link
+    // that holds one (a bearer credential to the order). The shopper's link goes only in the mail, sealed while it waits.
+    let order_link = store.store_url.as_deref().map(|url| orders::tracking_url(url, &number, &token::order_token(&key, so_id)));
     let event = json!({
         "sales_order": so_id, "number": number, "customer": customer, "email": s(&cart, "email"), "name": s(&cart, "contact_name"),
         "currency": store.currency_code, "grand_total": money(d(&so, "rounded_total")), "payment_method": method.as_ref().map(|m| m.gateway.clone()), "paid_by_gift_card": money(by_card),
-        "payment_request": request.as_ref().and_then(|r| s(r, "id")), "order_token": order_token, "order_link": order_link,
+        "payment_request": request.as_ref().and_then(|r| s(r, "id")),
     });
     outbox::enqueue(tx, ctx.tenant, "commerce.order_placed", Some("SalesOrder"), Some(so_id), event).await?;
     let amount = crate::pages::money(&store.currency_code, &d(&so, "rounded_total").to_string(), store.precision);
@@ -496,7 +497,11 @@ pub async fn place(hc: &mut HookCtx<'_>, cart: &Doc, params: &Value) -> Result<V
         })
         .collect();
     values.insert("later".into(), json!((!later.is_empty()).then_some(later)));
-    let secret = if manage.is_some() { vec!["manage_token".to_string()] } else { vec![] };
+    // The order's link and the manage link hold tokens: sealed while the mail waits.
+    let mut secret = vec!["link".to_string()];
+    if manage.is_some() {
+        secret.push("manage_token".to_string());
+    }
     crate::tell::message(k, tx, ctx, "commerce.order_placed", so_id, s(&cart, "email"), values, secret).await?;
     Ok(placed(cart_id, &so, request.as_ref().and_then(|r| s(r, "id")), &store))
 }

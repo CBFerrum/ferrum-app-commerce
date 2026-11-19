@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.1
+
+Needs the same platform and ERP as 0.18.0. No database or interface change.
+
+- **A guest order's token is in no event.** Earlier versions put the guest order's access token (`order_token`) and
+  the tracking link holding it (`order_link`) in the `commerce.order_placed` event, and the link in
+  `commerce.order_shipped`. Events go to every outbound webhook of the workspace and to whatever reads the event
+  feed, so each of them received a bearer credential to the order. Both events now carry the order's id and facts
+  only. The shopper's mails keep their link: it travels only in the message's values and is sealed while the mail
+  waits in the outbox (opened by the mailer alone), for every mail Commerce sends.
+- **The desk's Tracking Link is read-only**, so no gate receipt keeps the link it answers.
+- **Tokens made before this version are refused.** What an order's token signs changed
+  (`ferrum-commerce-order/2:`), so every token issued earlier, including those the events carried, opens nothing any
+  more: nothing to run. A shopper's older link stops working with it; the desk's **Send Mail Again** sends a mail with
+  a fresh link (any mail sent from now on carries one). A workspace that wants a new key as well can still bring in a
+  new version of Commerce's key with `ferrum task vault_rotate level:owner workspace:<slug> owner:commerce`
+  (`docs/operations.md`, "vault_rotate").
+
+Tests: `no_order_token_leaves_commerce_end_to_end` (with a resent mail's link), `token::tests::a_token_issued_before_the_change_is_refused`; `storefront_end_to_end` now asserts the shipped event holds no
+link and reads the link from the mail.
+
 ## 0.18.0
 
 Needs the same platform and ERP as 0.17.2.
