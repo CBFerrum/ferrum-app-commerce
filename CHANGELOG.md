@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.1
+
+Needs the same platform and ERP as 0.19.0. No database or interface change.
+
+- **Cart reminders go only to an address that proved itself.** A visitor could type any address and tick the
+  reminder box; the store's upkeep then mailed that address and raised `commerce.cart_abandoned` with
+  `consent: true`, which other apps (a campaign's journey) act on. Now a reminder, and `consent: true`, only come for
+  a cart whose shopper was signed in, and the reminder goes to their account's address. A visitor's tick is kept and
+  counts for nothing.
+
+Tests: `shopper_mails_end_to_end` (`a_visitors_typed_address_gets_no_reminder_or_consent`,
+`a_signed_in_shoppers_cart_is_reminded_at_their_own_address`).
+
 ## 0.19.0
 
 Needs the same platform and ERP as 0.18.1.

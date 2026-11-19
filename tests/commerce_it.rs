@@ -2914,15 +2914,32 @@ async fn shopper_mails() {
             t.cart_ok(&cart, "PUT", "/cart/details", Some(d)).await;
         }
     };
+    // a_visitors_typed_address_gets_no_reminder_or_consent (COM-T4): a visitor types any address, so their tick counts
+    // for nothing: no reminder, and no consent other apps would act on.
     remind("may@example.com", true).await;
     remind("mayhem@example.com", false).await;
+    // a_signed_in_shoppers_cart_is_reminded_at_their_own_address: the address a sign-in proved, whatever was typed.
+    let member = {
+        let u = t.k.create_user(&t.ctx, "member@example.com", "Member", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(t.ctx.tenant, u, None, "portal".into()).await.unwrap()
+    };
+    let (theirs, _) = t.new_cart(Some(&member), json!([{"item": "blue-mug", "qty": 1}])).await;
+    let mut d = details("typed-by-member@example.com", "Member", "IN");
+    d["reminder_consent"] = json!(true);
+    t.ok(Some(&member), "PUT", "/cart/details", &[("x-cart-token", theirs.as_str())], Some(d)).await;
     t.sql("update e_shopping_cart set last_activity = now() - interval '3 days' where status = 'Open'").await;
     ferrum_app_commerce::maintenance(&t.k, t.ctx.tenant).await.expect("upkeep");
     let seen = events(&t, "commerce.cart_abandoned").await;
     let consent_of = |email: &str| seen.iter().find(|e| e["email"] == json!(email)).map(|e| e["consent"].clone());
-    assert_eq!((consent_of("may@example.com"), consent_of("mayhem@example.com")), (Some(json!(true)), Some(json!(false))));
-    assert_eq!(subjects("may@example.com").await.iter().filter(|s| s.contains("left something in your cart")).count(), 1);
+    assert_eq!((consent_of("may@example.com"), consent_of("mayhem@example.com")), (Some(json!(false)), Some(json!(false))));
+    let reminded = |to: &'static str| {
+        let subjects = &subjects;
+        async move { subjects(to).await.iter().filter(|s| s.contains("left something in your cart")).count() }
+    };
+    assert_eq!(reminded("may@example.com").await, 0, "a typed address is never reminded");
     assert!(subjects("mayhem@example.com").await.is_empty(), "no consent, no reminder");
+    assert_eq!(consent_of("member@example.com"), Some(json!(true)), "{seen:?}");
+    assert_eq!((reminded("member@example.com").await, reminded("typed-by-member@example.com").await), (1, 0), "the account's own address");
 }
 
 #[test]
