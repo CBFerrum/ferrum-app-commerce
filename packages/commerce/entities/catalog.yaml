@@ -73,6 +73,9 @@
     - {name: related_items, type: table, of: WebsiteItemRelated}
     - {name: weight_kg, type: decimal, min: "0", label: Shipping Weight per Unit (kg)}
     - {name: max_qty, type: decimal, min: "0", label: Maximum Quantity per Order, description: "0 or empty: the store limit"}
+    - {name: backorder, type: check, label: Keep Selling When Out of Stock, in_filter: true, description: "Orders are taken beyond what is in stock and ship when it is back. Only matters while Store Settings refuse quantities beyond stock"}
+    - {name: backorder_limit, type: decimal, min: "0", label: Most Owed at Once, visible_if: "doc.backorder", description: "How many may be ordered beyond stock, over all open orders together; 0 or empty: no limit"}
+    - {name: ships_from, type: date, label: Ships From, description: "A date still to come is told to the shopper on the item, in the cart, on the order and in its confirmation. With Keep Selling When Out of Stock it makes a pre-order"}
     - {name: seo_title, type: data, max_length: 200, label: SEO Title}
     - {name: seo_description, type: data, max_length: 500, label: SEO Description}
     - {name: rating_average, type: decimal, read_only: true, precision: 2, no_copy: true}
@@ -81,7 +84,7 @@
     - {label: Item, fields: [item, item_code, title, slug, published, ranking, variant_of, options, disabled_options]}
     - {label: Content, fields: [short_description, long_description, images]}
     - {label: Placement, fields: [categories, related_items]}
-    - {label: Shipping and Limits, fields: [weight_kg, max_qty]}
+    - {label: Shipping and Limits, fields: [weight_kg, max_qty, backorder, backorder_limit, ships_from]}
     - {label: SEO, collapsible: true, fields: [seo_title, seo_description]}
     - {label: Reviews, collapsible: true, fields: [rating_average, review_count]}
   actions:

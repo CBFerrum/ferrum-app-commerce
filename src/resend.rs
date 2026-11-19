@@ -109,12 +109,16 @@ pub async fn web_resend_mail(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> 
     if lately >= store.resend_per_day {
         return Err(Error::Conflict(format!("this mail has gone to this order {lately} times today: the limit is {}", store.resend_per_day)));
     }
+    let values = values(hc, &store, so, template).await?;
+    // The order's link holds its token: sealed while the mail waits.
+    let secret = if values.get("link").is_some_and(|l| !l.is_null()) { vec!["link".to_string()] } else { vec![] };
     let message = Message {
         template: template.into(),
         entity: Some("SalesOrder".into()),
         record: Some(so_id),
         to: vec![Recipient::address(&to)],
-        values: values(hc, &store, so, template).await?,
+        values,
+        secret,
         ..Default::default()
     };
     let sent = messages::send(hc.kernel, hc.tx, &sctx, &message).await?;

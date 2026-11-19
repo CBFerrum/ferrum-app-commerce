@@ -96,6 +96,15 @@ describe("the cart", () => {
     expect(text()).toContain("Tax and delivery for Karnataka, India");
   });
 
+  it("a cart line on back-order says when it ships", async () => {
+    localStorage.setItem("ferrum.cart:/api/site/t/commerce", JSON.stringify("tok"));
+    const later = { ...line, id: "l2", item: "hat", title: "Hat", backorder: true, ships_from: "2026-12-24" };
+    serve({ "GET /cart": () => cart({ items: [line, later] }), "GET /store": store, "GET /cart/shipping-options": () => ({ options: [], selected: null }) });
+    await open("/cart", "", "cart");
+    expect(text()).toContain("Ships when it is back in stock · Ships from 2026-12-24");
+    expect(document.querySelectorAll(".line .error")).toHaveLength(0);
+  });
+
   it("says plainly when nothing delivers to the place, and keeps the refusal of an unknown country", async () => {
     localStorage.setItem("ferrum.cart:/api/site/t/commerce", JSON.stringify("tok"));
     serve({
@@ -388,10 +397,77 @@ describe("the product page", () => {
     expect(text()).toContain("this item is in stock: you can order it now");
   });
 
+  it("a variant on back-order is not shown as sold out", async () => {
+    const onBack = { ...item, variants: [v("tee-m-red", "M", "Red", { in_stock: true, backorder: true, available_qty: "0" }), ...item.variants.slice(1)] };
+    serve({ "GET /items/tee": onBack });
+    await open("/p/tee?v=tee-m-red", product);
+    expect(text()).toContain("M / Red: INR 400.00 · Ships when it is back");
+    expect(text()).not.toContain("M / Red: INR 400.00 · Sold out");
+  });
+
   it("has no back-in-stock box where the item can be bought", async () => {
     serve({});
     await open("/p/mug", `<article class="product"><div class="buy"><p class="in">In stock</p><form class="add" data-item="mug"></form></div></article>`);
     expect(document.querySelector("form.alert-box")).toBeNull();
+  });
+
+  const reviewed = `<article class="product"><div class="buy"><p class="in">In stock</p></div></article><section class="reviews" data-review="tee"><h2>Reviews</h2></section>`;
+  const reviewForm = () => document.querySelector("form.review-box") as HTMLFormElement;
+  const fill = (rating: string | null, name: string, email: string) => {
+    const form = reviewForm();
+    if (rating) (form.querySelector(`input[name="rating"][value="${rating}"]`) as HTMLInputElement).checked = true;
+    (form.elements.namedItem("name") as HTMLInputElement).value = name;
+    (form.elements.namedItem("email") as HTMLInputElement).value = email;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+  };
+
+  it("offers a review form and sends it once", async () => {
+    serve({ "POST /items/tee/reviews": () => ({ status: "Pending", message: "Thank you!" }) });
+    await open("/p/tee", reviewed);
+    expect(text()).toContain("No reviews yet.");
+    expect(text()).toContain("Write a review");
+    fill(null, "", "");
+    await tick();
+    expect(text()).toContain("Choose a rating");
+    expect(calls.filter((c) => c.path === "/items/tee/reviews")).toHaveLength(0);
+    fill("4", "Asha", "nope");
+    await tick();
+    expect(text()).toContain("Enter an email address");
+    expect(calls.filter((c) => c.path === "/items/tee/reviews")).toHaveLength(0);
+    fill("4", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    const sent = calls.filter((c) => c.path === "/items/tee/reviews");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].method).toBe("POST");
+    expect(sent[0].body).toEqual({ rating: 4, title: "", review: "", name: "Asha", email: "asha@example.com" });
+    expect(sent[0].headers["idempotency-key"]).toBeTruthy();
+    expect(text()).toContain("Thank you. Your review shows once the store has approved it.");
+    expect(reviewForm()).toBeNull();
+  });
+
+  it("shows the store's refusal and keeps what was typed", async () => {
+    let answer: unknown = { refuse: 409, body: { message: "you have already reviewed this item" } };
+    serve({ "POST /items/tee/reviews": () => answer });
+    await open("/p/tee", reviewed);
+    fill("5", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    expect(text()).toContain("you have already reviewed this item");
+    const form = reviewForm();
+    expect((form.elements.namedItem("name") as HTMLInputElement).value).toBe("Asha");
+    expect((form.elements.namedItem("email") as HTMLInputElement).value).toBe("asha@example.com");
+    answer = { refuse: 422, body: { fields: [{ field: "email", message: "is required" }] } };
+    fill("5", "Asha", "asha@example.com");
+    await tick();
+    await tick();
+    const email = form.elements.namedItem("email") as HTMLInputElement;
+    expect(email.getAttribute("aria-invalid")).toBe("true");
+    expect(email.closest("label")?.textContent).toContain("is required");
+    // Both tries were one review's: the same key.
+    const keys = calls.filter((c) => c.path === "/items/tee/reviews").map((c) => c.headers["idempotency-key"]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
   });
 });
 

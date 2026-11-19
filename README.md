@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.16.0-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.18.1-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.16.0 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.18.1 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -115,7 +115,8 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 - **Categories as a tree.** An Item Category has a name, image, description, SEO fields and a published flag; an unpublished category hides its branch.
 - **Website items.** The published face of an ERP item: slug, title, short and long description, images with alt text, categories, hand-picked related items, weight, a per-item order limit, SEO title and description, ranking, and rating average and count.
 - **Variants.** A size or a colour is an item of its own with its own price, stock, code and picture. **Generate Variants** takes option sets such as `{"Size": ["S","M"], "Colour": ["Red"]}`, makes the attributes and combinations in ERP's Stock Operations, and gives each a website item. The parent is listed once, "From" its cheapest variant; its page tells which combinations are sold out or not offered together.
-- **Reviews.** A shopper's review (1 to 5 stars, title, text, name, email) is held as Pending until a manager approves it; verified purchase is set when that email bought the item; one review per email per item; reviewer emails are never shown.
+- **Reviews.** A shopper's review, written in the form on the product page or sent by the API (1 to 5 stars, title, text, name, email), is held as Pending until a manager approves it; verified purchase is set when that email bought the item; one review per email per item; reviewer emails are never shown.
+- **Back-orders and pre-orders.** Per website item: Keep Selling When Out of Stock, up to a Most Owed at Once limit over all open orders, and a Ships From date. The product page says "order now, we ship when it is back" or "Pre-order: ships from …", the cart line, the order page and the confirmation say when it ships, and two checkouts at once never owe more than the limit.
 - **Back-in-stock alerts.** A shopper leaves an email on an out-of-stock item and is told once, when it is back.
 - **Import and export.** Website items, categories and coupons import and export as CSV.
 - **Server-rendered pages without scripts.** Product pages work without scripts; the cart needs them. Names, descriptions and reviews are escaped, and images are the workspace's public files or HTTPS addresses.
@@ -127,7 +128,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 - **Cart.** Quantities, removing, steppers, and a placeholder while it loads. The cart asks where it is going (country, region, postal code), lists the delivery methods for the place and shows the total for it, so the total shown is the total charged. A cart's token is shown once and only its hash is stored.
 - **Agents fill carts as shoppers do.** Every cart change, review and stock alert is an operation of the platform's gate (`commerce.shopping_cart.add_item`, `.set_details`, `commerce.website_item.submit_review` and the rest), which the storefront's routes call too: an agent with the right fills a cart exactly as the page does, and a request sent again with the same `Idempotency-Key` is done once.
 - **Priced on every change.** Price list, promotions, tax and rounding come from the selling engine; clients choose items and quantities, never prices or totals.
-- **Checkout in one transaction.** Customer, contact and addresses, final pricing, a stock re-check, a submitted ERP sales order and a payment request, idempotent per cart and client key. Two named steps, a folded summary, each refused field marked beside it.
+- **Checkout in one transaction.** Customer, contact and addresses, final pricing, a stock re-check, a submitted ERP sales order and a payment request, idempotent per cart and client key. It is the operation `commerce.shopping_cart.checkout`, which the storefront calls through the gate and an agent may too. Two named steps, a folded summary, each refused field marked beside it.
 - **Guest and signed-in checkout.** A guest gives an email; a signed-in portal customer gets their own prices and orders.
 - **Tax follows the delivery address.** Checkout records the shipping address as a structured Address (country, region, postcode), which ERP's country rules read; the store's tax template is the fallback.
 - **On a phone.** Empty categories, no results and nothing in stock each say what to do next, and every view has a failure with a way on.
@@ -266,7 +267,7 @@ Lines and child tables (cart items, website item images, categories, related ite
 
 | Role | What it can do |
 |---|---|
-| Website Manager | Runs the store: settings, catalog, reviews, shipping, coupons, promotions, payments, refunds, returns, storefront words, ships and invoices web orders, and changes and creates carts (for a shopper, or through an agent) |
+| Website Manager | Runs the store: settings, catalog, reviews, shipping, coupons, promotions, payments, refunds, returns, storefront words, ships and invoices web orders, and changes and creates carts (for a shopper, or through an agent). Cancelling, changing or mailing an order again is for those who write orders (Sales Manager, Sales User) |
 | Sales Manager | Reads carts, payments, shipping and coupons; works refunds and returns |
 | Sales User | Reads the store's records; can raise a refund |
 | Accounts Manager | Works payment requests and refunds |
@@ -302,7 +303,7 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 | Product attributes, filters and facets on listings | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Bundles and kits | 🟡 [1] | ✅ | 🟡 | 🟡 | ✅ | ✅ |
 | Digital goods and downloads | ❌ | 🟡 | ✅ | ✅ | ✅ | 🟡 |
-| Pre-orders and back-orders | 🟡 [9] | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| Pre-orders and back-orders | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ |
 | Guest and signed-in checkout | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Customer account pages on the storefront | 🟡 [2] | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Promotions: percent, amount, buy and get, free shipping, stacking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -321,7 +322,7 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 | Refunds book credit notes, stock and bank entries | ✅ | ❌ | ❌ | ❌ | 🟡 | ✅ |
 | Abandoned-cart reminders | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ |
 | Back-in-stock alerts | ✅ | 🟡 | 🟡 | 🟡 | ✅ | 🟡 |
-| Reviews with moderation and verified purchase | 🟡 [4] | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| Reviews with moderation and verified purchase | ✅ [4] | 🟡 | ✅ | ✅ | ✅ | ✅ |
 | Themes and a page builder | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Content pages and a blog | ❌ [5] | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Storefront in several languages | 🟡 [6] | ✅ | ✅ | 🟡 | ✅ | ✅ |
@@ -342,12 +343,11 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 1. Promotions can bundle (buy and get, bundle prices) and ERP's Stock Operations add-on has product bundles (a non-stock item whose delivery moves its components), but Commerce does not read them: a bundle sells without a check of its components' stock.
 2. The signed-in API has a customer's orders, invoices, reorder and subscriptions; no storefront page signs in yet. Order tracking works by link.
 3. The cart carries the delivery country and region and ERP's country rules read them; no automatic tax-rate service, and no tax IDs or exemptions at checkout.
-4. Reviews are taken by the API, moderated, marked as a verified purchase and shown on the product page; what is missing is the form on that page.
+4. Reviews are written on the product page (or through the API), moderated, marked as a verified purchase and shown there. Not built: photos, helpful votes, the store's replies and mails asking for a review.
 5. Ferrum's Website app serves pages and a blog on its own host; the store's own host serves only the shop.
 6. Words are translatable per language and right-to-left is handled; English is the only language that ships, product text is not translated, and the header, listing and product page words the server writes are still English.
 7. A Finance plan can be sold as an item with renewals paid online; no saved cards for automatic renewal and no plan change from the portal.
 8. Documented REST, public and signed-in; no GraphQL and no API keys for the storefront routes.
-9. With *Refuse quantities beyond the available stock* off in Store Settings the store sells past what it holds, for every item; there is no setting per item, no limit and no ships-from date yet.
 
 ### 🏆 Where Ferrum Commerce stands out
 
@@ -360,7 +360,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 ### 🚧 Where the leaders are still ahead
 
 - **The storefront's look and reach:** themes, a page builder, content pages, menus, customer account pages, express wallets, saved cards, several languages and currencies, and several storefronts.
-- **Catalog depth:** attributes and facets, bundles, digital goods, pre-orders, product feeds, and a media pipeline.
+- **Catalog depth:** attributes and facets, bundles, digital goods, product feeds, and a media pipeline.
 - **Logistics:** live carrier rates, labels, tracking sync and customs documents.
 - **Payments breadth:** many more providers, authorise-then-capture, chargebacks, fraud scoring and gateway-fee booking.
 - **Selling channels:** marketplaces, social shops, loyalty and B2B features.
@@ -372,6 +372,11 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.18.1**: No event carries a guest order's token or its link; the shopper's mails keep the link, sealed while they wait; tokens made before are refused.
+- [x] **0.18.0**: Back-orders and pre-orders per item: keep selling when out of stock, up to a limit, and a ships-from date told everywhere the shopper looks.
+- [x] **0.17.2**: Cancel My Order is the shopper's alone; Cancel, Update and Send Mail Again on a web order need write on the order.
+- [x] **0.17.1**: A review form on the product page: a rating, a headline, words, a name and an email, shown once the store approves it.
+- [x] **0.17.0**: Checkout is the operation `commerce.shopping_cart.checkout`, through the gate for the storefront and an agent alike.
 - [x] **0.16.0**: A shopper's cart, review and stock alert are operations of the gate, which the storefront calls and an agent may too; a cart request sent twice with one `Idempotency-Key` is done once.
 - [x] **0.15.1**: Someone who can only read sales orders can no longer cancel a web order or open a return on it; the shopper's link and the store's desk still can.
 - [x] **0.15.0**: Upkeep runs one workspace at a time, on whichever replica is free.
@@ -398,7 +403,6 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 - [ ] Brand settings: logo, colours, fonts, header, footer and an announcement bar.
 - [ ] A designed home page with banners and featured collections, and navigation menus.
 - [ ] Customer account pages: sign in, order history, saved addresses, reorder, subscriptions.
-- [ ] A review form on the product page.
 - [ ] Product attributes and filters on listings.
 - [ ] Content pages and a blog on the store's host.
 - [ ] Redirects when a slug changes.
@@ -422,7 +426,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 - [ ] More payment providers (Adyen, Mollie, Cashfree, PayU, Klarna and local methods).
 - [ ] Chargebacks and disputes; gateway fees and payout reconciliation booked.
 - [ ] Fraud checks and holds.
-- [ ] Bundles sold as one product; digital goods; pre-orders and back-orders.
+- [ ] Bundles sold as one product; digital goods.
 - [ ] Loyalty points and referrals; wishlists.
 - [ ] Company accounts, net terms and credit limits at checkout, quotes, quick order.
 - [ ] Several currencies shown to shoppers; several storefronts from one catalog.
@@ -450,6 +454,10 @@ After installing:
 5. In **Domains**, point a host at the store (target `site:commerce`) so the storefront is served at its root.
 6. Review the **After Sales** tab (cancellation and return windows, restocking fee, where refunds go) and edit the shopper mail templates.
 7. Optional: install the Store Subscriptions connector where Finance is installed.
+
+Upgrading from a version before 0.18.1: guest order links made earlier no longer open their orders (they were in
+events webhooks receive), so links in mails sent before the upgrade stop working; the desk's **Send Mail Again** on an
+order sends the shopper a mail with a fresh link. Nothing to run.
 
 ## 🔧 Develop
 
@@ -526,7 +534,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.16.0**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.18.1**.
 
 ## 🤝 Contributing
 

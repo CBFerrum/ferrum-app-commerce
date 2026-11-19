@@ -120,6 +120,22 @@
        params: [{name: email, label: Shopper's Email, secret: true, description: "The email the shopper proved by signing in; empty: the cart is a guest's again"}],
        contract: {effect: transactional_action, retention_days: 30, returns: {type: object, properties: {id: {type: string, format: uuid, x-ferrum-link: ShoppingCart}, status: {type: string}, item_count: {type: string}, rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
                   completion: "The cart names the shopper and the customer linked to that email, and is priced for them, committed with this receipt"}}
+    - {name: checkout, label: Check Out, permission: write, hidden: true,
+       params: [{name: payment_method, label: Payment Method, description: "One of the store's payment methods, by its gateway's name; empty only when a gift card pays all of it"},
+                {name: accept_terms, label: Terms Accepted, type: check},
+                {name: expected_total, label: Total the Buyer Saw, description: "A decimal as text: refused when the cart now comes to another total"},
+                {name: return_url, label: Return Address, description: "Where the gateway sends the shopper back: an address under the store's own"},
+                {name: details, label: Details, type: text, secret: true, description: "As set_details takes them, applied first"},
+                {name: gift_card_code, label: Gift Card Code, secret: true},
+                {name: gift_card_pin, label: Gift Card PIN, secret: true},
+                {name: client_key, label: Caller's Key, required: true, description: "8 to 200 visible characters, kept on the cart: checking the cart out again with it answers the order made, with another is refused"}],
+       contract: {effect: external_effect, unknown_outcome: manual,
+                  returns: {type: object, properties: {
+                    id: {type: string, format: uuid, x-ferrum-link: ShoppingCart},
+                    sales_order: {type: string, format: uuid, x-ferrum-link: SalesOrder}, number: {type: string},
+                    payment_request: {type: [string, "null"], format: uuid, x-ferrum-link: PaymentRequest},
+                    rounded_total: {type: string}, currency: {type: string, description: "ISO code"}}},
+                  completion: "A submitted web order for the cart, the customer it belongs to, and its payment request when something is left to pay, committed with this receipt; the confirmation mail and the gateway's collection follow the commit"}}
   form:
     - {label: Cart, fields: [status, company, customer, user_email, email, phone, contact_name, last_activity]}
     - {label: Items, fields: [items]}

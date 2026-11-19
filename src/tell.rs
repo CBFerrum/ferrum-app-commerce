@@ -36,6 +36,12 @@ pub async fn about(
     secret: Vec<String>,
 ) -> Result<()> {
     let Some(to) = to.map(str::trim).filter(|t| t.contains('@')) else { return Ok(()) };
+    // The order's link holds its token, a bearer credential: sealed while the mail waits in the outbox (which webhooks
+    // and the event feed read), opened only by the mailer. Every caller's mail goes through here.
+    let mut secret = secret;
+    if values.get("link").is_some_and(|l| !l.is_null()) && !secret.iter().any(|s| s == "link") {
+        secret.push("link".into());
+    }
     let m = ferrum_kernel::messages::Message {
         template: template.into(),
         entity: Some(entity.into()),

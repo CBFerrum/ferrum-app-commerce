@@ -182,8 +182,11 @@ in stock — under per-item locks, so two checkouts cannot both take the last un
 coupon, then creates a **submitted sales order** priced exactly like the cart and a
 **payment request**. The customer: a signed-in user's linked customer (or a new one with their
 email); a **guest always gets a new guest customer**, even when a customer with that email
-exists — a guest never attaches to (or sees) another customer's account. The same key returns
-the same result again; another key on an ordered cart is `409`. Errors: `422` (missing
+exists — a guest never attaches to (or sees) another customer's account. The route runs the
+operation `commerce.shopping_cart.checkout` through the gate (the same an agent with
+`ShoppingCart: write` uses, `client_key` being the key), under the effect key
+`{cart}:{Idempotency-Key}`. The same key and body return the same result again; the same key
+with another body is `409` (`input_changed`); another key on an ordered cart is `409`. Errors: `422` (missing
 details, `payment_method`, `accept_terms`, `return_url`, `shipping_address.country`, `items`
 rows no longer available / out of stock, `coupon_code`), `409` (`expected_total` differs —
 the message has the new total —, cart already ordered or expired), `403` guest checkout
@@ -230,9 +233,10 @@ expires_at, paid_at}`.
 
 **The tracking link** is `{store_url}/order#n={number}&t={order_token}`. The token is in the address'
 *fragment*, which browsers never send, so no server, log or `Referer` sees it; the order page reads it and
-calls `/orders/track`. It comes with the checkout result (`order_link`), in the `commerce.order_placed` and
-`commerce.order_shipped` events, and from the desk (the `web_tracking_link` action on a web order). Anyone
-who has the link can follow the order, so mailers should treat it as confidential.
+calls `/orders/track`. It comes with the checkout result (`order_link`), in the shopper's mails (sealed while
+they wait in the outbox, opened only by the mailer), and from the desk (the read-only `web_tracking_link`
+action on a web order, whose answer no receipt keeps). It is in no event: anyone who has the link can follow
+the order, and events go to webhooks and the event feed.
 
 A signed-in user's customers are those whose email is the user's (on the customer, or on a CRM
 contact of the customer when the CRM package is installed) — never guest customers, whose
@@ -434,10 +438,10 @@ purchase of any variant.
 
 Besides the usual document events, the outbox carries (for a comms package, webhooks or
 automations): `commerce.order_placed` `{sales_order, number, customer, email, name, currency,
-grand_total, payment_method, payment_request, order_token}` — the token belongs in the
-confirmation email (the order page needs number + email + token, or the `order_link` alone), so treat
-these payloads as confidential —; `commerce.order_shipped` `{sales_order, number, delivery_note, email, carrier, tracking_number,
-tracking_url, notify, order_link, ship_to}` (`notify` is the *Tell the Customer* switch),
+grand_total, payment_method, paid_by_gift_card, payment_request}`; `commerce.order_shipped` `{sales_order, number, delivery_note, email, carrier, tracking_number,
+tracking_url, notify, ship_to}` (`notify` is the *Tell the Customer* switch). No event carries an order's
+token or a link holding one: the shopper's mails are Commerce's message templates, which put the link in
+themselves;
 `commerce.order_refunded` `{sales_order, number, refund, kind, amount, currency, gateway, email, notify}`,
 `commerce.order_paid`, `commerce.payment_failed`, `commerce.payment_expired`
 and `commerce.cart_abandoned` `{cart, email, name, item_count, grand_total, currency}` (carts

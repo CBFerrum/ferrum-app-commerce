@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.18.1
+
+Needs the same platform and ERP as 0.18.0. No database or interface change.
+
+- **A guest order's token is in no event.** Earlier versions put the guest order's access token (`order_token`) and
+  the tracking link holding it (`order_link`) in the `commerce.order_placed` event, and the link in
+  `commerce.order_shipped`. Events go to every outbound webhook of the workspace and to whatever reads the event
+  feed, so each of them received a bearer credential to the order. Both events now carry the order's id and facts
+  only. The shopper's mails keep their link: it travels only in the message's values and is sealed while the mail
+  waits in the outbox (opened by the mailer alone), for every mail Commerce sends.
+- **The desk's Tracking Link is read-only**, so no gate receipt keeps the link it answers.
+- **Tokens made before this version are refused.** What an order's token signs changed
+  (`ferrum-commerce-order/2:`), so every token issued earlier, including those the events carried, opens nothing any
+  more: nothing to run. A shopper's older link stops working with it; the desk's **Send Mail Again** sends a mail with
+  a fresh link (any mail sent from now on carries one). A workspace that wants a new key as well can still bring in a
+  new version of Commerce's key with `ferrum task vault_rotate level:owner workspace:<slug> owner:commerce`
+  (`docs/operations.md`, "vault_rotate").
+
+Tests: `no_order_token_leaves_commerce_end_to_end` (with a resent mail's link), `token::tests::a_token_issued_before_the_change_is_refused`; `storefront_end_to_end` now asserts the shipped event holds no
+link and reads the link from the mail.
+
+## 0.18.0
+
+Needs the same platform and ERP as 0.17.2.
+
+- **Back-orders and pre-orders per item.** Three fields on `WebsiteItem`, added by the schema sync (nothing to run,
+  nothing backfilled; empty keeps every item as it was): `backorder` (Keep Selling When Out of Stock),
+  `backorder_limit` (Most Owed at Once, over all open orders; empty or 0: no limit) and `ships_from`. They matter only
+  while Store Settings refuse quantities beyond stock. One function decides how many may be ordered
+  (`catalog::orderable`), used by the cart, by checkout under its per-item lock, and by the views.
+- **The API says it.** Items, variants, cards and cart lines carry `backorder` (out of stock and still taken) and
+  `ships_from` (a day still to come) beside `in_stock`, which keeps meaning "can be ordered now"; order lines not yet
+  delivered carry `ships_from`.
+- **The pages say it.** "Back-order" on a card; "Out of stock: order now, we ship when it is back" or "Pre-order:
+  ships from …" on the product page (schema.org `BackOrder` / `PreOrder`); the cart line, the variant picker and the
+  order page say when it ships. Seven new storefront words.
+- **The confirmation says it.** The message template `commerce.order_placed` has a new value `later` ("These ship
+  later: …").
+- **A stock alert** is not taken for an item that can be ordered on back-order.
+
+Tests: `backorders_end_to_end`, `updated_app_on_an_old_workspace_end_to_end` (no terms kept),
+`catalog::tests::orderable_counts_what_is_already_owed`, and two storefront script tests.
+
+## 0.17.2
+
+Needs the same platform and ERP as 0.17.1. No database or interface change.
+
+- **Cancel My Order is the shopper's alone.** `web_shopper_cancel` now refuses every member of the workspace, the
+  store's desk included: only the guest of the order's link (or a portal customer on their own order) presses it. The
+  desk cancels with Cancel Web Order. Return Something stays the shopper's or the desk's.
+- **Cancel, Update and Send Mail Again need write on the order.** `web_cancel`, `web_update_items` and
+  `web_resend_mail` were declared `read` behind a check of the store's roles, so a Website Manager, who reads sales
+  orders and writes none, could cancel, change or mail them. They now declare `write`: Sales Manager and Sales User
+  keep them where their rules let them write the order; Website Manager no longer has them.
+
+Tests: `after_sales_end_to_end` adds `a_member_cannot_cancel_as_the_shopper`, `a_reader_cannot_cancel_edit_or_resend_a_web_order`
+and `the_desk_still_cancels_web_orders`.
+
+## 0.17.1
+
+Needs the same platform and ERP as 0.17.0. No database change.
+
+- **A review form on the product page.** Every product page has its reviews section, with or without reviews yet;
+  the storefront's script puts a form in it (a rating of 1 to 5, an optional headline and review, a name and an
+  email, which is never shown). It posts to `POST /items/{slug}/reviews` with one `Idempotency-Key` per form, says
+  what the store refuses next to the field or under the form, keeps what was typed, and thanks the shopper once
+  sent: the review shows when the store approves it. Every word is a storefront word (`review.*`).
+
+Tests: `storefront_end_to_end` (a product page has a place for a review), `ui/src/storefront.test.ts` (the form).
+
+## 0.17.0
+
+Needs the same platform and ERP as 0.16.0. Package `commerce` stays 0.6.1. No database change.
+
+- **Checkout is an operation.** `commerce.shopping_cart.checkout`, a hidden action of `ShoppingCart` with a contract
+  (effect `external_effect`, `unknown_outcome: manual`), turns a cart into a submitted web order, its customer and
+  its payment request, once per key and once per cart. `POST /checkout` calls it through the gate and writes nothing
+  else; an agent holding `ShoppingCart: write` (Website Manager) places a web order the same way. The caller's
+  `Idempotency-Key` is the parameter `client_key`, kept on the cart; the gift card's code and PIN and the details
+  are secret parameters. Who the shopper is comes from the cart (`identify`), not from the request.
+- **One difference:** the same `Idempotency-Key` sent again after a successful checkout with a **different** body is
+  now refused with `409` (`input_changed`) instead of answered with the first order. The same key and body still
+  answer the order made; another key on an ordered cart is still `409`.
+
+Tests: `checkout_operation_end_to_end`.
+
 ## 0.16.0
 
 Needs the same platform and ERP as 0.15.1. Package `commerce` 0.6.1. No database change.

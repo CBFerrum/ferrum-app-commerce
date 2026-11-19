@@ -129,6 +129,9 @@ impl DocHook for CartHook {
     /// What a shopper does to the cart (`packages/commerce/entities/cart.yaml`): the storefront's routes and agents
     /// alike, as the system on the cart the kernel has locked. Answers the cart's id, status, count and total.
     async fn action(&self, hc: &mut HookCtx<'_>, name: &str, cart: &Doc, params: &Value) -> Result<Option<Value>> {
+        if name == "checkout" {
+            return crate::checkout::place(hc, cart, params).await.map(Some);
+        }
         if !["add_item", "set_quantity", "set_details", "apply_code", "remove_code", "set_shipping", "identify"].contains(&name) {
             return Ok(None);
         }
@@ -467,11 +470,14 @@ pub async fn check_qty(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, wi: &D
 }
 
 /// Refuses a quantity of a stock item beyond what the store can sell (when it enforces stock).
-pub async fn check_stock(tx: &mut Tx, tenant: Uuid, store: &Store, item: Uuid, qty: Decimal) -> Result<()> {
-    if !store.enforce_stock || !stock_items(tx, tenant, &[item]).await?.contains(&item) {
+/// Refuses more of a stock item than may be ordered now (`catalog::orderable`: what is there, and on back-order up
+/// to its limit), when the store refuses quantities beyond stock.
+pub async fn check_stock(tx: &mut Tx, ctx: &Ctx, store: &Store, item: Uuid, qty: Decimal) -> Result<()> {
+    if !store.enforce_stock || !stock_items(tx, ctx.tenant, &[item]).await?.contains(&item) {
         return Ok(());
     }
-    let avail = available(tx, tenant, store, &[item]).await?.get(&item).copied().unwrap_or_default().max(Decimal::ZERO);
+    let have = available(tx, ctx.tenant, store, &[item]).await?.get(&item).copied().unwrap_or_default();
+    let Some(avail) = catalog::orderable(have, catalog::later(tx, ctx, &[item]).await?.get(&item)) else { return Ok(()) };
     if qty <= avail {
         return Ok(());
     }
@@ -519,7 +525,7 @@ pub async fn add_item(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &
     };
     check_qty(k, ctx, tx, store, &wi, qty).await?;
     check_qty(k, ctx, tx, store, &wi, total).await?;
-    check_stock(tx, ctx.tenant, store, item, total).await?;
+    check_stock(tx, ctx, store, item, total).await?;
     let mut patch = Doc::new();
     patch.insert("items".into(), items_patch(&lines));
     save(k, ctx, tx, cart, patch).await
@@ -536,7 +542,7 @@ pub async fn set_qty(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &D
         let wi = website_item(k, ctx, tx, &wid.to_string()).await?;
         check_qty(k, ctx, tx, store, &wi, qty).await?;
         let item = id(&lines[pos], "item").ok_or_else(|| Error::internal("cart line without item"))?;
-        check_stock(tx, ctx.tenant, store, item, qty).await?;
+        check_stock(tx, ctx, store, item, qty).await?;
         set(&mut lines[pos], "qty", money(qty));
     }
     let mut patch = Doc::new();
@@ -738,6 +744,7 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
     let stock = stock_items(tx, ctx.tenant, &items).await?;
     let stocked: Vec<Uuid> = stock.iter().copied().collect();
     let avail = available(tx, ctx.tenant, store, &stocked).await?;
+    let terms = catalog::later(tx, ctx, &items).await?;
     let m = |v: Decimal| v.normalize().to_string();
     let line_views: Vec<Value> = lines
         .iter()
@@ -747,8 +754,12 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
             // item a promotion added comes and goes with the promotion.
             let (slug, title, sold) = wi.and_then(|w| meta.get(&w)).cloned().unwrap_or((None, None, promoted(l)));
             let item = id(l, "item").unwrap_or_default();
-            let (in_stock, qty) = stock_view(store, stock.contains(&item), avail.get(&item).copied().unwrap_or_default());
-            let enough = !stock.contains(&item) || !store.enforce_stock || avail.get(&item).copied().unwrap_or_default() >= d(l, "qty");
+            let have = avail.get(&item).copied().unwrap_or_default();
+            let shown = stock_view(store, stock.contains(&item), have, terms.get(&item));
+            let limited = stock.contains(&item) && store.enforce_stock;
+            let enough = !limited || catalog::orderable(have, terms.get(&item)).is_none_or(|most| d(l, "qty") <= most);
+            // More than is there, and taken: it ships when it is back.
+            let backorder = limited && enough && d(l, "qty") > have.max(Decimal::ZERO);
             json!({
                 "id": s(l, "id"),
                 "item": slug,
@@ -762,8 +773,10 @@ pub async fn view(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, cart: &Doc)
                 "added_by_promotion": promoted(l),
                 "amount": m(d(l, "amount")),
                 "available": sold,
-                "in_stock": in_stock && enough,
-                "available_qty": qty,
+                "in_stock": shown.in_stock && enough,
+                "backorder": backorder,
+                "ships_from": shown.ships_from,
+                "available_qty": shown.qty,
             })
         })
         .collect();

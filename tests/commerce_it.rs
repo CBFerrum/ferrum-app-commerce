@@ -932,7 +932,12 @@ async fn scenario() {
     let r1 = t.find_one("ItemReview", json!({"reviewer_email": GUEST})).await;
     assert_eq!(r1["verified_purchase"], json!(true), "Asha bought a mug");
     assert_eq!(t.find_one("ItemReview", json!({"reviewer_email": "troll@example.com"})).await["verified_purchase"], json!(false));
+    // a_product_page_has_a_place_for_a_review: with no review yet, and with one approved.
+    let (_, _, none_yet) = page_in(&t, "/p/logo-tee", &[], None).await;
+    assert!(none_yet.contains(r#"<section class="reviews" data-review="logo-tee"><h2>Reviews</h2></section>"#), "{none_yet}");
     t.k.update(&t.ctx, "ItemReview", uid(&r1), obj(json!({"status": "Approved"})), None).await.unwrap();
+    let (_, _, reviewed) = page_in(&t, "/p/blue-mug", &[], None).await;
+    assert!(reviewed.contains(r#"<section class="reviews" data-review="blue-mug"><h2>Reviews</h2>"#) && reviewed.contains("Verified purchase"), "{reviewed}");
     let page = t.get_pub("/items/blue-mug").await;
     assert_eq!(page["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(page["reviews"][0]["verified_purchase"], json!(true));
@@ -1657,7 +1662,8 @@ async fn refunds() {
 
     let b = place(&t, json!([{"item": "blue-mug", "qty": 2}, {"item": "logo-tee", "qty": 1}]), GUEST, "fakepay", "refund-b-0001").await;
     assert_eq!(b.total, n("1121"), "950 of goods and delivery, 171 of VAT");
-    let thanked = mails(&t, GUEST).await;
+    // As the mailer sends it: the link is sealed while the mail waits.
+    let thanked = opened_mails(&t, GUEST).await;
     assert!(
         thanked.iter().any(|(subject, html)| subject.starts_with(&format!("Your order {}", b.number)) && html.contains(&format!("n={}", b.number))),
         "the shopper is told of the order, with its link: {thanked:?}"
@@ -1694,10 +1700,13 @@ async fn refunds() {
     let told = events(&t, "commerce.order_shipped").await;
     let mine = told.iter().find(|e| e["number"] == json!(b.number)).expect("the shipment is announced");
     assert_eq!((mine["tracking_number"].clone(), mine["notify"].clone()), (json!("BD123"), json!(true)));
-    assert_eq!(mine["order_link"], json!(format!("https://shop.example.com/order#n={}&t={}", b.number, b.token)), "the link a mailer sends");
-    let sent = mails(&t, GUEST).await;
+    assert!(mine.get("order_link").is_none() && !mine.to_string().contains(&b.token), "no event carries the order's token: {mine}");
+    let sent = opened_mails(&t, GUEST).await;
     let shipped_mail = sent.iter().find(|(subject, _)| *subject == format!("Your order {} has shipped", b.number)).expect("the shopper is told it has shipped");
-    assert!(shipped_mail.1.contains("BlueDart has it, parcel BD123") && shipped_mail.1.contains(&format!("t={}", b.token)), "{shipped_mail:?}");
+    assert!(
+        shipped_mail.1.contains("BlueDart has it, parcel BD123") && shipped_mail.1.contains(&format!("t={}", b.token)),
+        "the mail has the link: {shipped_mail:?}"
+    );
 
     // ───────────── a shopper follows the order from a link, with no sign-in ─────────────
     let tracked = t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": b.number, "token": b.token}))).await;
@@ -2618,6 +2627,22 @@ async fn after_sales() {
     assert!(matches!(refused, Err(Error::Forbidden(_))), "a reader cannot cancel a web order: {refused:?}");
     assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(1), "still submitted");
     assert_eq!(t.count("OrderRefund", json!({"sales_order": a.so.to_string()})).await, 0, "nothing refunded");
+    // ───────────── a_member_cannot_cancel_as_the_shopper (sharing K0-6): the shopper's cancel is the shopper's ─────────────
+    let desk = person(&t, "desk@after-sales.example", &["Sales User"]).await;
+    let refused = t.k.run_action(&desk, "SalesOrder", a.so, "web_shopper_cancel", json!({})).await;
+    assert!(matches!(refused, Err(Error::Forbidden(_))), "the desk cancels with Cancel Web Order, not as the shopper: {refused:?}");
+    // ───────────── a_reader_cannot_cancel_edit_or_resend_a_web_order: the store's manager reads orders, writes none ─────────────
+    let manager = person(&t, "manager@after-sales.example", &["Website Manager"]).await;
+    for (action, params) in [
+        ("web_cancel", json!({})),
+        ("web_update_items", json!({"changes": r#"[{"line": 1, "qty": "1"}]"#})),
+        ("web_resend_mail", json!({"mail": "Payment Received"})),
+    ] {
+        let refused = t.k.run_action(&manager, "SalesOrder", a.so, action, params).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{action} needs write on the order: {refused:?}");
+    }
+    assert_eq!(t.get("SalesOrder", a.so).await["docstatus"], json!(1), "still submitted");
+    assert_eq!(t.count("OrderRefund", json!({"sales_order": a.so.to_string()})).await, 0, "nothing refunded");
     let out = use_link(&link_a, "web_shopper_cancel", json!({"reason": "bought twice"})).await.expect("cancelled").expect("an answer");
     assert_eq!(out["refunds"].as_array().unwrap().len(), 1, "{out}");
     let refund = t.find_one("OrderRefund", json!({"sales_order": a.so.to_string()})).await;
@@ -2721,9 +2746,14 @@ async fn after_sales() {
     let e = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "desk@example.com", "fakepay", "after-e-0001").await;
     pay(&t, &t.ctx, e.request.unwrap(), e.total, "fp_after_e").await;
     t.k.run_action(&t.ctx, "SalesOrder", e.so, "web_ship", json!({"notify": "No"})).await.expect("shipped");
-    let desk = person(&t, "desk@after-sales.example", &["Sales User"]).await;
     t.k.run_action(&desk, "SalesOrder", e.so, "web_shopper_return", json!({"reason": "phoned in"})).await.expect("the desk asks for the shopper");
     assert_eq!(t.count("ReturnRequest", json!({"sales_order": e.so.to_string()})).await, 1);
+
+    // ───────────── the_desk_still_cancels_web_orders: those who write orders keep Cancel Web Order ─────────────
+    let f = place(&t, json!([{"item": "blue-mug", "qty": 1}]), "deskcancel@example.com", "fakepay", "after-f-0001").await;
+    let sales = person(&t, "sales@after-sales.example", &["Sales Manager"]).await;
+    t.k.run_action(&sales, "SalesOrder", f.so, "web_cancel", json!({})).await.expect("the desk cancels");
+    assert_eq!(t.get("SalesOrder", f.so).await["docstatus"], json!(2));
 }
 
 #[test]
@@ -2980,6 +3010,8 @@ async fn old_workspace() {
     let slug = "old-workspace";
     let Shop { t, .. } = small_shop(slug).await;
     t.sql("delete from e_return_reason").await;
+    // an_old_workspace_without_the_fields_sells_as_before: no back-order terms and no dates kept.
+    t.sql("update e_website_item set backorder = false, backorder_limit = null, ships_from = null").await;
     t.sql("update e_store_settings set cancel_window_hours = null, cancel_refund = null, return_window_days = null, return_shipping_paid_by = null, restocking_fee_percent = null, refund_destination = null, store_credit_kind = null, out_for_delivery_words = null, after_sales_text = null, store_languages = null, resend_per_day = null").await;
     let fakepay = gateway(&t, "fakepay").await;
 
@@ -4166,4 +4198,350 @@ async fn cart_operations() {
     let after = t.get("ShoppingCart", uid(&held)).await;
     assert_eq!((after["customer"].clone(), after["user_email"].clone()), (Value::Null, Value::Null));
     let _ = cid;
+}
+
+#[test]
+fn checkout_operation_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(checkout_operation()).await.unwrap() });
+}
+
+/// Checkout is an operation: an agent places a web order as the storefront does, once per key and once per cart.
+async fn checkout_operation() {
+    use ferrum_kernel::capability::Invocation;
+    const CHECKOUT: &str = "commerce.shopping_cart.checkout";
+    let Shop { t, tenant, cid, products, nos, selling, .. } = small_shop("checkoutop").await;
+    let web = person(&t, "web@checkoutop.test", &["Website Manager"]).await;
+    let clerk = person(&t, "clerk@checkoutop.test", &["Sales User"]).await;
+    let op = |name: &str| format!("commerce.shopping_cart.{name}");
+    let agent_cart = |email: &'static str, key: &'static str| {
+        let (k, web) = (t.k.clone(), web.clone());
+        async move {
+            let made = k.invoke(&web, Invocation::new("commerce.shopping_cart.create", json!({"values": {}})).key(format!("{key}:cart"))).await.unwrap();
+            let id = made.result["id"].as_str().unwrap().to_string();
+            let on = |params: Value| json!({"id": id, "params": params});
+            k.invoke(&web, Invocation::new(op("add_item"), on(json!({"item": "blue-mug", "qty": "1"}))).key(format!("{key}:add"))).await.unwrap();
+            let shopper = details(email, "Asha Rao", "IN").to_string();
+            k.invoke(&web, Invocation::new(op("set_details"), on(json!({"details": shopper}))).key(format!("{key}:details"))).await.unwrap();
+            id
+        }
+    };
+    let ask = |cart: &str, method: &str, client: &str| json!({"id": cart, "params": {"payment_method": method, "accept_terms": true, "client_key": client}});
+
+    // ───────────── checkout_is_in_the_catalog_with_its_contract ─────────────
+    let catalog = t.k.catalog(&web);
+    let c = catalog.iter().find(|c| c.id == CHECKOUT).expect("checkout is in the catalog");
+    assert_eq!(serde_json::to_value(c.effect).unwrap(), json!("external_effect"));
+    assert_eq!(c.permissions, vec!["ShoppingCart:write".to_string()]);
+    assert_eq!(c.input["properties"]["params"]["required"], json!(["client_key"]));
+    assert_eq!(returns(&c.output), ["currency", "id", "number", "payment_request", "rounded_total", "sales_order"]);
+
+    // ───────────── an_agent_places_a_web_order ─────────────
+    let cart = agent_cart(GUEST, "agent-a").await;
+    let first = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout")).await.expect("ordered");
+    let so = t.get("SalesOrder", first.result["sales_order"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((so["docstatus"].clone(), so["commerce_web_order"].clone()), (json!(1), json!(true)));
+    assert_eq!((dec(&first.result["rounded_total"]), first.result["number"].clone()), (dec(&so["rounded_total"]), so["number"].clone()));
+    assert_eq!(first.result["currency"], json!("INR"));
+    let number = so["number"].as_str().unwrap().to_string();
+    let request = t.find_one("PaymentRequest", json!({"order_number": number})).await;
+    assert_eq!((request["status"].clone(), first.result["payment_request"].clone()), (json!("Initiated"), request["id"].clone()));
+    let held = t.get("ShoppingCart", cart.parse().unwrap()).await;
+    assert_eq!((held["status"].clone(), dec(&held["rounded_total"])), (json!("Ordered"), dec(&so["rounded_total"])));
+    assert!(events(&t, "commerce.order_placed").await.iter().any(|e| e["number"] == json!(number)), "the order's event is queued");
+
+    // ───────────── a_repeat_places_one_order ─────────────
+    let again =
+        t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout")).await.expect("repeated");
+    assert!(again.repeated);
+    assert_eq!(t.count("SalesOrder", json!({"number": number})).await, 1);
+    assert_eq!(t.count("PaymentRequest", json!({"order_number": number})).await, 1, "one payment request");
+    let changed = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "fakepay", "agent-order-0001")).key("agent-a:checkout")).await;
+    assert_eq!(changed.as_ref().map_err(Error::code).unwrap_err(), "input_changed", "{changed:?}");
+    let same_client =
+        t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0001")).key("agent-a:checkout:2")).await.expect("answered");
+    assert_eq!(same_client.result["sales_order"], first.result["sales_order"], "the cart's own key answers the order it made");
+    let other = t.k.invoke(&web, Invocation::new(CHECKOUT, ask(&cart, "Cash on Delivery", "agent-order-0002")).key("agent-a:checkout:3")).await;
+    assert!(matches!(other, Err(Error::Conflict(_))), "{other:?}");
+    let orders = t.count("SalesOrder", json!({})).await;
+
+    // ───────────── a_person_without_the_right_cannot_check_out ─────────────
+    let cart_b = agent_cart("bina@example.com", "agent-b").await;
+    let refused = t.k.invoke(&clerk, Invocation::new(CHECKOUT, ask(&cart_b, "Cash on Delivery", "clerk-order-0001")).key("clerk:checkout")).await;
+    assert_eq!(refused.as_ref().map_err(Error::code).unwrap_err(), "forbidden", "{refused:?}");
+    assert_eq!(t.count("SalesOrder", json!({})).await, orders, "nothing made");
+    assert_eq!(t.get("ShoppingCart", cart_b.parse().unwrap()).await["status"], json!("Open"));
+
+    // ───────────── the_public_checkout_goes_through_the_gate ─────────────
+    let before = receipts(&t, CHECKOUT).await;
+    place(&t, json!([{"item": "blue-mug", "qty": 1}]), "gate@example.com", "fakepay", "gate-order-0001").await;
+    assert_eq!(receipts(&t, CHECKOUT).await, before + 1, "the route's checkout has its receipt");
+
+    // ───────────── a_card_and_details_never_reach_the_audit_trail ─────────────
+    let c = cid.to_string();
+    let current = t.find_one("Account", json!({"account_name": "Current Liabilities", "company": c})).await;
+    let liability = t.insert("Account", json!({"account_name": "Gift Cards", "company": c, "parent_account": current["id"], "root_type": "Liability"})).await;
+    let goodwill = t.find_one("Account", json!({"account_name": "Administrative Expenses", "company": c})).await;
+    let kind = t
+        .insert("StoredValueKind", json!({"kind_name": "Gift Card", "company": c, "liability_account": liability["id"], "adjustment_account": goodwill["id"]}))
+        .await;
+    let settings = t.find_one("StoreSettings", json!({})).await;
+    t.k.update(&t.ctx, "StoreSettings", uid(&settings), obj(json!({"gift_card_kind": sid(&kind)})), None).await.unwrap();
+    let card_item = t
+        .insert(
+            "Item",
+            json!({"item_code": "GIFT500", "item_name": "Gift Card 500", "item_group": products["id"], "stock_uom": nos["id"], "is_stock_item": false,
+                   "stored_value_kind": sid(&kind)}),
+        )
+        .await;
+    t.insert("ItemPrice", json!({"item": sid(&card_item), "price_list": selling["id"], "rate": "500"})).await;
+    t.insert("WebsiteItem", json!({"item": sid(&card_item), "published": true})).await;
+    let bought = place(&t, json!([{"item": "gift-card-500", "qty": 1}]), "giver@example.com", "fakepay", "gift-buy-0001").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    pay(&t, &fakepay, bought.request.unwrap(), bought.total, "fp_gift_1").await;
+    let sent = opened_mails(&t, "giver@example.com").await.into_iter().find(|(s, _)| s.contains("gift card")).expect("the code was sent");
+    let code = sent.1.split("<strong>").nth(1).and_then(|r| r.split("</strong>").next()).unwrap().to_string();
+    let (token, _) = t.new_cart(None, json!([{"item": "logo-tee", "qty": 1}])).await;
+    let body = json!({"payment_method": "fakepay", "accept_terms": true, "gift_card": {"code": code.to_lowercase()}, "details": details("card@example.com", "Ravi Rao", "IN")});
+    t.checkout(None, &token, "gift-use-0001", body).await.expect("ordered with the card");
+    let used = t.find_one("ShoppingCart", json!({"email": "card@example.com"})).await;
+    let trail = t.k.audit_trail(&t.ctx, "ShoppingCart", uid(&used)).await.unwrap();
+    let pressed: Vec<String> = trail["events"].as_array().unwrap().iter().filter(|e| e["action"] == json!("action:checkout")).map(|e| e.to_string()).collect();
+    assert_eq!(pressed.len(), 1, "{trail}");
+    for secret in [code.as_str(), &code.to_lowercase(), "card@example.com", "MG Road"] {
+        assert!(!pressed[0].contains(secret), "{secret} in {}", pressed[0]);
+    }
+
+    // ───────────── two_checkouts_of_one_cart_make_one_order ─────────────
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details("twice@example.com", "Two Tries", "IN"))).await;
+    let go = |key: &'static str| {
+        let (k, site, token) = (t.k.clone(), t.site.clone(), token.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: None,
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", token.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await.map(|r| r.status)
+        })
+    };
+    let (a, b) = (go("race-order-0001"), go("race-order-0002"));
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let won = [&a, &b].iter().filter(|r| r.is_ok()).count();
+    let lost = [&a, &b].iter().filter(|r| matches!(r, Err(Error::Conflict(_)))).count();
+    assert_eq!((won, lost), (1, 1), "{a:?} {b:?}");
+    let raced = t.find_one("ShoppingCart", json!({"email": "twice@example.com"})).await;
+    assert_eq!(t.count("SalesOrder", json!({"id": raced["sales_order"]})).await, 1);
+    assert_eq!(t.count("SalesOrder", json!({"commerce_contact_email": "twice@example.com"})).await, 1, "one order for the cart");
+
+    // ───────────── a_signed_in_shopper_orders_as_their_customer_a_guest_never_does ─────────────
+    let meera = t.insert("Customer", json!({"customer_name": "Meera Iyer", "email": "meera@example.com"})).await;
+    let signed = {
+        let u = t.k.create_user(&t.ctx, "meera@example.com", "Meera Iyer", Some("Correct-Horse-9"), &[], false).await.unwrap();
+        t.k.load_ctx(tenant, u, None, "portal".into()).await.unwrap()
+    };
+    let (token, _) = t.new_cart(Some(&signed), json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.ok(Some(&signed), "PUT", "/cart/details", &[("x-cart-token", token.as_str())], Some(details("meera@example.com", "Meera Iyer", "IN"))).await;
+    let mine =
+        t.checkout(Some(&signed), &token, "meera-order-0001", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("ordered");
+    let so = t.find_one("SalesOrder", json!({"number": mine["order"]["number"]})).await;
+    assert_eq!(so["customer"], meera["id"], "her own customer");
+    let (token, _) = t.new_cart(None, json!([{"item": "blue-mug", "qty": 1}])).await;
+    t.cart_ok(&token, "PUT", "/cart/details", Some(details("meera@example.com", "Not Meera", "IN"))).await;
+    let typed = t.checkout(None, &token, "fake-meera-0001", json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await.expect("ordered");
+    let so = t.find_one("SalesOrder", json!({"number": typed["order"]["number"]})).await;
+    assert_ne!(so["customer"], meera["id"], "a guest typing her email is not her");
+    let guest = t.get("Customer", so["customer"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!(guest["commerce_guest"], json!(true));
+}
+
+#[test]
+fn backorders_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(backorders()).await.unwrap() });
+}
+
+/// Per store item: keep selling when out of stock (a back-order), up to a limit owed at once, and a day it ships from
+/// (with a back-order, a pre-order). The store enforces stock and shows quantities; mugs: 10 in stock.
+async fn backorders() {
+    let Shop { t, tenant, products, nos, selling, .. } = small_shop("backorder").await;
+    let item_of = |slug: &'static str| {
+        let t = &t;
+        async move { uid(&t.find_one("WebsiteItem", json!({"slug": slug})).await) }
+    };
+    let terms = |wi: Uuid, v: Value| {
+        let t = &t;
+        async move { t.k.update(&t.ctx, "WebsiteItem", wi, obj(v), None).await.expect("terms set") }
+    };
+    let buy = |token: String, email: &'static str, key: &'static str| {
+        let t = &t;
+        async move {
+            t.cart_ok(&token, "PUT", "/cart/details", Some(details(email, "Asha Rao", "IN"))).await;
+            t.checkout(None, &token, key, json!({"payment_method": "Cash on Delivery", "accept_terms": true})).await
+        }
+    };
+    let mug = item_of("blue-mug").await;
+
+    // ───────────── an_item_without_backorder_sells_only_what_is_there ─────────────
+    let (cart, _) = t.new_cart(None, json!([])).await;
+    let over = t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 11}))).await;
+    assert_eq!(field_error(&over, "qty"), "only 10 available");
+
+    // ───────────── a_backorder_item_sells_past_stock_up_to_its_limit ─────────────
+    terms(mug, json!({"backorder": true, "backorder_limit": "2"})).await;
+    let over = t.cart(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 13}))).await;
+    assert_eq!(field_error(&over, "qty"), "only 12 available", "ten there and two owed at most");
+    let taken = t.cart_ok(&cart, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 12}))).await;
+    assert_eq!((taken["items"][0]["backorder"].clone(), taken["items"][0]["in_stock"].clone()), (json!(true), json!(true)), "{taken}");
+    buy(cart, "early@example.com", "backorder-0001").await.expect("ordered past stock");
+    let (more, _) = t.new_cart(None, json!([])).await;
+    let used_up = t.cart(&more, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 1}))).await;
+    assert_eq!(field_error(&used_up, "qty"), "this item is out of stock", "two already owed: the limit is used up");
+    let page = t.get_pub("/items/blue-mug").await;
+    assert_eq!((page["in_stock"].clone(), page["backorder"].clone()), (json!(false), json!(false)), "no room left");
+
+    // ───────────── no_limit_means_any_quantity ─────────────
+    terms(mug, json!({"backorder_limit": null})).await;
+    let any = t.cart_ok(&more, "POST", "/cart/items", Some(json!({"item": "blue-mug", "qty": 40}))).await;
+    assert_eq!(any["items"][0]["backorder"], json!(true), "{any}");
+    let page = t.get_pub("/items/blue-mug").await;
+    assert_eq!((page["in_stock"].clone(), page["backorder"].clone()), (json!(true), json!(true)));
+    let card = t.get_pub("/catalog").await["items"].as_array().unwrap().iter().find(|c| c["slug"] == json!("blue-mug")).cloned().unwrap();
+    assert_eq!((card["in_stock"].clone(), card["backorder"].clone()), (json!(true), json!(true)), "{card}");
+
+    // ───────────── two_checkouts_cannot_owe_more_than_the_limit ─────────────
+    let new_item = |code: &'static str, name: &'static str| {
+        let t = &t;
+        let (products, nos, selling) = (products.clone(), nos.clone(), selling.clone());
+        async move {
+            let item = t.insert("Item", json!({"item_code": code, "item_name": name, "item_group": products["id"], "stock_uom": nos["id"]})).await;
+            t.insert("ItemPrice", json!({"item": sid(&item), "price_list": selling["id"], "rate": "150"})).await;
+            uid(&t.insert("WebsiteItem", json!({"item": sid(&item), "published": true})).await)
+        }
+    };
+    let cap = new_item("CAP", "Cap").await;
+    terms(cap, json!({"backorder": true, "backorder_limit": "3"})).await;
+    let (first, _) = t.new_cart(None, json!([{"item": "cap", "qty": 2}])).await;
+    let (second, _) = t.new_cart(None, json!([{"item": "cap", "qty": 2}])).await;
+    for (token, email) in [(&first, "one@example.com"), (&second, "two@example.com")] {
+        t.cart_ok(token, "PUT", "/cart/details", Some(details(email, "Asha Rao", "IN"))).await;
+    }
+    let go = |token: String, key: &'static str| {
+        let (k, site) = (t.k.clone(), t.site.clone());
+        tokio::spawn(async move {
+            let req = SiteRequest {
+                tenant,
+                user: None,
+                method: "POST".into(),
+                path: "/checkout".into(),
+                query: Map::new(),
+                headers: [("x-cart-token", token.as_str()), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), json!(v))).collect(),
+                body: json!({"payment_method": "Cash on Delivery", "accept_terms": true}).to_string().into_bytes(),
+                client_ip: "203.0.113.7".into(),
+            };
+            site.handle(&k, req).await.map(|r| r.status)
+        })
+    };
+    let (a, b) = (go(first, "cap-order-0001"), go(second, "cap-order-0002"));
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let refused: Vec<&ferrum_kernel::Result<u16>> = [&a, &b].into_iter().filter(|r| r.is_err()).collect();
+    assert_eq!(refused.len(), 1, "one of two: {a:?} {b:?}");
+    assert!(matches!(refused[0], Err(Error::Validation(f)) if f.iter().any(|x| x.field == "items")), "{refused:?}");
+
+    // ───────────── a_preorder_says_when_it_ships ─────────────
+    let hat = new_item("HAT", "Hat").await;
+    let soon = (chrono::Utc::now().date_naive() + chrono::Duration::days(30)).to_string();
+    terms(hat, json!({"backorder": true, "ships_from": soon})).await;
+    let page = t.get_pub("/items/hat").await;
+    assert_eq!((page["backorder"].clone(), page["ships_from"].clone()), (json!(true), json!(soon)), "{page}");
+    let (_, _, html) = page_in(&t, "/p/hat", &[], None).await;
+    assert!(html.contains(&format!("Pre-order: ships from {soon}")) && html.contains(r#"class="add""#) && html.contains("schema.org/PreOrder"), "{html}");
+    let placed = place(&t, json!([{"item": "hat", "qty": 1}]), "hat@example.com", "Cash on Delivery", "hat-order-0001").await;
+    let seen = t.ok(None, "POST", "/orders/lookup", &[], Some(json!({"number": placed.number, "email": "hat@example.com", "token": placed.token}))).await;
+    assert_eq!(seen["order"]["items"][0]["ships_from"], json!(soon), "{seen}");
+    let told = opened_mails(&t, "hat@example.com").await.into_iter().find(|m| m.0.starts_with("Your order")).expect("a confirmation").1;
+    assert!(told.contains("These ship later") && told.contains("Hat"), "{told}");
+    // ───────────── a_stock_alert_is_not_taken_for_an_item_on_backorder ─────────────
+    let alert = t.call(None, "POST", "/items/hat/stock-alert", &[], Some(json!({"email": "wait@example.com"}))).await;
+    assert!(matches!(alert, Err(Error::Invalid(_))), "it can be ordered now: {alert:?}");
+    // A day already past is told nowhere.
+    let past = (chrono::Utc::now().date_naive() - chrono::Duration::days(1)).to_string();
+    terms(hat, json!({"ships_from": past})).await;
+    assert_eq!(t.get_pub("/items/hat").await["ships_from"], Value::Null);
+    let (_, _, html) = page_in(&t, "/p/hat", &[], None).await;
+    assert!(
+        !html.contains(r#"<p class="later">Pre-order"#)
+            && !html.contains(r#"<p class="muted">Ships from"#)
+            && html.contains(r#"<p class="later">Out of stock: order now"#),
+        "a back-order with no day: {html}"
+    );
+    assert!(html.contains("schema.org/BackOrder"));
+}
+
+#[test]
+fn no_order_token_leaves_commerce_end_to_end() {
+    let _db = DB.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().unwrap();
+    rt.block_on(async { tokio::spawn(no_order_token_leaves_commerce()).await.unwrap() });
+}
+
+/// A guest's order token is a bearer credential to the order: the shopper gets it in the checkout's answer and in the
+/// mails (sealed while they wait, opened by the mailer), and nothing else keeps or carries it: no event (what webhooks
+/// and the event feed deliver), no receipt of the gate, no audit entry.
+async fn no_order_token_leaves_commerce() {
+    use ferrum_kernel::capability::Invocation;
+    let Shop { t, tenant, .. } = small_shop("tokens").await;
+    let fakepay = gateway(&t, "fakepay").await;
+    let placed = place(&t, json!([{"item": "blue-mug", "qty": 1}]), GUEST, "fakepay", "token-order-0001").await;
+    pay(&t, &fakepay, placed.request.unwrap(), placed.total, "fp_token_1").await;
+    t.k.run_action(&t.ctx, "SalesOrder", placed.so, "web_ship", json!({"notify": "Yes", "carrier": "BlueDart", "tracking_number": "BD9"}))
+        .await
+        .expect("shipped");
+    let desk = person(&t, "desk@tokens.example", &["Sales Manager"]).await;
+    let copied =
+        t.k.invoke(&desk, Invocation::new("commerce.sales_order.web_tracking_link", json!({"id": placed.so.to_string(), "params": {}})).key("copy-link-1"))
+            .await
+            .expect("the desk copies the link");
+    assert!(copied.result["link"].as_str().is_some_and(|l| l.contains(&placed.token)), "the desk is shown it: {}", copied.result);
+    let held = |sql: &'static str| {
+        let (t, token) = (&t, placed.token.clone());
+        async move {
+            let mut tx = t.k.db.tenant_tx(tenant).await.unwrap();
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(tenant).bind(format!("%{token}%")).fetch_one(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            n
+        }
+    };
+    // The outbox: every event Commerce put there (order placed, paid, shipped) and the mails waiting.
+    assert_eq!(held("select count(*) from outbox where tenant_id = $1 and payload::text like $2").await, 0, "no event or waiting mail carries the token");
+    let placed_event = events(&t, "commerce.order_placed").await.into_iter().find(|e| e["number"] == json!(placed.number)).expect("the event");
+    assert!(placed_event.get("order_token").is_none() && placed_event.get("order_link").is_none(), "{placed_event}");
+    let shipped_event = events(&t, "commerce.order_shipped").await.into_iter().find(|e| e["number"] == json!(placed.number)).expect("the event");
+    assert!(shipped_event.get("order_link").is_none(), "{shipped_event}");
+    assert_eq!(
+        held("select count(*) from logic_effect where tenant_id = $1 and (result::text like $2 or input_digest like $2)").await,
+        0,
+        "no receipt keeps it"
+    );
+    assert_eq!(held("select count(*) from audit_event where tenant_id = $1 and diff::text like $2").await, 0, "no audit entry keeps it");
+    // The shopper still gets it, in the mail as the mailer sends it.
+    let sent = opened_mails(&t, GUEST).await;
+    assert!(sent.iter().any(|(s, h)| s.starts_with("Your order") && h.replace("&#x2f;", "/").contains(&format!("t={}", placed.token))), "{sent:?}");
+
+    // ───────────── a_resent_mail_carries_a_working_link ─────────────
+    t.k.run_action(&desk, "SalesOrder", placed.so, "web_resend_mail", json!({"mail": "Shipped"})).await.expect("sent again");
+    let again =
+        opened_mails(&t, GUEST).await.into_iter().rev().find(|(s, _)| s.contains("has shipped")).expect("the shipped mail again").1.replace("&#x2f;", "/");
+    let at = again.find("&t=").or_else(|| again.find("&amp;t=").map(|i| i + 4)).expect("a link in the mail") + 3;
+    let token: String = again[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    t.ok(None, "POST", "/orders/track", &[], Some(json!({"number": placed.number, "token": token}))).await;
+    assert_eq!(held("select count(*) from outbox where tenant_id = $1 and payload::text like $2").await, 0, "the resent mail waits sealed too");
 }

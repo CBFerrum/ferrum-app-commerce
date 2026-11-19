@@ -107,9 +107,13 @@ fn refund_labels(store: &Store, refunds: &Value) -> (Decimal, Vec<String>) {
     (total, to)
 }
 
-/// The shopper (a link's guest, or a portal customer on their own order) or the store's desk; not any member who
-/// can read orders, which is all these actions declare, since a link's guest holds no role.
-fn guard(hc: &HookCtx<'_>, so: &Doc) -> Result<()> {
+/// The shopper (a link's guest, or a portal customer on their own order), or for a return also the store's desk; not
+/// any member who can read orders, which is all these actions declare, since a link's guest holds no role. A cancel is
+/// the shopper's answer alone (the desk has Cancel Web Order).
+fn guard(hc: &HookCtx<'_>, so: &Doc, desk_too: bool) -> Result<()> {
+    if !hc.ctx.outside && !desk_too {
+        return Err(Error::Forbidden("this is the shopper's, from the link in their order confirmation: the store cancels with Cancel Web Order".into()));
+    }
     if !hc.ctx.outside && !crate::ship::may_run_orders(hc.ctx) {
         return Err(Error::Forbidden(
             "this is done by the shopper, from the link in their order confirmation, or by the store's managers and sales staff".into(),
@@ -130,7 +134,7 @@ fn at(so: &Doc, f: &str) -> Option<DateTime<Utc>> {
 
 /// "Cancel My Order": within the store's window, before anything shipped.
 pub async fn cancel(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Value> {
-    guard(hc, so)?;
+    guard(hc, so, false)?;
     let sctx = sys(hc.ctx);
     let store = Store::load(hc.kernel, &sctx, hc.tx).await?;
     let hours = store.policy.cancel_hours;
@@ -224,7 +228,7 @@ async fn reason_for(hc: &mut HookCtx<'_>, text: Option<&str>) -> Result<Uuid> {
 /// "Return Something": a request the desk will decide, for the lines and quantities chosen (everything
 /// delivered when none are), within the store's days after the last delivery.
 pub async fn request_return(hc: &mut HookCtx<'_>, so: &Doc, params: &Value) -> Result<Value> {
-    guard(hc, so)?;
+    guard(hc, so, true)?;
     let sctx = sys(hc.ctx);
     let so_id = id(so, "id").ok_or_else(|| Error::internal("order without id"))?;
     let store = Store::load(hc.kernel, &sctx, hc.tx).await?;

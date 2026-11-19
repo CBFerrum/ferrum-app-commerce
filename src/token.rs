@@ -29,8 +29,10 @@ pub fn well_formed(token: &str) -> bool {
     token.len() == 43 && token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+/// What an order's token signs. `/2`: tokens made before 0.18.1 went out in events (to webhooks and the event feed),
+/// so none of them verifies any more; the links in mails sent from then on are made afresh when sent.
 fn order_message(order: Uuid) -> Vec<u8> {
-    [b"ferrum-commerce-order:".as_slice(), order.as_bytes()].concat()
+    [b"ferrum-commerce-order/2:".as_slice(), order.as_bytes()].concat()
 }
 
 /// The access token of an order, `v{n}.{mac}`: signed with the key for order links from version n of Commerce's key,
@@ -91,6 +93,18 @@ mod tests {
         assert_eq!(ha.len(), 64);
         assert_ne!(ha, hb);
         assert!(!well_formed("short") && !well_formed(&format!("{}!", &a[..42])));
+    }
+
+    #[test]
+    fn a_token_issued_before_the_change_is_refused() {
+        // Tokens made before 0.18.1 signed `ferrum-commerce-order:{id}`, and went out in events: none opens an order now.
+        let key = [7u8; 32];
+        let order = Uuid::now_v7();
+        let before = keys::signed(&key, 1, &[b"ferrum-commerce-order:".as_slice(), order.as_bytes()].concat());
+        let (_, mac) = read(&before).expect("well formed");
+        assert!(!keys::mac_ok(&key, &order_message(order), &mac), "an earlier token is refused");
+        let now = keys::signed(&key, 1, &order_message(order));
+        assert!(keys::mac_ok(&key, &order_message(order), &read(&now).unwrap().1), "a token made now opens it");
     }
 
     #[test]
