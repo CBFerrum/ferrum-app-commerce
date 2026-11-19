@@ -455,6 +455,10 @@ After installing:
 6. Review the **After Sales** tab (cancellation and return windows, restocking fee, where refunds go) and edit the shopper mail templates.
 7. Optional: install the Store Subscriptions connector where Finance is installed.
 
+Upgrading from a version before 0.18.1: guest order links made earlier no longer open their orders (they were in
+events webhooks receive), so links in mails sent before the upgrade stop working; the desk's **Send Mail Again** on an
+order sends the shopper a mail with a fresh link. Nothing to run.
+
 ## 🔧 Develop
 
 Clone it next to the platform:
