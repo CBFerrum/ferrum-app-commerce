@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.19.2
+
+Needs the same platform and ERP as 0.19.1. No database or interface change.
+
+- **Contracts on the actions a person presses.** Ship, Invoice, Cancel and Update Web Order, Cancel My Order, Return
+  Something, Send Mail Again, Tracking Link (a query) and Generate Variants declare their effect, what they return and
+  what "done" means, so an agent sees them in the catalogue as a person sees the buttons. The payment and refund
+  actions wait for the Payments app (S1).
+
+## 0.19.1
+
+Needs the same platform and ERP as 0.19.0. No database or interface change.
+
+- **Cart reminders go only to an address that proved itself.** A visitor could type any address and tick the
+  reminder box; the store's upkeep then mailed that address and raised `commerce.cart_abandoned` with
+  `consent: true`, which other apps (a campaign's journey) act on. Now a reminder, and `consent: true`, only come for
+  a cart whose shopper was signed in, and the reminder goes to their account's address. A visitor's tick is kept and
+  counts for nothing.
+
+Tests: `shopper_mails_end_to_end` (`a_visitors_typed_address_gets_no_reminder_or_consent`,
+`a_signed_in_shoppers_cart_is_reminded_at_their_own_address`).
+
+## 0.19.0
+
+Needs the same platform and ERP as 0.18.1.
+
+- **Attributes on store items.** A child table `WebsiteItemAttribute` (`attribute`, `value`) on `WebsiteItem`, added by
+  the schema sync (nothing to run); at most 40 per item, the same pair twice refused. A variant's options count as
+  attributes of its item.
+- **Filter and facets.** `GET /catalog` takes `attr.<Attribute>=<Value>[,<Value>…]` (values of one attribute are
+  alternatives, attributes must all hold; at most 8 attributes of 10 values, 60 characters each) and answers
+  `facets`: each attribute with its values and how many cards each value would show added to the current choice (the
+  first page only). Listing pages show them as links, mark the chosen ones, keep the choice when sorting or paging,
+  say when nothing matches, and are not indexed while narrowed. Four storefront words (`facet.*`).
+
+Tests: `attributes_and_facets_end_to_end`, `catalog::tests::attr_filters_reads_names_values_and_limits`.
+
 ## 0.18.1
 
 Needs the same platform and ERP as 0.18.0. No database or interface change.

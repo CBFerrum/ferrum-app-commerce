@@ -7,7 +7,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-0.18.1-be185d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.19.2-be185d?style=flat-square)](CHANGELOG.md)
 [![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Ferrum platform](https://img.shields.io/badge/runs%20on-Ferrum-2f5bea?style=flat-square)](https://github.com/CBFerrum/Ferrum)
 ![Rust](https://img.shields.io/badge/Rust-server-b7410e?style=flat-square&logo=rust)
@@ -39,7 +39,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 
 | | |
 |---|---|
-| **Version** | 0.18.1 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
+| **Version** | 0.19.2 (packages: `commerce` 0.6.1, Store Subscriptions connector 0.1.0) |
 | **Kind** | Its own interface at `/commerce/` (today, orders desk, returns, money, stock alerts, variants, storefront words) plus a server-rendered storefront and Ferrum's standard lists and forms |
 | **What it adds** | 29 entities (14 records and 15 line tables), 5 roles, 5 reports, 16 message templates, 1 menu, 2 create shortcuts, 3 payment gateway plugins |
 | **Depends on** | Ferrum platform `>=0.4.0, <0.5`; ERP `>=0.31.0` (installing Commerce installs ERP) |
@@ -116,6 +116,7 @@ same engine that invoices, and a refund leaves credit notes and bank entries beh
 - **Website items.** The published face of an ERP item: slug, title, short and long description, images with alt text, categories, hand-picked related items, weight, a per-item order limit, SEO title and description, ranking, and rating average and count.
 - **Variants.** A size or a colour is an item of its own with its own price, stock, code and picture. **Generate Variants** takes option sets such as `{"Size": ["S","M"], "Colour": ["Red"]}`, makes the attributes and combinations in ERP's Stock Operations, and gives each a website item. The parent is listed once, "From" its cheapest variant; its page tells which combinations are sold out or not offered together.
 - **Reviews.** A shopper's review, written in the form on the product page or sent by the API (1 to 5 stars, title, text, name, email), is held as Pending until a manager approves it; verified purchase is set when that email bought the item; one review per email per item; reviewer emails are never shown.
+- **Attributes and facets.** A store item carries attributes (Material: Steel, Brand: Acme); its variants' options count as its attributes too. Listings, in the API (`attr.<name>=<value>`) and on the pages, filter by them, and say per value how many items a choice would show (plain links that work without scripts).
 - **Back-orders and pre-orders.** Per website item: Keep Selling When Out of Stock, up to a Most Owed at Once limit over all open orders, and a Ships From date. The product page says "order now, we ship when it is back" or "Pre-order: ships from …", the cart line, the order page and the confirmation say when it ships, and two checkouts at once never owe more than the limit.
 - **Back-in-stock alerts.** A shopper leaves an email on an out-of-stock item and is told once, when it is back.
 - **Import and export.** Website items, categories and coupons import and export as CSV.
@@ -300,7 +301,7 @@ Compared with Shopify, BigCommerce, WooCommerce, Adobe Commerce (Magento) and, a
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
 | Catalog with categories, images and SEO fields | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Variants with a generator and picker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Product attributes, filters and facets on listings | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Product attributes, filters and facets on listings | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Bundles and kits | 🟡 [1] | ✅ | 🟡 | 🟡 | ✅ | ✅ |
 | Digital goods and downloads | ❌ | 🟡 | ✅ | ✅ | ✅ | 🟡 |
 | Pre-orders and back-orders | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ |
@@ -360,7 +361,7 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 ### 🚧 Where the leaders are still ahead
 
 - **The storefront's look and reach:** themes, a page builder, content pages, menus, customer account pages, express wallets, saved cards, several languages and currencies, and several storefronts.
-- **Catalog depth:** attributes and facets, bundles, digital goods, product feeds, and a media pipeline.
+- **Catalog depth:** bundles, digital goods, product feeds, and a media pipeline.
 - **Logistics:** live carrier rates, labels, tracking sync and customs documents.
 - **Payments breadth:** many more providers, authorise-then-capture, chargebacks, fraud scoring and gateway-fee booking.
 - **Selling channels:** marketplaces, social shops, loyalty and B2B features.
@@ -372,6 +373,9 @@ Notes. 🟡 for a leader means an app or extension, a higher plan, or only part 
 
 ### ✅ Recently shipped
 
+- [x] **0.19.2**: The web order actions and Generate Variants say what they promise (contracts), for people and agents alike.
+- [x] **0.19.1**: Cart reminders, and the consent other apps act on, only for a signed-in shopper, at their own address.
+- [x] **0.19.0**: Attributes on store items; listings filter by them and say how many items each value has.
 - [x] **0.18.1**: No event carries a guest order's token or its link; the shopper's mails keep the link, sealed while they wait; tokens made before are refused.
 - [x] **0.18.0**: Back-orders and pre-orders per item: keep selling when out of stock, up to a limit, and a ships-from date told everywhere the shopper looks.
 - [x] **0.17.2**: Cancel My Order is the shopper's alone; Cancel, Update and Send Mail Again on a web order need write on the order.
@@ -534,7 +538,7 @@ tests/                     integration tests against a real PostgreSQL
 
 ## 📜 Changelog
 
-Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.18.1**.
+Every version is in [CHANGELOG.md](CHANGELOG.md). The latest is **0.19.2**.
 
 ## 🤝 Contributing
 

@@ -8,7 +8,7 @@ use crate::catalog::{self, Listing, Sort, Variant, default_variant, option_group
 use crate::store::Store;
 use ferrum_kernel::{Ctx, Error, Kernel, Result, SiteRequest, SiteResponse, Tx};
 use rust_decimal::Decimal;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
 
@@ -56,10 +56,10 @@ pub async fn handle(k: &Kernel, ctx: &Ctx, req: &SiteRequest) -> Result<SiteResp
     let site = Shop { origin, api, store: &store, cats: catalog::category_tree(&mut tx, ctx.tenant).await?, path: rest, lang, words };
     let query = |n: &str| req.query.get(n).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     let out = match segs.as_slice() {
-        [] => listing(k, ctx, &mut tx, &site, Lens::of(None, None, &query), query("cursor")).await?,
-        ["c", slug] => listing(k, ctx, &mut tx, &site, Lens::of(Some(slug), None, &query), query("cursor")).await?,
+        [] => listing(k, ctx, &mut tx, &site, Lens::of(None, None, &query, &req.query), query("cursor")).await?,
+        ["c", slug] => listing(k, ctx, &mut tx, &site, Lens::of(Some(slug), None, &query, &req.query), query("cursor")).await?,
         ["search"] => match query("q") {
-            Some(q) if q.chars().count() <= 100 => listing(k, ctx, &mut tx, &site, Lens::of(None, Some(q), &query), query("cursor")).await?,
+            Some(q) if q.chars().count() <= 100 => listing(k, ctx, &mut tx, &site, Lens::of(None, Some(q), &query, &req.query), query("cursor")).await?,
             Some(_) => site.page(400, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Search for at most 100 characters.</p>"),
             None => site.page(200, "Search", None, true, "<h1>Search</h1><p class=\"muted\">Type what you are looking for above.</p>"),
         },
@@ -232,11 +232,37 @@ struct Lens<'a> {
     q: Option<&'a str>,
     sort: Sort,
     in_stock: bool,
+    /// Chosen attribute values (`attr.Material=steel,wood`), lower case.
+    attrs: Vec<(String, Vec<String>)>,
 }
 
 impl<'a> Lens<'a> {
-    fn of(category: Option<&'a str>, q: Option<&'a str>, query: &dyn Fn(&str) -> Option<&'a str>) -> Lens<'a> {
-        Lens { category, q, sort: Sort::parse(query("sort")).unwrap_or(Sort::Ranking), in_stock: matches!(query("in_stock"), Some("1" | "true")) }
+    fn of(category: Option<&'a str>, q: Option<&'a str>, query: &dyn Fn(&str) -> Option<&'a str>, all: &Map<String, Value>) -> Lens<'a> {
+        Lens {
+            category,
+            q,
+            sort: Sort::parse(query("sort")).unwrap_or(Sort::Ranking),
+            in_stock: matches!(query("in_stock"), Some("1" | "true")),
+            // A broken filter on a page is dropped, as an unknown sort is.
+            attrs: catalog::attr_filters(all).unwrap_or_default(),
+        }
+    }
+
+    /// The same listing with `value` of `attribute` added to the choice, or taken out of it when chosen.
+    fn toggled(&self, attribute: &str, value: &str) -> Lens<'a> {
+        let (name, value) = (attribute.to_lowercase(), value.to_lowercase());
+        let mut attrs = self.attrs.clone();
+        match attrs.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, vs)) if vs.contains(&value) => vs.retain(|v| *v != value),
+            Some((_, vs)) => {
+                vs.push(value);
+                vs.sort();
+            }
+            None => attrs.push((name, vec![value])),
+        }
+        attrs.retain(|(_, vs)| !vs.is_empty());
+        attrs.sort();
+        Lens { attrs, ..*self }
     }
 
     /// The address's own query for the next page or the same page again: what is asked, then `more`.
@@ -250,6 +276,9 @@ impl<'a> Lens<'a> {
         }
         if self.in_stock {
             qs.push_str("in_stock=1&");
+        }
+        for (name, values) in &self.attrs {
+            qs.push_str(&format!("attr.{}={}&", enc(name), enc(&values.join(","))));
         }
         qs.push_str(more);
         qs.trim_end_matches('&').to_string()
@@ -270,7 +299,10 @@ fn refine_form(site: &Shop<'_>, lens: &Lens<'_>) -> String {
     .iter()
     .map(|(s, label)| format!(r#"<option value="{}"{}>{label}</option>"#, s.name(), if *s == lens.sort { " selected" } else { "" }))
     .collect();
-    let hidden = lens.q.map(|q| format!(r#"<input type="hidden" name="q" value="{}">"#, esc(q))).unwrap_or_default();
+    let mut hidden = lens.q.map(|q| format!(r#"<input type="hidden" name="q" value="{}">"#, esc(q))).unwrap_or_default();
+    for (name, values) in &lens.attrs {
+        hidden.push_str(&format!(r#"<input type="hidden" name="attr.{}" value="{}">"#, esc(name), esc(&values.join(","))));
+    }
     format!(
         r#"<form class="refine" action="{}" method="get" aria-label="Sort and filter">{hidden}<label>Sort by <select name="sort">{options}</select></label><label><input type="checkbox" name="in_stock" value="1"{}> In stock only</label><button class="quiet" type="submit">Apply</button></form>"#,
         esc(if site.path.is_empty() { "/" } else { site.path }),
@@ -278,15 +310,63 @@ fn refine_form(site: &Shop<'_>, lens: &Lens<'_>) -> String {
     )
 }
 
+/// What a listing can be narrowed by: per attribute, a link per value (that value added to the choice, or taken out
+/// when chosen), with how many cards it would show. Plain links: they work without scripts.
+fn facet_links(site: &Shop<'_>, lens: &Lens<'_>, facets: &[Value]) -> String {
+    if facets.is_empty() {
+        return String::new();
+    }
+    let here = esc(if site.path.is_empty() { "/" } else { site.path });
+    let groups: String = facets
+        .iter()
+        .map(|f| {
+            let attribute = f["attribute"].as_str().unwrap_or_default();
+            let links: String = f["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| {
+                    let value = v["value"].as_str().unwrap_or_default();
+                    let n = v["count"].as_i64().unwrap_or(0).to_string();
+                    let on = v["selected"].as_bool() == Some(true);
+                    format!(
+                        r#"<a class="chip{}" href="{here}?{}"{} aria-label="{}">{} <span class="n">{n}</span></a>"#,
+                        if on { " on" } else { "" },
+                        esc(&lens.toggled(attribute, value).query("")),
+                        if on { r#" aria-current="true""# } else { "" },
+                        esc(&site.w("facet.value_aria", &[("value", value), ("n", &n)])),
+                        esc(value)
+                    )
+                })
+                .collect();
+            format!(r#"<fieldset class="facet"><legend>{}</legend>{links}</fieldset>"#, esc(attribute))
+        })
+        .collect();
+    let clear = if lens.attrs.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<p><a href="{here}?{}">{}</a></p>"#, esc(&Lens { attrs: vec![], ..*lens }.query("")), esc(&site.w("facet.clear", &[])))
+    };
+    format!(r#"<div class="facets"><h2 class="visually-hidden">{}</h2>{groups}{clear}</div>"#, esc(&site.w("facet.title", &[])))
+}
+
 /// What a listing says when it has no cards, in words that tell the shopper what to do next.
-fn nothing(lens: &Lens<'_>, category: bool) -> String {
+fn nothing(site: &Shop<'_>, lens: &Lens<'_>, category: bool) -> String {
+    if !lens.attrs.is_empty() {
+        let here = if site.path.is_empty() { "/" } else { site.path };
+        let clear = format!(r#"<a href="{}?{}">{}</a>"#, esc(here), esc(&Lens { attrs: vec![], ..*lens }.query("")), esc(&site.w("facet.clear", &[])));
+        return format!(r#"<div class="nothing"><h2>{}</h2><p class="muted">{clear}</p></div>"#, esc(&site.w("facet.none", &[])));
+    }
     let (title, hint) = match (lens.q, lens.in_stock) {
         (Some(q), _) => {
             (format!("No results for “{}”", esc(q)), r#"Check the spelling, or try fewer or different words. <a href="/">Browse the store</a>."#.to_string())
         }
         (None, true) => (
             "Nothing in stock here".to_string(),
-            format!(r#"Everything here is sold out for now. <a href="{}">Show it all</a>."#, esc(&format!("?{}", Lens { in_stock: false, ..*lens }.query("")))),
+            format!(
+                r#"Everything here is sold out for now. <a href="{}">Show it all</a>."#,
+                esc(&format!("?{}", Lens { in_stock: false, attrs: vec![], ..*lens }.query("")))
+            ),
         ),
         (None, false) if category => ("No items in this category yet".to_string(), r#"<a href="/">Browse the rest of the store</a>."#.to_string()),
         (None, false) => ("This store has no items yet".to_string(), "Come back soon.".to_string()),
@@ -304,8 +384,15 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, lens: Lens
         None => None,
     };
     let q = lens.q;
-    let f =
-        Listing { category: lens.category.map(str::to_string), q: q.map(str::to_string), min_price: None, max_price: None, in_stock: lens.in_stock, ids: None };
+    let f = Listing {
+        category: lens.category.map(str::to_string),
+        q: q.map(str::to_string),
+        min_price: None,
+        max_price: None,
+        in_stock: lens.in_stock,
+        ids: None,
+        attrs: lens.attrs.clone(),
+    };
     let found = catalog::cards(k, ctx, tx, site.store, &f, lens.sort, PAGE, cursor, None).await;
     let (items, next) = match found {
         Ok(f) => f,
@@ -323,8 +410,15 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, lens: Lens
             )
         })
         .unwrap_or_default();
-    let refine = if items.is_empty() && !lens.in_stock && lens.q.is_none() { String::new() } else { refine_form(site, &lens) };
-    let grid = if items.is_empty() { nothing(&lens, cat.is_some()) } else { format!("{}{more}", site.cards(&items)) };
+    let facets = catalog::facets(k, ctx, tx, site.store, &f).await?;
+    let refine = if items.is_empty() && !lens.in_stock && lens.q.is_none() && lens.attrs.is_empty() {
+        String::new()
+    } else {
+        format!("{}{}", refine_form(site, &lens), facet_links(site, &lens, &facets))
+    };
+    let grid = if items.is_empty() { nothing(site, &lens, cat.is_some()) } else { format!("{}{more}", site.cards(&items)) };
+    // A listing narrowed by an attribute is not one to index.
+    let narrowed = !lens.attrs.is_empty();
     Ok(match (&cat, q) {
         (Some(c), _) => {
             let name = c["name"].as_str().unwrap_or_default();
@@ -348,7 +442,7 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, lens: Lens
                 200,
                 title,
                 Some(&meta),
-                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking,
+                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking || narrowed,
                 &format!(r#"{crumbs}<h1>{}</h1>{about}{subs}{refine}{grid}"#, esc(name)),
             )
         }
@@ -359,7 +453,7 @@ async fn listing(k: &Kernel, ctx: &Ctx, tx: &mut Tx, site: &Shop<'_>, lens: Lens
                 200,
                 "",
                 Some(&meta),
-                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking,
+                cursor.is_some() || lens.in_stock || lens.sort != Sort::Ranking || narrowed,
                 &format!(r#"<h1 class="visually-hidden">{}</h1>{refine}{grid}"#, esc(&site.store.name)),
             )
         }

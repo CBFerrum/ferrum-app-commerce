@@ -94,12 +94,16 @@ payment_methods: [{gateway, label, instructions, online}], max_qty_per_line, max
 **`GET /categories`** → `{categories: [{slug, name, image, description, seo: {title,
 description}, children: [...]}]}` — published categories (an unpublished one hides its branch).
 
-**`GET /catalog`** — query: `category` (slug; includes subcategories), `q` (title, short
+**`GET /catalog`** — query: `attr.<Attribute>=<Value>[,<Value>…]` (any of the values; every attribute named; a variant's options count; at most 8 attributes of 10 values), `category` (slug; includes subcategories), `q` (title, short
 description or item code; ≤ 100 chars), `min_price`, `max_price` (list price in the store
 currency, before tax and discounts), `in_stock=1`, `sort` (`ranking` (default: rank, then
 newest), `price_asc`, `price_desc`, `newest`, `name`, `rating`), `limit` (1–48, default 24),
 `cursor` (from `next_cursor`; valid for the same sort) →
-`{items: [Card], next_cursor, currency}`. Only published items of enabled items with a price.
+`{items: [Card], next_cursor, currency, facets}`. Only published items of enabled items with a price.
+`facets` (first page only, else `null`) = `[{attribute, values: [{value, count, selected}]}]`: each attribute of the
+listed items (their own, and their published variants' options), the most common first (at most 12 of at most 20
+values); `count` is how many cards the listing shows with that value added to the choice (the attribute's own choice
+left out, so the other values of a chosen attribute still count).
 
 `Card` = `{slug, title, short_description, image: {url, alt} | null, price: Price, from (true
 for an item with variants: the price is its cheapest variant's),

@@ -270,27 +270,31 @@ pub async fn carts(k: &Kernel, ctx: &Ctx, store: &Store) -> Result<(usize, usize
     // The shopper's consent to a reminder is recorded at checkout; a workspace from before has no such field.
     let consent =
         if ctx.schema.entity("ShoppingCart").is_some_and(|e| e.field("reminder_consent").is_some()) { "coalesce(c.reminder_consent, false)" } else { "false" };
-    let abandoned: Vec<(Uuid, Option<String>, Option<String>, Decimal, Decimal, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let abandoned: Vec<(Uuid, Option<String>, Option<String>, Option<String>, Decimal, Decimal, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "update e_shopping_cart c set status = 'Abandoned', version = version + 1, updated_at = now() \
          where c.tenant_id = $1 and c.id in (select id from e_shopping_cart where tenant_id = $1 and status = 'Open' and item_count > 0 \
            and last_activity < now() - make_interval(hours => $2) order by last_activity limit $3) \
-         returning c.id, c.email, c.contact_name, coalesce(c.item_count, 0), coalesce(c.rounded_total, 0), {consent}"
+         returning c.id, c.email, c.user_email, c.contact_name, coalesce(c.item_count, 0), coalesce(c.rounded_total, 0), {consent}"
     )))
     .bind(ctx.tenant)
     .bind(store.abandon_after_hours as i32)
     .bind(BATCH)
     .fetch_all(&mut *tx)
     .await?;
-    for (cart, email, name, items, total, may_remind) in abandoned.iter().filter(|a| a.1.is_some()) {
-        // `consent`: the shopper agreed at checkout to be reminded; other apps (a campaign) act on the event only with it.
+    for (cart, typed, account, name, items, total, consented) in abandoned.iter().filter(|a| a.1.is_some() || a.2.is_some()) {
+        // Mail sent later goes only to an address that proved itself: a signed-in shopper's own (`user_email`, set only
+        // from a sign-in). A visitor types any address, so their consent counts for nothing: no reminder, and the event
+        // says no consent, which other apps (a campaign) act on.
+        let may_remind = *consented && account.is_some();
+        let email = if may_remind { account.clone() } else { typed.clone().or_else(|| account.clone()) };
         let event = json!({"cart": cart, "email": email, "name": name, "item_count": items.normalize().to_string(), "grand_total": total.normalize().to_string(),
                            "currency": store.currency_code, "consent": may_remind});
         outbox::enqueue(&mut tx, ctx.tenant, "commerce.cart_abandoned", Some("ShoppingCart"), Some(*cart), event).await?;
-        if *may_remind {
+        if may_remind {
             let mut values = serde_json::Map::new();
             values.insert("store".into(), json!(store.name));
             values.insert("link".into(), json!(store.store_url.as_deref().map(|u| format!("{}/cart", u.trim_end_matches('/')))));
-            crate::tell::about(k, &mut tx, ctx, "commerce.cart_reminder", "ShoppingCart", *cart, email.as_deref(), values, vec![]).await?;
+            crate::tell::about(k, &mut tx, ctx, "commerce.cart_reminder", "ShoppingCart", *cart, account.as_deref(), values, vec![]).await?;
         }
     }
     let expired = sqlx::query(

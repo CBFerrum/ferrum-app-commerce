@@ -162,6 +162,21 @@ async fn sibling_options(tx: &mut Tx, tenant: Uuid, parent: Uuid, except: Option
 #[async_trait]
 impl DocHook for WebsiteItemHook {
     async fn before_validate(&self, hc: &mut HookCtx<'_>, doc: &mut Doc) -> Result<()> {
+        // Attributes are trimmed (the rows keep their ids).
+        if doc.get("attributes").is_some_and(Value::is_array) {
+            let trimmed: Vec<Value> = rows(doc, "attributes")
+                .into_iter()
+                .map(|mut r| {
+                    for f in ["attribute", "value"] {
+                        if let Some(v) = s(&r, f).map(|v| v.trim().to_string()) {
+                            set(&mut r, f, v);
+                        }
+                    }
+                    Value::Object(r)
+                })
+                .collect();
+            set(doc, "attributes", Value::Array(trimmed));
+        }
         // Options belong to variants only, and are tidied: blanks dropped, spaces trimmed (the rows keep their ids).
         let parent = id(doc, "variant_of");
         let tidy: Vec<Value> = if parent.is_none() {
@@ -207,6 +222,17 @@ impl DocHook for WebsiteItemHook {
     }
 
     async fn validate(&self, hc: &mut HookCtx<'_>, doc: &Doc) -> Result<()> {
+        let attrs = rows(doc, "attributes");
+        if attrs.len() > 40 {
+            return Err(Error::field("attributes", "at most 40 attributes"));
+        }
+        let mut seen = HashSet::new();
+        for r in &attrs {
+            let (a, v) = (s(r, "attribute").unwrap_or_default(), s(r, "value").unwrap_or_default());
+            if !seen.insert((a.to_lowercase(), v.to_lowercase())) {
+                return Err(Error::field("attributes", format!("{a}: {v} is listed twice")));
+            }
+        }
         if let Some(parent) = id(doc, "variant_of") {
             let me = id(doc, "id");
             if Some(parent) == me {
@@ -607,6 +633,46 @@ pub struct Listing {
     pub max_price: Option<Decimal>,
     pub in_stock: bool,
     pub ids: Option<Vec<Uuid>>,
+    /// Chosen attribute values (lower case): an item must hold one of each attribute's values, as its own attribute
+    /// or as an option of one of its published variants.
+    pub attrs: Vec<(String, Vec<String>)>,
+}
+
+/// The `attr.<Attribute>=<Value>[,<Value>…]` filters of a listing's query, lower case and sorted by name, so the same
+/// choice is always the same address: at most 8 attributes of at most 10 values, each name and value 1 to 60 characters.
+pub fn attr_filters(query: &Map<String, Value>) -> Result<Vec<(String, Vec<String>)>> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for (key, raw) in query {
+        let Some(name) = key.strip_prefix("attr.") else { continue };
+        let field = || format!("attr.{name}");
+        let name = name.trim().to_lowercase();
+        if name.is_empty() || name.chars().count() > 60 {
+            return Err(Error::field(field(), "name an attribute of 1 to 60 characters"));
+        }
+        let text = raw.as_str().ok_or_else(|| Error::field(field(), "must be text"))?;
+        let mut values: Vec<String> = text.split(',').map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()).collect();
+        values.sort();
+        values.dedup();
+        if values.is_empty() {
+            continue;
+        }
+        if values.len() > 10 || values.iter().any(|v| v.chars().count() > 60) {
+            return Err(Error::field(field(), "at most 10 values of at most 60 characters each"));
+        }
+        match out.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, vs)) => {
+                vs.extend(values);
+                vs.sort();
+                vs.dedup();
+            }
+            None => out.push((name, values)),
+        }
+    }
+    if out.len() > 8 {
+        return Err(Error::field("attr", "filter by at most 8 attributes"));
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[derive(sqlx::FromRow)]
@@ -649,35 +715,12 @@ async fn to_company_rate(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store) -> R
     ferrum_domain::util::exchange_rate(k, ctx, tx, store.currency, co.currency_id, ctx.today()).await
 }
 
-/// One page of website item cards. Returns the cards and the cursor of the next page.
-#[allow(clippy::too_many_arguments)]
-pub async fn cards(
-    k: &Kernel,
-    ctx: &Ctx,
-    tx: &mut Tx,
-    store: &Store,
-    f: &Listing,
-    sort: Sort,
-    limit: i64,
-    cursor: Option<&str>,
-    customer: Option<Uuid>,
-) -> Result<(Vec<Value>, Option<String>)> {
+/// The CTEs of a listing, `listed` last: the published store items with their price and stock, narrowed by the
+/// category, the words, the price range and "in stock only" (everything but the attributes).
+fn push_listed(qb: &mut QueryBuilder<Postgres>, ctx: &Ctx, store: &Store, f: &Listing, cats: Option<Vec<Uuid>>, rate: Decimal) {
     let tenant = ctx.tenant;
-    let cats = match &f.category {
-        Some(slug) => Some(category_ids(tx, tenant, slug).await?.ok_or_else(|| Error::NotFound("category".into()))?),
-        None => None,
-    };
-    let rate = if f.min_price.is_some() || f.max_price.is_some() { to_company_rate(k, ctx, tx, store).await? } else { Decimal::ONE };
-    let (key, key_type, desc) = sort.key();
-    let after = match cursor {
-        Some(c) => match decode_cursor(c)?.as_slice() {
-            [s, v, i] if s == sort.name() => Some((v.clone(), Uuid::parse_str(i).map_err(|_| Error::invalid("invalid cursor"))?)),
-            _ => return Err(Error::invalid("invalid cursor (or one made for another sort)")),
-        },
-        None => None,
-    };
     let today = ctx.today();
-    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("with onhand as (select item_id as item, sum(qty) as qty from stock_balance where tenant_id = ");
+    qb.push("with onhand as (select item_id as item, sum(qty) as qty from stock_balance where tenant_id = ");
     qb.push_bind(tenant).push(" and warehouse_id = any(").push_bind(store.warehouses.clone()).push(") group by item_id), ");
     qb.push("reserved as (select si.item, sum(greatest(si.qty - coalesce(si.delivered_qty, 0), 0)) as qty from e_sales_order so ");
     qb.push("join e_sales_order__items si on si.tenant_id = so.tenant_id and si.parent_id = so.id where so.tenant_id = ").push_bind(tenant);
@@ -725,9 +768,8 @@ pub async fn cards(
             .push_bind(pat)
             .push("))))");
     }
-    qb.push(format!(
-        ") select id, slug, title, short_description, is_stock, available, rating, reviews, price_item, in_stock, variants, backorder, ({key})::text as sort_key from base where price > 0"
-    ));
+    // What the listing holds before any attribute is chosen: the cards and the facets read the same set.
+    qb.push("), listed as (select * from base where price > 0");
     if let Some(min) = f.min_price {
         qb.push(" and price >= ").push_bind(min * rate);
     }
@@ -737,6 +779,61 @@ pub async fn cards(
     if f.in_stock {
         qb.push(" and in_stock");
     }
+    qb.push(")");
+}
+
+/// One condition per chosen attribute on a listed row `l`: the item holds one of the values, as its own attribute or
+/// as an option of a published variant (a workspace not yet updated has only the variants' options).
+fn push_attrs(qb: &mut QueryBuilder<Postgres>, ctx: &Ctx, attrs: &[(String, Vec<String>)]) {
+    let own = ctx.schema.entity("WebsiteItemAttribute").is_some();
+    for (name, values) in attrs {
+        qb.push(" and (");
+        if own {
+            qb.push("exists (select 1 from e_website_item__attributes a where a.tenant_id = ").push_bind(ctx.tenant);
+            qb.push(" and a.parent_id = l.id and lower(a.\"attribute\") = ").push_bind(name.clone());
+            qb.push(" and lower(a.\"value\") = any(").push_bind(values.clone()).push(")) or ");
+        }
+        qb.push(
+            "exists (select 1 from e_website_item v join e_website_item__options o on o.tenant_id = v.tenant_id and o.parent_id = v.id where v.tenant_id = ",
+        );
+        qb.push_bind(ctx.tenant).push(" and v.variant_of = l.id and v.published and lower(o.\"option\") = ").push_bind(name.clone());
+        qb.push(" and lower(o.\"value\") = any(").push_bind(values.clone()).push(")))");
+    }
+}
+
+/// One page of website item cards. Returns the cards and the cursor of the next page.
+#[allow(clippy::too_many_arguments)]
+pub async fn cards(
+    k: &Kernel,
+    ctx: &Ctx,
+    tx: &mut Tx,
+    store: &Store,
+    f: &Listing,
+    sort: Sort,
+    limit: i64,
+    cursor: Option<&str>,
+    customer: Option<Uuid>,
+) -> Result<(Vec<Value>, Option<String>)> {
+    let tenant = ctx.tenant;
+    let cats = match &f.category {
+        Some(slug) => Some(category_ids(tx, tenant, slug).await?.ok_or_else(|| Error::NotFound("category".into()))?),
+        None => None,
+    };
+    let rate = if f.min_price.is_some() || f.max_price.is_some() { to_company_rate(k, ctx, tx, store).await? } else { Decimal::ONE };
+    let (key, key_type, desc) = sort.key();
+    let after = match cursor {
+        Some(c) => match decode_cursor(c)?.as_slice() {
+            [s, v, i] if s == sort.name() => Some((v.clone(), Uuid::parse_str(i).map_err(|_| Error::invalid("invalid cursor"))?)),
+            _ => return Err(Error::invalid("invalid cursor (or one made for another sort)")),
+        },
+        None => None,
+    };
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("");
+    push_listed(&mut qb, ctx, store, f, cats, rate);
+    qb.push(format!(
+        " select id, slug, title, short_description, is_stock, available, rating, reviews, price_item, in_stock, variants, backorder, ({key})::text as sort_key from listed l where true"
+    ));
+    push_attrs(&mut qb, ctx, &f.attrs);
     if let Some((v, after_id)) = &after {
         qb.push(format!(" and ({key}, id) {} (", if desc { "<" } else { ">" }))
             .push_bind(v.clone())
@@ -753,6 +850,60 @@ pub async fn cards(
         if more { found.last().map(|r| encode_cursor(&[sort.name().to_string(), r.sort_key.clone().unwrap_or_default(), r.id.to_string()])) } else { None };
     let out = render(k, ctx, tx, store, &found, customer).await?;
     Ok((out, next))
+}
+
+/// What a listing can be narrowed by: each attribute of its items (their own, and their published variants' options)
+/// with its values and, for each, how many cards the listing would show with that value added to the current choice
+/// (an attribute's own choice left out, so the other values of a chosen attribute still count). The attributes with
+/// the most items first, at most 12, each with at most 20 values, the most common first.
+pub async fn facets(k: &Kernel, ctx: &Ctx, tx: &mut Tx, store: &Store, f: &Listing) -> Result<Vec<Value>> {
+    let cats = match &f.category {
+        Some(slug) => Some(category_ids(tx, ctx.tenant, slug).await?.ok_or_else(|| Error::NotFound("category".into()))?),
+        None => None,
+    };
+    let rate = if f.min_price.is_some() || f.max_price.is_some() { to_company_rate(k, ctx, tx, store).await? } else { Decimal::ONE };
+    let names: Vec<String> = f.attrs.iter().map(|(n, _)| n.clone()).collect();
+    let (pair_names, pair_values): (Vec<String>, Vec<String>) = f.attrs.iter().flat_map(|(n, vs)| vs.iter().map(move |v| (n.clone(), v.clone()))).unzip();
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("");
+    push_listed(&mut qb, ctx, store, f, cats, rate);
+    qb.push(", av as (");
+    if ctx.schema.entity("WebsiteItemAttribute").is_some() {
+        qb.push("select l.id as item, lower(a.\"attribute\") as lname, lower(a.\"value\") as lvalue, a.\"attribute\" as name, a.\"value\" as value ");
+        qb.push("from listed l join e_website_item__attributes a on a.tenant_id = ").push_bind(ctx.tenant).push(" and a.parent_id = l.id union ");
+    }
+    qb.push("select l.id, lower(o.\"option\"), lower(o.\"value\"), o.\"option\", o.\"value\" from listed l join e_website_item v on v.tenant_id = ");
+    qb.push_bind(ctx.tenant)
+        .push(" and v.variant_of = l.id and v.published join e_website_item__options o on o.tenant_id = v.tenant_id and o.parent_id = v.id), ");
+    qb.push("chosen as (select * from unnest(").push_bind(pair_names).push("::text[], ").push_bind(pair_values).push("::text[]) as c(name, value)), ");
+    qb.push(
+        "sat as (select av.item, array_agg(distinct av.lname) as names from av join chosen c on c.name = av.lname and c.value = av.lvalue group by av.item), ",
+    );
+    // An item counts for a value when it satisfies every chosen attribute but that value's own.
+    qb.push("kept as (select av.* from av left join sat on sat.item = av.item where array_remove(")
+        .push_bind(names)
+        .push("::text[], av.lname) <@ coalesce(sat.names, '{}')), ");
+    qb.push("per_attr as (select lname, count(distinct item) as items, min(name) as name from kept group by lname) ");
+    qb.push("select k.lname, k.lvalue, p.name, min(k.value) as value, count(distinct k.item) as n, p.items, ");
+    qb.push("exists (select 1 from chosen c where c.name = k.lname and c.value = k.lvalue) as selected ");
+    qb.push("from kept k join per_attr p on p.lname = k.lname group by k.lname, k.lvalue, p.name, p.items");
+    let rows: Vec<(String, String, String, String, i64, i64, bool)> = qb.build_query_as().fetch_all(&mut **tx).await?;
+    let mut attrs: Vec<(String, String, i64, Vec<(String, i64, bool)>)> = Vec::new();
+    for (lname, _, name, value, n, items, selected) in rows {
+        match attrs.iter_mut().find(|a| a.0 == lname) {
+            Some(a) => a.3.push((value, n, selected)),
+            None => attrs.push((lname, name, items, vec![(value, n, selected)])),
+        }
+    }
+    attrs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    attrs.truncate(12);
+    Ok(attrs
+        .into_iter()
+        .map(|(_, name, _, mut values)| {
+            values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            values.truncate(20);
+            json!({"attribute": name, "values": values.into_iter().map(|(value, count, selected)| json!({"value": value, "count": count, "selected": selected})).collect::<Vec<_>>()})
+        })
+        .collect())
 }
 
 async fn first_images(tx: &mut Tx, tenant: Uuid, ids: &[Uuid]) -> Result<HashMap<Uuid, Value>> {
@@ -1207,6 +1358,21 @@ async fn stock_alert(hc: &mut HookCtx<'_>, wi: &Doc, params: &Value) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attr_filters_reads_names_values_and_limits() {
+        let q = |v: Value| attr_filters(v.as_object().unwrap());
+        assert_eq!(
+            q(json!({"attr.Material": " Steel, wood ,", "attr.Brand": "ACME", "sort": "price_asc"})).unwrap(),
+            vec![("brand".to_string(), vec!["acme".to_string()]), ("material".to_string(), vec!["steel".to_string(), "wood".to_string()])]
+        );
+        assert!(q(json!({"attr.Material": ""})).unwrap().is_empty(), "nothing chosen");
+        let nine: Map<String, Value> = (0..9).map(|i| (format!("attr.a{i}"), json!("x"))).collect();
+        assert!(attr_filters(&nine).is_err(), "at most 8 attributes");
+        assert!(q(json!({"attr.Size": (0..11).map(|i| i.to_string()).collect::<Vec<_>>().join(",")})).is_err(), "at most 10 values");
+        assert!(q(json!({"attr.Size": "x".repeat(61)})).is_err(), "at most 60 characters");
+        assert!(q(json!({format!("attr.{}", "n".repeat(61)): "x"})).is_err());
+    }
 
     #[test]
     fn orderable_counts_what_is_already_owed() {
